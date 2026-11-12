@@ -1,0 +1,40 @@
+{
+  "name": "agents-mcp",
+  "version": "0.0.0",
+  "description": "One .agents/mcp.json to rule them all. A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across any AI agent.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "mcp-config",
+    "ai-agents",
+    "coding-agents",
+    "agents",
+    "claude-code",
+    "cursor",
+    "vscode",
+    "opencode",
+    "windsurf",
+    "zed",
+    "cli",
+    "config-sync",
+    "jsonc",
+    "dotenv",
+    "devtools"
+  ],
+  "homepage": "https://github.com/agents-mcp/cli#readme",
+  "bugs": {
+    "url": "https://github.com/agents-mcp/cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agents-mcp/cli.git"
+  },
+  "license": "MIT",
+  "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo 'not implemented'"
+  }
+}

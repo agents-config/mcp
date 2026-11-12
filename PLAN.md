@@ -246,7 +246,7 @@ export interface AgentAdapter {
 
 1.  **JSONC & Non-Destructive Preservation:** Every `applyServers` implementation MUST use `modify()` and `applyEdits()` from `jsonc-parser` with formatting options `{ tabSize: 2, insertSpaces: true }` instead of `JSON.stringify()` over the whole file. This prevents destroying user comments and unrelated settings in `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`, and especially global `~/.claude.json` (which stores general Claude Code state such as projects, history, and flags alongside `mcpServers`). For `vscode` global scope, resolve the OS-specific User Profile path (`~/.config/Code/User/mcp.json` on Linux, `~/Library/Application Support/Code/User/mcp.json` on macOS, `%APPDATA%\Code\User\mcp.json` on Windows).
     
-2.  **State Tracking for Removals:** Store a lightweight local state file `.agents/.sync-state.json` (gitignored) listing which server names were last synced to each adapter. When a server is removed from `.agents/mcp.json` (or `disabled: true` is set for an agent that lacks native disable support), `sync` uses `.sync-state.json` to cleanly delete only managed entries without touching unmanaged manual entries in the user's native agent config.
+2.  **State Tracking for Removals:** Store a lightweight local state file `.agents/.mcp-sync-state.json` (gitignored) listing which server names were last synced to each adapter. When a server is removed from `.agents/mcp.json` (or `disabled: true` is set for an agent that lacks native disable support), `sync` uses `.mcp-sync-state.json` to cleanly delete only managed entries without touching unmanaged manual entries in the user's native agent config.
 
 3.  **Fallbacks (`${VAR:-default}`) & `cwd` Translation:** Preserve `${VAR:-default}` natively for agents that support it (`claude-code`); for agents without native fallback syntax (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`), discard the `:-default` suffix during translation and emit a warning. Similarly, pass `cwd` through when supported by the target agent, or omit it with a warning when unsupported.
     
@@ -283,7 +283,7 @@ All commands accept global flags:
 1.  Checks if `.agents/mcp.json` already exists. If so, warns and exits unless `--force` is passed.
 2.  Creates `.agents/mcp.json` with `$schema` and `"servers": {}`.
 3.  Runs agent auto-detection across the workspace and machine; prompts user via `@clack/prompts` multiselect to confirm active agents.
-4.  Prompts user: _"Add generated agent config files (e.g., .mcp.json, .cursor/mcp.json) to .gitignore so only .agents/mcp.json is tracked?"_ (Default: `Yes`). Appends a managed `# agents-mcp generated` block to `.gitignore` and adds `.agents/.sync-state.json`.
+4.  Prompts user: _"Add generated agent config files (e.g., .mcp.json, .cursor/mcp.json) to .gitignore so only .agents/mcp.json is tracked?"_ (Default: `Yes`). Appends a managed `# agents-mcp generated` block to `.gitignore` and adds `.agents/.mcp-sync-state.json`.
 
 ### 7.2 `agents-mcp import`
 
@@ -317,9 +317,9 @@ All commands accept global flags:
 ### 7.4 `agents-mcp sync`
 
 1.  Reads and validates `.agents/mcp.json` against `CanonicalMcpConfigSchema`.
-2.  Determines target agents (`--agents` flag $\rightarrow$ previously synced agents in `.sync-state.json` $\rightarrow$ auto-detected agents).
+2.  Determines target agents (`--agents` flag $\rightarrow$ previously synced agents in `.mcp-sync-state.json` $\rightarrow$ auto-detected agents).
 3.  Compiles servers for each target agent via `adapter.applyServers()`, filtering by `server.targets` and handling `server.disabled`.
-4.  Updates `.agents/.sync-state.json` and prints a concise summary table of synced files.
+4.  Updates `.agents/.mcp-sync-state.json` and prints a concise summary table of synced files.
 
 ### 7.5 `agents-mcp remove <name>`
 
