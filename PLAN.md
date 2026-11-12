@@ -8,10 +8,10 @@
 ## 1. Vision & Architectural Philosophy
 
 ### 1.1 The Problem
-Developers working across multiple AI coding tools (Claude Code, Cursor, VS Code Copilot, OpenCode, Windsurf, Zed) must maintain duplicated MCP server configurations across incompatible file locations and JSON/TOML schemas. Existing tools either configure a single agent or perform destructive fan-out writes without maintaining a canonical source of truth in Git.
+Developers working across multiple AI coding tools (Claude Code, Cursor, VS Code Copilot, OpenCode, Windsurf, Zed) must maintain duplicated MCP server configurations across incompatible file locations and JSON/TOML schemas. While all major coding agents have already standardized on the `.agents/` directory for Agent Skills (`.agents/skills`), MCP configuration has lacked an equivalent canonical standard. Existing tools either configure a single agent or perform destructive fan-out writes without maintaining a canonical source of truth in Git.
 
 ### 1.2 The Solution (Hexagonal / Ports & Adapters Architecture)
-1. **Core (Single Source of Truth):** A strict, opinionated canonical file at `.agents/mcp.json` (project scope) and `~/.agents/mcp.json` (global user scope). No legacy schemas (`mcpServers`) are allowed inside `.agents/mcp.json`.
+1. **Core (Single Source of Truth):** A strict, opinionated canonical file at `.agents/mcp.json` (project scope) and `~/.agents/mcp.json` (global user scope). Co-locating MCP configuration inside the established `.agents/` convention—right alongside `.agents/skills`—eliminates root-directory clutter and aligns with how modern agents already discover shared capabilities. No legacy schemas (`mcpServers`) are allowed inside `.agents/mcp.json`.
 2. **Input Edges (`sources/` & `import`):** Stateless resolvers that ingest MCP definitions from existing legacy agent configs (`import`), official MCP `server.json` manifests, GitHub repositories, npm/PyPI packages, or direct CLI flags (`add`).
 3. **Output Edges (`adapters/`):** Non-destructive compilers that project `.agents/mcp.json` into each target agent's native configuration file, translating schemas, environment variable syntax, and transport types while preserving unrelated settings and JSONC comments.
 

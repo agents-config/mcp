@@ -1,0 +1,65 @@
+{
+  "version": 2,
+  "skills": {
+    "code-review": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review/SKILL.md",
+      "computedHash": "dd466725e8fc6f851d9d99c34c4a886f4998d7cf81067ca1fc2eb558369d5f6e"
+    },
+    "code-simplification": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-simplification/SKILL.md",
+      "computedHash": "f205fcbebc44ce27c87923d98ac8d1047cde03a279a3841b0152e72e541121f7"
+    },
+    "codebase-indexing": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/codebase-indexing/SKILL.md",
+      "computedHash": "3489cef9175a9f9ddf162110c85883c156196c35feb5a418702f0d8edc7fa42c"
+    },
+    "decision-records": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/decision-records/SKILL.md",
+      "computedHash": "b5444c33f3bdabe39439915ede3f79eab44da1ef3528a10660c8d2fa143c0f54"
+    },
+    "environment-preflight": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/environment-preflight/SKILL.md",
+      "computedHash": "a114e3cbdeccbc22a8d60318713c85b83d29edde173af0c644550182e3f2130f"
+    },
+    "incremental-implementation": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/incremental-implementation/SKILL.md",
+      "computedHash": "85172018933c4e2b161e71063b60c7793f5c648220c2375098c27f75518dec30"
+    },
+    "planning-and-task-breakdown": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/planning-and-task-breakdown/SKILL.md",
+      "computedHash": "ffb62667cc06cbede985c3569c53d015cc4ca579e3db7f98f0eb579f54f75d8d"
+    },
+    "spec-driven-workflow": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/spec-driven-workflow/SKILL.md",
+      "computedHash": "f07c7dbbd9f8fe2af01b7d0862c3500b4e35bca706c016af4d7522c0fa5cfd18"
+    },
+    "systematic-debugging": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/systematic-debugging/SKILL.md",
+      "computedHash": "1b9d917589d51319271f41c66ef10a290c3e478bdd07c9513942eeaa1a14464d"
+    },
+    "verification-and-testing": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/verification-and-testing/SKILL.md",
+      "computedHash": "3ab04c649d7f79852cf8e5ca0b2bba7403340de41414ba68bacccd591128b8e3"
+    }
+  }
+}

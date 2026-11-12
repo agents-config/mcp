@@ -14,7 +14,7 @@ A tool-agnostic specification and CLI compiler for managing Model Context Protoc
 
 Modern software engineering is no longer tied to a single AI coding assistant. You might use **Claude Code** or **OpenCode** in the terminal, **Cursor** or **VS Code** in the editor, and **Zed** for quick edits—all inside the same repository.
 
-While instructions and reusable workflows have started converging around `.agents/skills` and `AGENTS.md`, **MCP configuration remains completely fragmented**:
+The AI coding ecosystem has already reached broad consensus on **where** shared agent capabilities belong: all major coding agents have standardized on the `.agents/` directory (such as `.agents/skills`) and `AGENTS.md` for portable skills and instructions. Yet **MCP server configuration remains fragmented across incompatible, tool-specific files**:
 
 - **Claude Code** expects `.mcp.json` with `"mcpServers"` and `${VAR}`
 - **Cursor** expects `.cursor/mcp.json` with `"mcpServers"` and `${env:VAR}`
@@ -24,7 +24,9 @@ While instructions and reusable workflows have started converging around `.agent
 
 Every time you add an MCP server or rotate a token, you end up copy-pasting JSON across four different files, translating environment variable syntaxes by hand, and risking accidental secret leaks in Git.
 
-**`agents-mcp` fixes this at the root.**
+Because the `.agents/` namespace is already the de facto industry standard for agent skills, extending that same convention to `.agents/mcp.json` is the most logical and cohesive step forward—keeping all shared agent context, skills, and tool integrations unified under a single, predictable directory without introducing another root-level dotfile.
+
+**`agents-mcp` turns that convention into reality.**
 
 ---
 
@@ -151,7 +153,7 @@ The `.agents/mcp.json` format is an open, public-domain specification ([CC0 1.0]
 
 **Are you an AI agent or editor maintainer?**
 
-You don't need to depend on this CLI to support `.agents/mcp.json`. Check the [Implementer Guidelines](./spec/SPEC.md#8-implementer-guidelines-for-agent-maintainers) to add native fallback loading in under 50 lines of code.
+You don't need to depend on this CLI to support `.agents/mcp.json`. If your tool already reads `.agents/skills`, adding native fallback support for `.agents/mcp.json` is a natural extension—check the [Implementer Guidelines](./spec/SPEC.md#8-implementer-guidelines-for-agent-maintainers) to implement it in under 50 lines of code.
 
 ## Contributing & License
 
