@@ -106,7 +106,7 @@ agents-mcp/
 
 ```json
 {
-  "$schema": "https://[agents-mcp site url]/schema/v0.1.0/mcp.schema.json",
+  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
   "servers": {
     "github": {
       "transport": "stdio",
@@ -139,7 +139,13 @@ agents-mcp/
 ```typescript
 import { z } from 'zod';
 
-export const DEFAULT_SCHEMA_URL = 'https://[agents-mcp site url]/schema/v0.1.0/mcp.schema.json';
+// $ - alias configurado no tsconfig.json para a raiz do projeto
+// Fazer assert json caso necessário para os padrões de tipagem
+import pkg from '$/src/package.json'
+
+export const SPEC_VERSION = pkg.version; // - O build deve ser executado antes da publicação.
+export const SITE_URL = process.env.AGENTS_MCP_SITE_URL.replace(/\/+$/, '');
+export const DEFAULT_SCHEMA_URL = `${SITE_URL}/schema/${SPEC_VERSION}/mcp.schema.json`;
 
 export const AgentIdSchema = z.enum([
   'claude-code',
@@ -238,9 +244,11 @@ export interface AgentAdapter {
 
 ### 5.3 Critical Adapter Implementation Details
 
-1.  **JSONC Preservation:** Every `applyServers` implementation MUST use `modify()` and `applyEdits()` from `jsonc-parser` with formatting options `{ tabSize: 2, insertSpaces: true }` instead of `JSON.stringify()` over the whole file. This prevents destroying user comments in `.vscode/mcp.json`, `opencode.json`, and `.zed/settings.json`.
+1.  **JSONC & Non-Destructive Preservation:** Every `applyServers` implementation MUST use `modify()` and `applyEdits()` from `jsonc-parser` with formatting options `{ tabSize: 2, insertSpaces: true }` instead of `JSON.stringify()` over the whole file. This prevents destroying user comments and unrelated settings in `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`, and especially global `~/.claude.json` (which stores general Claude Code state such as projects, history, and flags alongside `mcpServers`). For `vscode` global scope, resolve the OS-specific User Profile path (`~/.config/Code/User/mcp.json` on Linux, `~/Library/Application Support/Code/User/mcp.json` on macOS, `%APPDATA%\Code\User\mcp.json` on Windows).
     
 2.  **State Tracking for Removals:** Store a lightweight local state file `.agents/.sync-state.json` (gitignored) listing which server names were last synced to each adapter. When a server is removed from `.agents/mcp.json` (or `disabled: true` is set for an agent that lacks native disable support), `sync` uses `.sync-state.json` to cleanly delete only managed entries without touching unmanaged manual entries in the user's native agent config.
+
+3.  **Fallbacks (`${VAR:-default}`) & `cwd` Translation:** Preserve `${VAR:-default}` natively for agents that support it (`claude-code`); for agents without native fallback syntax (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`), discard the `:-default` suffix during translation and emit a warning. Similarly, pass `cwd` through when supported by the target agent, or omit it with a warning when unsupported.
     
 
 ## 6. Source Resolvers (`src/sources/`)
@@ -281,14 +289,14 @@ All commands accept global flags:
 
 **Critical onboarding command for existing repositories.**
 
-1.  Scans all supported agent config paths in the current scope (`claude-code`, `cursor`, `vscode`, `opencode`, `windsurf`, `zed`) plus `.agents/mcp-settings.json` if present.
+1.  Scans all supported agent config paths in the current scope (`claude-code`, `cursor`, `vscode`, `opencode`, `windsurf`, `zed`).
 2.  Calls `extractServers()` on each discovered file.
     
 3.  Deduplicates servers by name:
     -   If identical definitions exist across files, merges silently.
     -   If conflicting definitions exist for the same server name, prompts user to pick which version to keep (or picks first with warning under `--yes`).
         
-4.  **Secret Hygiene:** Scans `env` values and `headers` for literal secrets (strings not already wrapped in `${...}`). Prompts to extract them into `.env` (gitignored) + `.env.example` (empty keys) and replaces values in `.agents/mcp.json` with `${VAR_NAME}`.
+4.  **Secret Hygiene:** Scans `env` values, `headers`, and sensitive arguments/URL query parameters for literal secrets (strings not already wrapped in `${...}`). Prompts to extract them into `.env` (gitignored) + `.env.example` (empty keys) and replaces values in `.agents/mcp.json` with `${VAR_NAME}`.
     
 5.  Writes `.agents/mcp.json`.
     
@@ -298,11 +306,12 @@ All commands accept global flags:
 
 1.  Resolves `<source>` via `src/sources/` into `ResolvedServerPackage`.
 2.  Prompts for server alias (defaulting to `suggestedName`, overridable via `--name <alias>`).
-3.  For each `requiredEnvVars` entry:
-    -   Checks if already present in `.env` or `process.env`.
-    -   Prompts user for value (masked input if `isSecret`), writes actual value to `.env`, appends `KEY=` to `.env.example`, and stores `"${KEY}"` in `.agents/mcp.json`.
-4.  Optionally prompts for `targets` (default: all agents).
-5.  Writes server entry to `.agents/mcp.json` and automatically invokes `sync`.
+3.  For `stdio` servers, prompts for the working directory (`cwd`), defaulting to the project root (omitting `cwd` when left as the default). In direct/non-interactive mode (`--yes` or direct CLI flags), defaults to the project root unless `--cwd <dir>` is explicitly passed.
+4.  For each `requiredEnvVars` entry:
+    -   Checks 2 levels: 1) local `.env` file, 2) host system environment (`process.env`).
+    -   If not found (or when adding interactively), notifies the user and prompts for the value (masked input if `isSecret`), writes the actual value to `.env`, appends `KEY=` to `.env.example`, and stores `"${KEY}"` in `.agents/mcp.json`.
+5.  Optionally prompts for `targets` (default: all agents).
+6.  Writes server entry to `.agents/mcp.json` and automatically invokes `sync`.
     
 
 ### 7.4 `agents-mcp sync`
@@ -334,10 +343,11 @@ Runs diagnostic checks and exits with code `1` if errors are found:
 ## 8. Secret & Environment Management (`src/core/env.ts`)
 
 1.  **Placeholder Regex:** `/\$\{([A-Z0-9_]+)(?::-([^}]*))?\}/g`
-2.  **Secret Detection Heuristic (during `import`):**
-    -   Any `env` value or `Authorization`/`x-api-key` header value that does **not** match `/^\$\{.+\}$/` and is non-empty is flagged as a potential hardcoded secret.
+2.  **2-Level Variable Resolution:** Resolve `${VAR_NAME}` in 2 levels: (1) local `.env` file, then (2) host system environment variables (`process.env`). If a referenced variable without a `:-default` fallback is not found in either level, notify/warn the user.
+3.  **Secret Detection Heuristic (during `import`):**
+    -   Any `env` value, `Authorization`/`x-api-key` header value, or sensitive token/connection string in `args` / `url` that does **not** match `/^\$\{.+\}$/` and is non-empty is flagged as a potential hardcoded secret.
     -   Automatically derives a clean uppercase variable name (e.g., server `github` + key `GITHUB_PERSONAL_ACCESS_TOKEN` $\rightarrow$ `${GITHUB_PERSONAL_ACCESS_TOKEN}`).
-3.  **`.env` & `.env.example` Sync:**
+4.  **`.env` & `.env.example` Sync:**
     -   Never overwrites existing keys in `.env`.
     -   Ensures `.env` is listed in `.gitignore` before writing any secret to disk.
     -   Appends missing keys to `.env.example` as `KEY=` so teammates know which environment variables are required after cloning.

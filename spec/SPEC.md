@@ -1,7 +1,7 @@
 # Unified Agents MCP Configuration Specification (`v0.1.0`)
 
 **Status:** Draft Specification  
-**Schema URI:** `https://[agents-mcp site url]/schema/v0.1.0/mcp.schema.json`  
+**Schema URI:** `https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json`  
 **License:** CC0 1.0 Universal (Public Domain)
 
 ---
@@ -92,7 +92,9 @@ Conformant parsers and compilers MUST support POSIX-style variable interpolation
   Resolves to `VAR_NAME` if set and non-empty; otherwise evaluates to `default_value`.
 
 ### 5.2 Compilation to Target Agents
-When projecting `.agents/mcp.json` into native agent files that use proprietary interpolation syntax, compilers MUST translate `${VAR_NAME}` into the target agent's native format (see `MATRIX.md`).
+When projecting `.agents/mcp.json` into native agent files that use proprietary interpolation syntax, compilers MUST translate `${VAR_NAME}` into the target agent's native format (see [`MATRIX.md`](./MATRIX.md)):
+- **Agents with native fallback support** (e.g., `claude-code`): preserve `${VAR_NAME:-default_value}` as-is.
+- **Agents without native fallback syntax** (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`): discard the `:-default_value` suffix when translating to `${env:VAR_NAME}`, `{env:VAR_NAME}`, or `${VAR_NAME}` and emit a warning so the user knows the fallback was dropped.
 
 ---
 
@@ -113,7 +115,7 @@ To ensure interoperability across `targets` arrays and compiler adapters, the sp
 
 ```json
 {
-  "$schema": "https://[agents-mcp site url]/schema/v0.1.0/mcp.schema.json",
+  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
   "servers": {
     "github": {
       "transport": "stdio",

@@ -13,7 +13,11 @@ This document defines the exact deterministic mapping between the canonical `.ag
 | **`vscode`** | `.vscode/mcp.json` | OS User Profile `mcp.json` | `servers` | `{ "type": "stdio", "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "type": "http"\|"sse", "url", "headers" }` | Convert `${VAR}` -> `${env:VAR}` |
 | **`opencode`** | `opencode.json` | `~/.config/opencode/opencode.json` | `mcp` | `{ "type": "local", "command": [command, ...args], "environment": env, "enabled": !disabled }` | `{ "type": "remote", "url", "headers", "enabled": !disabled }` | Convert `${VAR}` -> `{env:VAR}` |
 | **`windsurf`** | *(Unsupported)* | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | `{ "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "serverUrl": url, "headers" }` | Convert `${VAR}` -> `${env:VAR}` |
-| **`zed`** | `.zed/settings.json` | `~/.config/zed/settings.json` | `context_servers` | `{ "command": { "path": command, "args", "env" } }` *(omit if `disabled: true`)* | `{ "url", "headers" }` | Native `${VAR}` |
+| **`zed`** | `.zed/settings.json` | `~/.config/zed/settings.json` | `context_servers` | `{ "command": { "path": command, "args", "env" } }` *(omit if `disabled: true`)* | `{ "url", "headers" }` | Native `${VAR}` *(discard `:-default`)* |
+
+> **Notes on Optional Fields & Fallbacks:**
+> - **`cwd` (`stdio`):** Optional working directory (defaults to the project root when omitted). Compilers pass `cwd` through when supported by the target agent's native schema, or omit it with a warning when unsupported.
+> - **`${VAR:-default}`:** Preserved natively for `claude-code`. For agents without native default-value syntax (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`), the `:-default` suffix is discarded when translating to `${env:VAR}`, `{env:VAR}`, or `${VAR}`, with a compiler warning.
 
 ---
 
@@ -23,7 +27,7 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 
 ```json
 {
-  "$schema": "https://[agents-mcp site url]/schema/v0.1.0/mcp.schema.json",
+  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
   "servers": {
     "github": {
       "transport": "stdio",
@@ -56,7 +60,7 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 ### 3.1 Claude Code (`claude-code`)
 
 -   **Target File:**  `.mcp.json` (project) / `~/.claude.json` (global)
--   **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. Lacks an inline `disabled` flag in `.mcp.json`, so disabled servers are omitted during compilation.
+-   **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. Lacks an inline `disabled` flag in `.mcp.json`, so disabled servers are omitted during compilation. In global scope, `~/.claude.json` stores general Claude Code state (projects, history, flags, etc.) alongside `mcpServers`, so compilers MUST perform a non-destructive merge rather than overwriting the file.
 
 ```json
 {
@@ -107,7 +111,7 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 
 ### 3.3 Visual Studio Code (`vscode`)
 
--   **Target File:**  `.vscode/mcp.json` (project)
+-   **Target File:**  `.vscode/mcp.json` (project) / OS User Profile `mcp.json` (global: `~/.config/Code/User/mcp.json` on Linux, `~/Library/Application Support/Code/User/mcp.json` on macOS, `%APPDATA%\Code\User\mcp.json` on Windows)
 -   **Notes:** Uses `"servers"` as the root key instead of `"mcpServers"` and requires `${env:VAR}` syntax. Compilers MUST preserve existing `"inputs"` arrays and JSONC comments.
 
 ```json
@@ -135,7 +139,7 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 ### 3.4 OpenCode (`opencode`)
 
 -   **Target File:**  `opencode.json` (project) / `~/.config/opencode/opencode.json` (global)
--   **Notes:** Uses `"mcp"` as root key, merges `command` and `args` into a single `command` array, renames `env` to `environment`, uses `"local"` / `"remote"` types, supports native `"enabled"` boolean, and uses `{env:VAR}` syntax (without `$`).
+-   **Notes:** Uses `"mcp"` as root key, merges `command` and `args` into a single `command` array, renames `env` to `environment`, uses `"local"` / `"remote"` types, supports native `"enabled"` boolean, and uses `{env:VAR}` syntax (without `$`). Note: `<server-key>` below (illustrated by `disabled-example`) shows how a server with `"disabled": true` compiles to `"enabled": false`.
 
 ```json
 {
@@ -148,6 +152,11 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
       },
       "enabled": true
     },
+    "postgres": {
+      "type": "local",
+      "command": ["uvx", "mcp-server-postgres", "{env:DATABASE_URL}"],
+      "enabled": false
+    },
     "linear": {
       "type": "remote",
       "url": "https://mcp.linear.app/mcp",
@@ -155,11 +164,6 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
         "Authorization": "Bearer {env:LINEAR_API_KEY}"
       },
       "enabled": true
-    },
-    "disabled-example": {
-      "type": "local",
-      "command": ["uvx", "mcp-server-sqlite"],
-      "enabled": false
     }
   }
 }

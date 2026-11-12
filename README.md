@@ -71,13 +71,13 @@ _Tip: Installing globally also exposes the short `mcpx` alias (`mcpx sync`)._
 
 ## Canonical Format (`.agents/mcp.json`)
 
-Every `.agents/mcp.json` is backed by a strict JSON Schema (`https://[agents-mcp site url]/schema/vX.Y.Z/mcp.schema.json`) for instant autocomplete and validation in modern editors.
+Every `.agents/mcp.json` is backed by a strict JSON Schema (`https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json`) for instant autocomplete and validation in modern editors.
 
 Example:
 
 ```json
 {
-  "$schema": "https://[agents-mcp site url]/schema/vX.Y.Z/mcp.schema.json",
+  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
   "servers": {
     "github": {
       "transport": "stdio",
@@ -124,7 +124,7 @@ Example:
 | **Windsurf** | *(Global only)* | `~/.codeium/windsurf/mcp_config.json` | `${env:VAR}` |
 | **Zed** | `.zed/settings.json` | `~/.config/zed/settings.json` | `${VAR}` |
 
-See the full field-by-field translation rules in [`spec/MATRIX.md`](https://www.google.com/search?q=./spec/MATRIX.md).
+See the full field-by-field translation rules in [`spec/MATRIX.md`](./spec/MATRIX.md).
 
 ## CLI Reference
 
@@ -142,16 +142,16 @@ _Tip: Installing globally also exposes the short `mcpx` alias (`mcpx sync`)._
 
 ## Open Specification
 
-The `.agents/mcp.json` format is an open, public-domain specification ([CC0 1.0](https://www.google.com/search?q=./spec/SPEC.md)).
+The `.agents/mcp.json` format is an open, public-domain specification ([CC0 1.0](./spec/SPEC.md)).
 
--   **Formal Specification:**  [`spec/SPEC.md`](https://www.google.com/search?q=./spec/SPEC.md)
--   **JSON Schema:**  [`spec/mcp.schema.json`](https://www.google.com/search?q=./spec/mcp.schema.json)
--   **Agent Translation Matrix:**  [`spec/MATRIX.md`](https://www.google.com/search?q=./spec/MATRIX.md)
+-   **Formal Specification:**  [`spec/SPEC.md`](./spec/SPEC.md)
+-   **JSON Schema:**  [`spec/mcp.schema.json`](./spec/mcp.schema.json)
+-   **Agent Translation Matrix:**  [`spec/MATRIX.md`](./spec/MATRIX.md)
     
 
 **Are you an AI agent or editor maintainer?**
 
-You don't need to depend on this CLI to support `.agents/mcp.json`. Check the [Implementer Guidelines](spec/SPEC.md#8.implementer-guidelines-for-agent-maintainers) to add native fallback loading in under 50 lines of code.
+You don't need to depend on this CLI to support `.agents/mcp.json`. Check the [Implementer Guidelines](./spec/SPEC.md#8-implementer-guidelines-for-agent-maintainers) to add native fallback loading in under 50 lines of code.
 
 ## Contributing & License
 
