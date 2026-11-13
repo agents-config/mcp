@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdtempSync,
+  rmSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { readTextFile, writeFileAtomic, backupFile } from '$/src/core/fs-atomic'
@@ -63,6 +69,28 @@ describe('fs-atomic', () => {
       writeFileAtomic(path, 'KEY=value\n', { mode: 0o600 })
       const content = readTextFile(path)
       expect(content).toBe('KEY=value\n')
+      // On POSIX the file must be created with mode 0o600 (§8.1, .env).
+      if (process.platform !== 'win32') {
+        expect(statSync(path).mode & 0o777).toBe(0o600)
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writeFileAtomic puts temp file in the target directory (win32 path)', () => {
+    const dir = makeSandbox()
+    // A Windows-style path: dirname splits on '/', so a hand-rolled splitter
+    // would return '.' and pollute the process cwd with a temp file.
+    const winPath = join(dir, 'C:', 'proj', '.agents', 'mcp.json')
+    try {
+      writeFileAtomic(winPath, '{"servers":{}}\n')
+      expect(readTextFile(winPath)).toBe('{"servers":{}}\n')
+      // No temp file may leak into the sandbox root.
+      const rootEntries = readdirSync(dir)
+      expect(rootEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
+        false,
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

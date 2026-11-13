@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { AgentIdSchema } from '$/src/core/schema'
 import { AGENTS_DIR, STATE_FILE, STATE_VERSION } from '$/src/config'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
-import type { RuntimeContext } from '$/src/core/context'
+import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
 
@@ -14,23 +14,16 @@ export interface SyncStateAgent {
 
 export interface SyncState {
   version: 1
-  scope: 'project' | 'global'
+  scope: ConfigScope
   targets: AgentId[]
   agents: Partial<Record<AgentId, SyncStateAgent>>
 }
 
 export interface EmptySyncState {
   version: 1
-  scope: 'project' | 'global'
+  scope: ConfigScope
   targets: []
   agents: {}
-}
-
-export const EMPTY_STATE: EmptySyncState = {
-  version: STATE_VERSION,
-  scope: 'project',
-  targets: [],
-  agents: {},
 }
 
 export interface LoadStateResult {
@@ -38,10 +31,33 @@ export interface LoadStateResult {
   warnings: string[]
 }
 
-export function getStatePath(
-  scope: 'project' | 'global',
-  ctx: RuntimeContext,
-): string {
+const SyncStateAgentSchema = z.object({
+  path: z.string(),
+  names: z.array(z.string()),
+  updatedAt: z.string().datetime(),
+})
+
+const SyncStateSchema = z.object({
+  version: z.literal(STATE_VERSION),
+  scope: z.enum(['project', 'global']),
+  targets: z.array(AgentIdSchema),
+  agents: z.record(z.string(), SyncStateAgentSchema).optional(),
+})
+
+/**
+ * Build an empty sync state for the given scope. Public so callers (and tests)
+ * can construct a fresh state without relying on a mutable singleton.
+ */
+export function emptyState(scope: ConfigScope): SyncState {
+  return {
+    version: STATE_VERSION,
+    scope,
+    targets: [],
+    agents: {},
+  }
+}
+
+export function getStatePath(scope: ConfigScope, ctx: RuntimeContext): string {
   const base = scope === 'project' ? ctx.cwd : ctx.homeDir
   return `${base}/${AGENTS_DIR}/${STATE_FILE}`
 }
@@ -51,7 +67,7 @@ export function getStatePath(
  * Corrupt / unknown-version file → warn, treat as empty.
  */
 export function loadState(
-  scope: 'project' | 'global',
+  scope: ConfigScope,
   ctx: RuntimeContext,
 ): LoadStateResult {
   const path = getStatePath(scope, ctx)
@@ -70,61 +86,35 @@ export function loadState(
     }
   }
 
-  if (!isValidState(parsed)) {
+  const result = SyncStateSchema.safeParse(parsed)
+  if (!result.success) {
     return {
       state: emptyState(scope),
-      warnings: [`Unknown sync state version at ${path}; treating as empty`],
+      warnings: [`Invalid sync state at ${path}; treating as empty`],
     }
   }
 
-  return { state: parsed as SyncState, warnings: [] }
-}
-
-function emptyState(scope: 'project' | 'global'): SyncState {
-  return {
-    version: STATE_VERSION,
-    scope,
-    targets: [],
-    agents: {},
-  }
-}
-
-function isValidState(value: unknown): value is SyncState {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-  const obj = value as Record<string, unknown>
-  if (obj.version !== STATE_VERSION) {
-    return false
-  }
-  if (obj.scope !== 'project' && obj.scope !== 'global') {
-    return false
-  }
-  if (!Array.isArray(obj.targets)) {
-    return false
-  }
-  if (obj.agents && typeof obj.agents !== 'object') {
-    return false
-  }
-  return true
+  return { state: result.data as SyncState, warnings: [] }
 }
 
 /**
- * Write the sync state atomically.
+ * Write the sync state atomically. No root-level `updatedAt` is emitted — the
+ * per-agent `updatedAt` is updated only when that agent's `names`/`path`
+ * actually changes, so identical states produce byte-identical files.
  */
 export function writeState(
-  scope: 'project' | 'global',
+  scope: ConfigScope,
   ctx: RuntimeContext,
   state: SyncState,
 ): void {
   const path = getStatePath(scope, ctx)
-  const next = { ...state, updatedAt: new Date().toISOString() }
-  writeFileAtomic(path, JSON.stringify(next, null, 2) + '\n')
+  writeFileAtomic(path, JSON.stringify(state, null, 2) + '\n')
 }
 
 /**
  * Merge `names` into the per-agent record for `agentId`, creating the record if
  * needed. Used by `import` to seed managed names (even with `--no-sync`).
+ * The per-agent `updatedAt` is refreshed only when names/path change.
  */
 export function seedAgentNames(
   state: SyncState,
@@ -133,9 +123,21 @@ export function seedAgentNames(
   configPath: string,
 ): SyncState {
   const existing = state.agents[agentId]
-  const merged = existing
-    ? { ...existing, names: [...new Set([...existing.names, ...names])] }
-    : { path: configPath, names, updatedAt: new Date().toISOString() }
+  const nextNames = existing
+    ? [...new Set([...existing.names, ...names])]
+    : names
+  const changed =
+    !existing ||
+    existing.path !== configPath ||
+    existing.names.length !== nextNames.length ||
+    nextNames.some((n) => !existing!.names.includes(n))
+  const merged: SyncStateAgent = {
+    path: configPath,
+    names: nextNames,
+    updatedAt: changed
+      ? new Date().toISOString()
+      : (existing?.updatedAt ?? new Date().toISOString()),
+  }
   return {
     ...state,
     agents: { ...state.agents, [agentId]: merged },
@@ -145,6 +147,7 @@ export function seedAgentNames(
 /**
  * Prune names no longer present in `currentNames` for `agentId`. Used by
  * `remove` and `sync` to keep state consistent without touching manual entries.
+ * The per-agent `updatedAt` is refreshed only when names actually change.
  */
 export function pruneAgentNames(
   state: SyncState,
@@ -156,6 +159,9 @@ export function pruneAgentNames(
     return state
   }
   const kept = existing.names.filter((name) => currentNames.includes(name))
+  if (kept.length === existing.names.length) {
+    return state
+  }
   return {
     ...state,
     agents: {

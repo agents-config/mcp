@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   loadState,
   writeState,
   seedAgentNames,
   pruneAgentNames,
-  EMPTY_STATE,
+  emptyState,
   type SyncState,
 } from '$/src/core/state'
 import { createSandbox } from '$/tests/helpers/sandbox'
@@ -14,7 +15,19 @@ describe('state', () => {
     const { ctx, cleanup } = createSandbox()
     try {
       const result = loadState('project', ctx)
-      expect(result.state).toEqual(EMPTY_STATE)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadState returns empty state for global scope too', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const result = loadState('global', ctx)
+      expect(result.state).toEqual(emptyState('global'))
+      expect(result.state.scope).toBe('global')
       expect(result.warnings).toEqual([])
     } finally {
       cleanup()
@@ -50,16 +63,40 @@ describe('state', () => {
     }
   })
 
+  it('writeState produces byte-identical output for identical state', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+      }
+      writeState('project', ctx, state)
+      const first = readFileSync(
+        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
+        'utf8',
+      )
+      writeState('project', ctx, state)
+      const second = readFileSync(
+        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
+        'utf8',
+      )
+      expect(second).toBe(first)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('loadState treats corrupt file as empty with warning', () => {
     const { ctx, cleanup } = createSandbox()
     const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('node:fs').mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
-      require('node:fs').writeFileSync(path, '{ not valid json', 'utf8')
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(path, '{ not valid json', 'utf8')
 
       const result = loadState('project', ctx)
-      expect(result.state).toEqual(EMPTY_STATE)
+      expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings.length).toBeGreaterThan(0)
       expect(result.warnings[0]).toContain('Corrupt')
     } finally {
@@ -71,9 +108,8 @@ describe('state', () => {
     const { ctx, cleanup } = createSandbox()
     const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('node:fs').mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
-      require('node:fs').writeFileSync(
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
         path,
         JSON.stringify({
           version: 99,
@@ -85,16 +121,40 @@ describe('state', () => {
       )
 
       const result = loadState('project', ctx)
-      expect(result.state).toEqual(EMPTY_STATE)
+      expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings.length).toBeGreaterThan(0)
-      expect(result.warnings[0]).toContain('version')
+      expect(result.warnings[0]).toContain('Invalid sync state')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadState rejects invalid agent id in targets', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['not-an-agent'],
+          agents: {},
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings.length).toBeGreaterThan(0)
     } finally {
       cleanup()
     }
   })
 
   it('seedAgentNames creates and merges agent records', () => {
-    const state: SyncState = { ...EMPTY_STATE, scope: 'project' }
+    const state: SyncState = emptyState('project')
     const next = seedAgentNames(
       state,
       'claude-code',
@@ -121,10 +181,31 @@ describe('state', () => {
     expect(again.agents['claude-code']!.names).toEqual(['github', 'postgres'])
   })
 
+  it('seedAgentNames does not refresh updatedAt when nothing changed', () => {
+    const state: SyncState = {
+      ...emptyState('project'),
+      agents: {
+        'claude-code': {
+          path: '/abs/.mcp.json',
+          names: ['github'],
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    }
+    const again = seedAgentNames(
+      state,
+      'claude-code',
+      ['github'],
+      '/abs/.mcp.json',
+    )
+    expect(again.agents['claude-code']!.updatedAt).toBe(
+      '2026-01-01T00:00:00.000Z',
+    )
+  })
+
   it('pruneAgentNames removes names no longer present', () => {
     const state: SyncState = {
-      ...EMPTY_STATE,
-      scope: 'project',
+      ...emptyState('project'),
       agents: {
         'claude-code': {
           path: '/abs/.mcp.json',
@@ -138,7 +219,7 @@ describe('state', () => {
   })
 
   it('pruneAgentNames leaves state unchanged for unknown agent', () => {
-    const state: SyncState = { ...EMPTY_STATE, scope: 'project' }
+    const state: SyncState = emptyState('project')
     const pruned = pruneAgentNames(state, 'zed', ['github'])
     expect(pruned).toEqual(state)
   })

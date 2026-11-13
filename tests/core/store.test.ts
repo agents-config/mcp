@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   getConfigPath,
   readConfig,
@@ -6,7 +7,16 @@ import {
   loadValidatedConfig,
   ConfigValidationError,
 } from '$/src/core/store'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 import { createSandbox } from '$/tests/helpers/sandbox'
+
+function writeRaw(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+  raw: string,
+): void {
+  mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+  writeFileSync(`${ctx.cwd}/.agents/mcp.json`, raw, 'utf8')
+}
 
 describe('store', () => {
   it('getConfigPath returns project and global paths', () => {
@@ -34,14 +44,9 @@ describe('store', () => {
   it('readConfig parses JSONC with comments and trailing commas', () => {
     const { ctx, cleanup } = createSandbox()
     const path = `${ctx.cwd}/.agents/mcp.json`
+    const raw = `{\n  // comment\n  "servers": {\n    "github": {\n      "transport": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
     try {
-      const raw = `{\n  // comment\n  "servers": {\n    "github": {\n      "transport": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
-      // Simulate a pre-existing file by writing directly.
-      // writeConfig creates the directory? No — it doesn't mkdir. We write via
-      // a raw fs call here just to feed readConfig.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('node:fs').mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
-      require('node:fs').writeFileSync(path, raw, 'utf8')
+      writeRaw(ctx, raw)
 
       const result = readConfig('project', ctx)
       expect(result).not.toBeNull()
@@ -56,6 +61,49 @@ describe('store', () => {
     }
   })
 
+  it('readConfig raises ConfigValidationError on truncated JSONC', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(ctx, '{ not valid json')
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(ctx, '{"$schema":"x","servers":{}} >>> GARBAGE')
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(ctx, '{"$schema":"x","servers":{}} >>> GARBAGE')
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig leaves file byte-identical after a failed load', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/mcp.json`
+    const raw = '{ not valid json\n'
+    try {
+      writeRaw(ctx, raw)
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+      expect(readFileSync(path, 'utf8')).toBe(raw)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('writeConfig writes atomically and round-trips', () => {
     const { ctx, cleanup } = createSandbox()
     try {
@@ -63,7 +111,7 @@ describe('store', () => {
         scope: 'project',
         ctx,
         config: {
-          $schema: 'https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json',
+          $schema: DEFAULT_SCHEMA_URL,
           servers: {
             github: {
               transport: 'stdio',
@@ -79,7 +127,7 @@ describe('store', () => {
       const servers = (result!.config as Record<string, unknown>)
         .servers as Record<string, unknown>
       expect((servers.github as Record<string, unknown>).command).toBe('npx')
-      expect(result!.config.$schema).toContain('/schema/v0.0.0/')
+      expect(result!.config.$schema).toBe(DEFAULT_SCHEMA_URL)
     } finally {
       cleanup()
     }
@@ -92,7 +140,7 @@ describe('store', () => {
         scope: 'project',
         ctx,
         config: {
-          $schema: 'https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json',
+          $schema: DEFAULT_SCHEMA_URL,
           servers: {
             github: { transport: 'stdio', command: 'npx' },
           },
@@ -120,21 +168,15 @@ describe('store', () => {
 
   it('loadValidatedConfig validates and returns warnings', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/mcp.json`
     try {
-      // Write directly (not via writeConfig, which overwrites $schema) so we
-      // can control the $schema value.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      require('node:fs').mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
-      require('node:fs').writeFileSync(
-        path,
+      writeRaw(
+        ctx,
         JSON.stringify({
           $schema: 'https://example.com/other.json',
           servers: {
             github: { transport: 'stdio', command: 'npx' },
           },
         }),
-        'utf8',
       )
 
       const result = loadValidatedConfig('project', ctx)
@@ -149,23 +191,31 @@ describe('store', () => {
     }
   })
 
-  it('loadValidatedConfig throws ConfigValidationError on invalid schema', () => {
+  it('loadValidatedConfig throws ConfigValidationError with field path', () => {
     const { ctx, cleanup } = createSandbox()
     try {
-      writeConfig({
-        scope: 'project',
+      writeRaw(
         ctx,
-        config: {
-          $schema: 'https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json',
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
           servers: {
             'Bad Name': { transport: 'stdio', command: 'npx' },
           },
-        },
-      })
-
-      expect(() => loadValidatedConfig('project', ctx)).toThrow(
-        ConfigValidationError,
+        }),
       )
+
+      try {
+        loadValidatedConfig('project', ctx)
+        throw new Error('should have thrown')
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConfigValidationError)
+        const cve = err as ConfigValidationError
+        expect(cve.path).toContain('.agents/mcp.json')
+        expect(cve.issues.length).toBeGreaterThan(0)
+        // The offending server name should appear in some issue path/message.
+        const issueText = JSON.stringify(cve.issues)
+        expect(issueText).toContain('Bad Name')
+      }
     } finally {
       cleanup()
     }
