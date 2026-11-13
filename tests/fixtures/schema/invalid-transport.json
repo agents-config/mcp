@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json",
+  "servers": {
+    "github": {
+      "transport": "websocket",
+      "command": "npx"
+    }
+  }
+}

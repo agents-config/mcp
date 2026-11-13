@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json",
+  "servers": {
+    "github": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "postgres": {
+      "transport": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-postgres", "${DATABASE_URL}"],
+      "targets": ["claude-code", "opencode"],
+      "disabled": false
+    },
+    "linear": {
+      "transport": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    }
+  }
+}
