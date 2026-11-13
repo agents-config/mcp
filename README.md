@@ -1,6 +1,6 @@
 # agents-mcp
 
-**One `.agents/mcp.json` to rule them all.** 
+**One `.agents/mcp.json` to rule them all.**
 
 A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across Claude Code, Cursor, VS Code, OpenCode, Windsurf, and Zed.
 
@@ -62,16 +62,16 @@ Migrate and unify everything in one command:
 npx agents-mcp import
 ```
 
-This scans your workspace for existing agent configs (`.mcp.json`,  `.cursor/mcp.json`,  `.vscode/mcp.json`,  `opencode.json`,  `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, generates `.agents/mcp.json`, and keeps your active agents synced. Your existing agent files are updated in place, never deleted.
+This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, generates `.agents/mcp.json`, and keeps your active agents synced. Your existing agent files are updated in place, never deleted.
 
 ### Starting from scratch?
 
 1. Initialize `.agents/mcp.json` and select your agents:
-`npx agents-mcp init`
+   `npx agents-mcp init`
 2. Add an MCP server from GitHub, npm, MCP Registry, or direct flags
-`npx agents-mcp add modelcontextprotocol/server-github`
+   `npx agents-mcp add modelcontextprotocol/server-github`
 3. Sync changes across all targeted agents
-`npx agents-mcp sync`
+   `npx agents-mcp sync`
 
 **Requirements:** Node.js 22 or newer.
 
@@ -112,24 +112,24 @@ Example:
 
 ## Key Features
 
--   **Zero-Friction Onboarding (`import`):** Absorbs existing configurations from 6+ agents without manual rewriting.
--   **Non-Destructive by Design:** AST-level edits (`jsonc-parser`) keep comments, VS Code `inputs`, and non-MCP settings intact — and native agent files are never deleted or moved.
--   **Secret Hygiene by Default:** Enforces `${VAR}` placeholders in versioned configs while syncing required keys to `.env` and `.env.example`.
--   **Per-Agent Targeting (`targets`):** Restrict heavy MCP servers to specific tools (e.g., UI servers only in Cursor/VS Code) to save context tokens elsewhere.
--   **Environment Diagnostics (`doctor`):** Validates schema compliance, checks missing `.env` variables, verifies local binaries (`npx`,  `uvx`,  `docker`), and detects configuration drift semantically.
--   **Deterministic Schema:** A single Zod source generates the published Draft-07 JSON Schema, so types, runtime validation, and editor autocomplete never drift.
--   **Project & Global Scopes:** Works seamlessly at the repository level (`.agents/mcp.json`) or user level (`~/.agents/mcp.json` via `-g`).
+- **Zero-Friction Onboarding (`import`):** Absorbs existing configurations from 6+ agents without manual rewriting.
+- **Non-Destructive by Design:** AST-level edits (`jsonc-parser`) keep comments, VS Code `inputs`, and non-MCP settings intact — and native agent files are never deleted or moved.
+- **Secret Hygiene by Default:** Enforces `${VAR}` placeholders in versioned configs while syncing required keys to `.env` and `.env.example`.
+- **Per-Agent Targeting (`targets`):** Restrict heavy MCP servers to specific tools (e.g., UI servers only in Cursor/VS Code) to save context tokens elsewhere.
+- **Environment Diagnostics (`doctor`):** Validates schema compliance, checks missing `.env` variables, verifies local binaries (`npx`, `uvx`, `docker`), and detects configuration drift semantically.
+- **Deterministic Schema:** A single Zod source generates the published Draft-07 JSON Schema, so types, runtime validation, and editor autocomplete never drift.
+- **Project & Global Scopes:** Works seamlessly at the repository level (`.agents/mcp.json`) or user level (`~/.agents/mcp.json` via `-g`).
 
 ## Supported Agents
 
-| Agent | Project Config | Global Config | Env Syntax Translated |
-| :--- | :--- | :--- | :--- |
-| **Claude Code** | `.mcp.json` | `~/.claude.json` | `${VAR}` |
-| **Cursor** | `.cursor/mcp.json` | `~/.cursor/mcp.json` | `${env:VAR}` |
-| **VS Code** | `.vscode/mcp.json` | User Profile `mcp.json` | `${env:VAR}` |
-| **OpenCode** | `opencode.json` | `~/.config/opencode/opencode.json` | `{env:VAR}` |
-| **Windsurf** | *(Global only)* | `~/.codeium/windsurf/mcp_config.json` | `${env:VAR}` |
-| **Zed** | `.zed/settings.json` | `~/.config/zed/settings.json` | `${VAR}` |
+| Agent           | Project Config       | Global Config                         | Env Syntax Translated |
+| :-------------- | :------------------- | :------------------------------------ | :-------------------- |
+| **Claude Code** | `.mcp.json`          | `~/.claude.json`                      | `${VAR}`              |
+| **Cursor**      | `.cursor/mcp.json`   | `~/.cursor/mcp.json`                  | `${env:VAR}`          |
+| **VS Code**     | `.vscode/mcp.json`   | User Profile `mcp.json`               | `${env:VAR}`          |
+| **OpenCode**    | `opencode.json`      | `~/.config/opencode/opencode.json`    | `{env:VAR}`           |
+| **Windsurf**    | _(Global only)_      | `~/.codeium/windsurf/mcp_config.json` | `${env:VAR}`          |
+| **Zed**         | `.zed/settings.json` | `~/.config/zed/settings.json`         | `${VAR}`              |
 
 See the full field-by-field translation rules in [`spec/MATRIX.md`](./spec/MATRIX.md).
 
@@ -137,15 +137,15 @@ Remote servers use **Streamable HTTP** (`transport: "http"`).
 
 ## CLI Reference
 
-| Command | Description |
-| :--- | :--- |
-| `agents-mcp init` | Scaffold `.agents/mcp.json` and select the agents to target |
-| `agents-mcp import` | Consolidate existing agent MCP configs into `.agents/mcp.json` |
-| `agents-mcp add <source>` | Install an MCP server from GitHub, npm, MCP Registry, or CLI flags |
-| `agents-mcp sync` | Compile `.agents/mcp.json` into all targeted agent config files |
-| `agents-mcp remove <name>` | Remove a server and clean it from managed agent configs |
-| `agents-mcp list` | Inspect configured servers, targets, and sync state |
-| `agents-mcp doctor` | Audit schema validity, env vars, runtime binaries, and drift |
+| Command                    | Description                                                        |
+| :------------------------- | :----------------------------------------------------------------- |
+| `agents-mcp init`          | Scaffold `.agents/mcp.json` and select the agents to target        |
+| `agents-mcp import`        | Consolidate existing agent MCP configs into `.agents/mcp.json`     |
+| `agents-mcp add <source>`  | Install an MCP server from GitHub, npm, MCP Registry, or CLI flags |
+| `agents-mcp sync`          | Compile `.agents/mcp.json` into all targeted agent config files    |
+| `agents-mcp remove <name>` | Remove a server and clean it from managed agent configs            |
+| `agents-mcp list`          | Inspect configured servers, targets, and sync state                |
+| `agents-mcp doctor`        | Audit schema validity, env vars, runtime binaries, and drift       |
 
 Global flags: `-g`/`--global`, `-y`/`--yes`, `--agents <list>`, `--dry-run`.
 
@@ -153,12 +153,11 @@ Global flags: `-g`/`--global`, `-y`/`--yes`, `--agents <list>`, `--dry-run`.
 
 The `.agents/mcp.json` format is an open, public-domain specification ([CC0 1.0](./spec/SPEC.md)).
 
--   **Formal Specification:**  [`spec/SPEC.md`](./spec/SPEC.md)
--   **JSON Schema:**  [`spec/mcp.schema.json`](./spec/mcp.schema.json)
--   **Agent Translation Matrix:**  [`spec/MATRIX.md`](./spec/MATRIX.md)
--   **Technical Blueprint:**  [`spec/BLUEPRINT.md`](./spec/BLUEPRINT.md)
--   **Architecture Decisions:**  [`docs/decisions/`](./docs/decisions/)
-    
+- **Formal Specification:** [`spec/SPEC.md`](./spec/SPEC.md)
+- **JSON Schema:** [`spec/mcp.schema.json`](./spec/mcp.schema.json)
+- **Agent Translation Matrix:** [`spec/MATRIX.md`](./spec/MATRIX.md)
+- **Technical Blueprint:** [`spec/BLUEPRINT.md`](./spec/BLUEPRINT.md)
+- **Architecture Decisions:** [`docs/decisions/`](./docs/decisions/)
 
 **Are you an AI agent or editor maintainer?**
 
@@ -168,5 +167,5 @@ You don't need to depend on this CLI to support `.agents/mcp.json`. If your tool
 
 Contributions, new agent adapters, and spec feedback are welcome. Open an issue or submit a PR!
 
--   **CLI Source Code:** MIT License
--   **Specification (`spec/`):** CC0 1.0 Universal (Public Domain)
+- **CLI Source Code:** MIT License
+- **Specification (`spec/`):** CC0 1.0 Universal (Public Domain)

@@ -21,6 +21,4 @@ copyFileSync(resolve(root, 'LICENSE'), resolve(root, 'dist/LICENSE'))
 copyFileSync(resolve(root, 'README.md'), resolve(root, 'dist/README.md'))
 copyFileSync(resolve(root, 'CHANGELOG.md'), resolve(root, 'dist/CHANGELOG.md'))
 
-console.log(
-  '✅ Minimal package.json and metadata prepared in dist/ folder',
-)
+console.log('✅ Minimal package.json and metadata prepared in dist/ folder')

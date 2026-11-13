@@ -1,0 +1,12 @@
+dist/
+coverage/
+node_modules/
+workflow/
+.codegraph/
+*.db*
+spec/
+docs/decisions/
+.agents/
+skills/
+repomix-output.md
+skills-lock.json

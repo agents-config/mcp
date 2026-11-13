@@ -13,6 +13,7 @@ context, the decision, the alternatives rejected, and the accepted trade-offs.
 | [0006](./0006-non-destructive-compilation.md) | Preserve native files in place | Accepted |
 | [0007](./0007-env-and-secrets.md) | `.env` precedence and safe secret extraction | Accepted |
 | [0008](./0008-packaging-and-runtime-floor.md) | Node 22 floor, single binary, publish from `dist/` only | Accepted |
+| [0009](./0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths` | Accepted |
 
 ## Conventions
 

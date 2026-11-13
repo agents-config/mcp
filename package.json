@@ -33,19 +33,40 @@
   "license": "MIT",
   "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "echo 'not implemented'",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "run-s typecheck format:check test build",
     "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
-    "dist:build": "npm run build",
+    "dist:build": "npm run verify",
     "dist:package": "tsx package.ts",
     "dist:publish": "npm publish ./dist",
     "dist": "run-s dist:*"
   },
+  "dependencies": {
+    "@clack/prompts": "^1.9.0",
+    "citty": "^0.2.2",
+    "jsonc-parser": "^3.3.1",
+    "string-argv": "^0.4.0",
+    "zod": "^4.6.0"
+  },
   "devDependencies": {
-    "@types/node": "^26.6.6",
+    "@types/node": "^22.13.10",
+    "@vitest/coverage-v8": "^5.1.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "npm-run-all2": "^9.0.4",
     "prettier": "^3.10.1",
+    "tsup": "^9.0.0",
     "tsx": "^4.23.15",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
   }
 }
