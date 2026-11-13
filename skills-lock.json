@@ -49,6 +49,12 @@
       "skillPath": "skills/incremental-implementation/SKILL.md",
       "computedHash": "85172018933c4e2b161e71063b60c7793f5c648220c2375098c27f75518dec30"
     },
+    "npm-version-management": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/npm-version-management/SKILL.md",
+      "computedHash": "00bf02eb55459a27880cd14db2c03cbfd677cb81ba4e6a0f13452f03e7a4b4fc"
+    },
     "planning-and-task-breakdown": {
       "source": "alexbruno/dev-skills",
       "sourceType": "github",
