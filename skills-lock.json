@@ -5,7 +5,7 @@
       "source": "alexbruno/dev-skills",
       "sourceType": "github",
       "skillPath": "skills/architect-worker/SKILL.md",
-      "computedHash": "f3c9a13d55b7d938ee91b93e3ed6a9ba37833c02f7e92bcac70b45708707bbff"
+      "computedHash": "725ab7ea465931a8b78e1008da7e2f6bce3a1a1f94981a71cbba307667d9a0f6"
     },
     "changelog-management": {
       "source": "alexbruno/dev-skills",
@@ -61,11 +61,17 @@
       "skillPath": "skills/planning-and-task-breakdown/SKILL.md",
       "computedHash": "ffb62667cc06cbede985c3569c53d015cc4ca579e3db7f98f0eb579f54f75d8d"
     },
+    "product-owner": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/product-owner/SKILL.md",
+      "computedHash": "83846b9d533734f58d4c6aa9197f7211d351ca030292e28f4523ca8bd4e02ccb"
+    },
     "spec-driven-workflow": {
       "source": "alexbruno/dev-skills",
       "sourceType": "github",
       "skillPath": "skills/spec-driven-workflow/SKILL.md",
-      "computedHash": "b1e74733981d4ebff6c90a5b2be0ebca2db495eb65f72a7212118b0fc0f16b03"
+      "computedHash": "d35a641bbe788d315e492bcf54291d92341ec7723ca604a104bbf845321b11b8"
     },
     "systematic-debugging": {
       "source": "alexbruno/dev-skills",
