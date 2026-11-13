@@ -29,3 +29,25 @@ jobs:
 
       - name: Run verification suite
         run: npm run verify
+
+  windows-paths:
+    name: Windows Path & Atomic Tests (Node 22)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run core tests
+        run: npx vitest run tests/core
