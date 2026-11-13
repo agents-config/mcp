@@ -1,29 +1,137 @@
 # Agent Translation & Interoperability Matrix (`v0.1.0`)
 
-This document defines the exact deterministic mapping between the canonical `.agents/mcp.json` specification and the native configuration formats required by supported AI coding agents.
+This document defines the exact deterministic mapping between the canonical
+`.agents/mcp.json` specification and the native configuration formats required by
+supported AI coding agents.
+
+Every rule below is normative for `agents-mcp` adapters and is covered by
+`tests/adapters/`.
 
 ---
 
-## 1. Summary Mapping Table
+## 1. Capability Summary
 
-| Agent (`id`) | Project Path | Global Path | Root Key | `stdio` Mapping | `http` / `sse` Mapping | Env Interpolation |
+| Agent (`id`) | Scopes | Project path | Global path | Root key | Format | Env syntax | Native `:-default` | Native disable | `cwd` |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **`claude-code`** | project, global | `.mcp.json` | `~/.claude.json` | `mcpServers` | JSON (JSONC-tolerant) | `${VAR}` | **Yes** | No | No |
+| **`cursor`** | project, global | `.cursor/mcp.json` | `~/.cursor/mcp.json` | `mcpServers` | JSON | `${env:VAR}` | No | No | No |
+| **`vscode`** | project, global | `.vscode/mcp.json` | OS User Profile `mcp.json` | `servers` | JSONC | `${env:VAR}` | No | No | No |
+| **`opencode`** | project, global | `opencode.json` | `~/.config/opencode/opencode.json` | `mcp` | JSONC | `{env:VAR}` | No | **Yes** (`enabled`) | No |
+| **`windsurf`** | global only | — | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | JSON | `${env:VAR}` | No | No | No |
+| **`zed`** | project, global | `.zed/settings.json` | `~/.config/zed/settings.json` | `context_servers` | JSONC | `${VAR}` | No | No | No |
+
+> **Transport inference:** native entries that expose only a URL, or whose
+> native format does not distinguish transports, are imported as `"http"`
+> (see §4 and §5).
+
+### 1.1 Global path resolution
+
+| Agent | Linux | macOS | Windows |
+| :--- | :--- | :--- | :--- |
+| `claude-code` | `~/.claude.json` | `~/.claude.json` | `%USERPROFILE%\.claude.json` |
+| `cursor` | `~/.cursor/mcp.json` | `~/.cursor/mcp.json` | `%USERPROFILE%\.cursor\mcp.json` |
+| `vscode` | `${XDG_CONFIG_HOME:-~/.config}/Code/User/mcp.json` | `~/Library/Application Support/Code/User/mcp.json` | `%APPDATA%\Code\User\mcp.json` |
+| `opencode` | `${XDG_CONFIG_HOME:-~/.config}/opencode/opencode.json` | `~/.config/opencode/opencode.json` | `%APPDATA%\opencode\opencode.json` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | `~/.codeium/windsurf/mcp_config.json` | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` |
+| `zed` | `${XDG_CONFIG_HOME:-~/.config}/zed/settings.json` | `~/.config/zed/settings.json` | `%APPDATA%\Zed\settings.json` |
+
+`vscode` MUST probe, in order, the stable channel (`Code`), Insiders
+(`Code - Insiders`), and VSCodium (`VSCodium`), and use the first profile
+directory that exists. All paths are resolved from the injected
+`RuntimeContext` (`homeDir`, `platform`, `env`), never from module-level
+`os.homedir()` / `process.platform` calls.
+
+---
+
+## 2. Compiled Output (`stdio` and `http`)
+
+| Agent | `stdio` entry | `http` entry |
+| :--- | :--- | :--- |
+| `claude-code` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
+| `cursor` | `{ "command", "args", "env" }` | `{ "url", "headers" }` |
+| `vscode` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
+| `opencode` | `{ "type": "local", "command": [command, ...args], "environment": env, "enabled": !disabled }` | `{ "type": "remote", "url", "headers", "enabled": !disabled }` |
+| `windsurf` | `{ "command", "args", "env" }` | `{ "serverUrl": url, "headers" }` |
+| `zed` | `{ "command": { "path": command, "args", "env" } }` | `{ "url", "headers" }` |
+
+Rules:
+
+- Omit `args` when empty and `env`/`headers` when absent.
+- Omit servers with `disabled: true` for every agent except `opencode`, which
+  maps them to `enabled: false`.
+- Apply `targets` before writing: a server whose `targets` excludes the agent is
+  not emitted (and is removed if previously managed).
+- `cwd` is preserved in the canonical file but omitted for every agent in
+  `v0.1.0` (`CWD_UNSUPPORTED` warning).
+- Never emit a literal secret value. Placeholders are translated, never resolved,
+  when writing native files.
+
+---
+
+## 3. Environment Syntax Translation
+
+Interpolation MUST be translated in **all** string-bearing fields: `env` values,
+`headers` values, `args` items, and `url`.
+
+| Canonical | `claude-code` | `cursor` | `vscode` | `opencode` | `windsurf` | `zed` |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`claude-code`** | `.mcp.json` | `~/.claude.json` | `mcpServers` | `{ "type": "stdio", "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "type": "http"\|"sse", "url", "headers" }` | Native `${VAR}` / `${VAR:-default}` |
-| **`cursor`** | `.cursor/mcp.json` | `~/.cursor/mcp.json` | `mcpServers` | `{ "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "url", "headers" }` | Convert `${VAR}` -> `${env:VAR}` |
-| **`vscode`** | `.vscode/mcp.json` | OS User Profile `mcp.json` | `servers` | `{ "type": "stdio", "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "type": "http"\|"sse", "url", "headers" }` | Convert `${VAR}` -> `${env:VAR}` |
-| **`opencode`** | `opencode.json` | `~/.config/opencode/opencode.json` | `mcp` | `{ "type": "local", "command": [command, ...args], "environment": env, "enabled": !disabled }` | `{ "type": "remote", "url", "headers", "enabled": !disabled }` | Convert `${VAR}` -> `{env:VAR}` |
-| **`windsurf`** | *(Unsupported)* | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | `{ "command", "args", "env" }` *(omit if `disabled: true`)* | `{ "serverUrl": url, "headers" }` | Convert `${VAR}` -> `${env:VAR}` |
-| **`zed`** | `.zed/settings.json` | `~/.config/zed/settings.json` | `context_servers` | `{ "command": { "path": command, "args", "env" } }` *(omit if `disabled: true`)* | `{ "url", "headers" }` | Native `${VAR}` *(discard `:-default`)* |
+| `${VAR}` | `${VAR}` | `${env:VAR}` | `${env:VAR}` | `{env:VAR}` | `${env:VAR}` | `${VAR}` |
+| `${VAR:-fallback}` | `${VAR:-fallback}` | `${env:VAR}` + warning | `${env:VAR}` + warning | `{env:VAR}` + warning | `${env:VAR}` + warning | `${VAR}` + warning |
 
-> **Notes on Optional Fields & Fallbacks:**
-> - **`cwd` (`stdio`):** Optional working directory (defaults to the project root when omitted). Compilers pass `cwd` through when supported by the target agent's native schema, or omit it with a warning when unsupported.
-> - **`${VAR:-default}`:** Preserved natively for `claude-code`. For agents without native default-value syntax (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`), the `:-default` suffix is discarded when translating to `${env:VAR}`, `{env:VAR}`, or `${VAR}`, with a compiler warning.
+Unknown placeholder syntax inside a native value (for example an unexpected
+`${env:...}` produced by another tool) MUST be preserved verbatim and reported as
+`UNKNOWN_PLACEHOLDER`.
 
 ---
 
-## 2. Canonical Input Reference
+## 4. Import Normalization (Reverse Mapping)
 
-All side-by-side outputs in Section 3 are compiled from this canonical `.agents/mcp.json`:
+`extractServers()` converts native entries back into canonical servers. Inference
+rules:
+
+| Agent | `stdio` inference | `http` inference | Transformations |
+| :--- | :--- | :--- | :--- |
+| `claude-code` | `type === "stdio"`, or `command` present without `url` | `type === "http"` or `url` present | `${VAR}` unchanged; `targets` not representable; omitted servers are unrecoverable |
+| `cursor` | `command` present | `url` present | `${env:VAR}` → `${VAR}` |
+| `vscode` | `type === "stdio"` | `type === "http"` or `url` present | `${env:VAR}` → `${VAR}`; `inputs` ignored; any other transport with `url` → `http` + warning |
+| `opencode` | `type === "local"` | `type === "remote"` | `command[0]` → command, rest → args, `environment` → env, `enabled: false` → `disabled: true`, `{env:VAR}` → `${VAR}` |
+| `windsurf` | `command` present | `serverUrl` present | `serverUrl` → `url`, `${env:VAR}` → `${VAR}` |
+| `zed` | `command.path` present | `url` present | nested command unpacked; `source` ignored; `${VAR}` unchanged |
+
+When an entry has both `command` and `url`, `url` wins with a
+`AMBIGUOUS_ENTRY` warning. Unknown native fields are dropped with
+`UNKNOWN_FIELD_DROPPED`; extraction never mutates the source file.
+
+Native formats do not store `targets`, so imported servers have no targets.
+`disabled` is recoverable only from `opencode` (`enabled: false`); for the other
+agents an omitted server simply cannot be reconstructed.
+
+---
+
+## 5. Lossy Mappings & Warnings
+
+| Code | Agent(s) | Meaning |
+| :--- | :--- | :--- |
+| `DEFAULT_DROPPED` | cursor, vscode, opencode, windsurf, zed | `:-fallback` has no native equivalent and was discarded. |
+| `CWD_UNSUPPORTED` | all (v0.1.0) | `cwd` cannot be represented natively. |
+| `TARGETS_NOT_NATIVE` | all | `targets` is a compiler-side filter with no native field. |
+| `SCOPE_UNSUPPORTED` | windsurf (project) | Agent only supports global scope; operation skipped. |
+| `TRANSPORT_INFERRED` | vscode, cursor, windsurf, zed | An entry without a canonical transport (for example, URL-only) was imported as `http`. |
+| `UNKNOWN_FIELD_DROPPED` | all | A native field had no canonical equivalent. |
+| `AMBIGUOUS_ENTRY` | all | Both `command` and `url` were present. |
+| `UNKNOWN_PLACEHOLDER` | all | A placeholder did not match the supported grammar. |
+| `DISABLE_UNSUPPORTED` | claude-code, cursor, vscode, windsurf, zed | A disabled server is omitted instead of flagged. |
+| `MANUAL_ENTRY_PRESERVED` | all | A native entry not owned by the compiler was left untouched. |
+
+Warnings never fail a command; `doctor` reports them and `--strict` promotes
+them to errors. Findings are always returned through the adapter result, never
+printed from inside an adapter.
+
+---
+
+## 6. Canonical Input Reference
+
+All compiled examples below are produced from this canonical `.agents/mcp.json`:
 
 ```json
 {
@@ -55,12 +163,15 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-## 3. Compiled Agent Outputs
+## 7. Compiled Agent Outputs
 
-### 3.1 Claude Code (`claude-code`)
+### 7.1 Claude Code (`claude-code`)
 
--   **Target File:**  `.mcp.json` (project) / `~/.claude.json` (global)
--   **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. Lacks an inline `disabled` flag in `.mcp.json`, so disabled servers are omitted during compilation. In global scope, `~/.claude.json` stores general Claude Code state (projects, history, flags, etc.) alongside `mcpServers`, so compilers MUST perform a non-destructive merge rather than overwriting the file.
+- **Target file:** `.mcp.json` (project) / `~/.claude.json` (global)
+- **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. There is no inline
+  `disabled` flag, so disabled servers are omitted. The global file stores
+  general Claude Code state (projects, history, flags) alongside `mcpServers`, so
+  compilers MUST perform a non-destructive AST merge.
 
 ```json
 {
@@ -84,10 +195,11 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-### 3.2 Cursor (`cursor`)
+### 7.2 Cursor (`cursor`)
 
--   **Target File:**  `.cursor/mcp.json` (project) / `~/.cursor/mcp.json` (global)
--   **Notes:** Requires `${env:VAR}` syntax for environment variable expansion. Omits `type` on `stdio` and `http` entries.
+- **Target file:** `.cursor/mcp.json` (project) / `~/.cursor/mcp.json` (global)
+- **Notes:** Requires `${env:VAR}`. Omits `type` on both `stdio` and `http`
+  entries.
 
 ```json
 {
@@ -109,10 +221,11 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-### 3.3 Visual Studio Code (`vscode`)
+### 7.3 Visual Studio Code (`vscode`)
 
--   **Target File:**  `.vscode/mcp.json` (project) / OS User Profile `mcp.json` (global: `~/.config/Code/User/mcp.json` on Linux, `~/Library/Application Support/Code/User/mcp.json` on macOS, `%APPDATA%\Code\User\mcp.json` on Windows)
--   **Notes:** Uses `"servers"` as the root key instead of `"mcpServers"` and requires `${env:VAR}` syntax. Compilers MUST preserve existing `"inputs"` arrays and JSONC comments.
+- **Target file:** `.vscode/mcp.json` (project) / OS User Profile `mcp.json` (global)
+- **Notes:** Uses `"servers"` and `${env:VAR}`. Compilers MUST preserve existing
+  `"inputs"` arrays and JSONC comments.
 
 ```json
 {
@@ -136,10 +249,12 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-### 3.4 OpenCode (`opencode`)
+### 7.4 OpenCode (`opencode`)
 
--   **Target File:**  `opencode.json` (project) / `~/.config/opencode/opencode.json` (global)
--   **Notes:** Uses `"mcp"` as root key, merges `command` and `args` into a single `command` array, renames `env` to `environment`, uses `"local"` / `"remote"` types, supports native `"enabled"` boolean, and uses `{env:VAR}` syntax (without `$`). Note: `<server-key>` below (illustrated by `disabled-example`) shows how a server with `"disabled": true` compiles to `"enabled": false`.
+- **Target file:** `opencode.json` (project) / `~/.config/opencode/opencode.json` (global)
+- **Notes:** Uses `"mcp"`, merges `command` and `args` into one array, renames
+  `env` to `environment`, uses `"local"` / `"remote"` types, supports native
+  `"enabled"`, and uses `{env:VAR}` without `$`.
 
 ```json
 {
@@ -169,10 +284,11 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-### 3.5 Windsurf (`windsurf`)
+### 7.5 Windsurf (`windsurf`)
 
--   **Target File:**  `~/.codeium/windsurf/mcp_config.json` (global scope only)
--   **Notes:** Uses `"serverUrl"` instead of `"url"` for remote endpoints and requires `${env:VAR}` interpolation.
+- **Target file:** `~/.codeium/windsurf/mcp_config.json` (global scope only)
+- **Notes:** Uses `"serverUrl"` for remote endpoints and requires `${env:VAR}`.
+  Project-scope compilation MUST skip this agent with `SCOPE_UNSUPPORTED`.
 
 ```json
 {
@@ -194,10 +310,12 @@ All side-by-side outputs in Section 3 are compiled from this canonical `.agents/
 }
 ```
 
-### 3.6 Zed (`zed`)
+### 7.6 Zed (`zed`)
 
--   **Target File:**  `.zed/settings.json` (project) / `~/.config/zed/settings.json` (global)
--   **Notes:** Nests `stdio` execution details inside a `"command": { "path", "args", "env" }` object under `"context_servers"`. Compilers MUST perform a non-destructive JSONC merge so editor settings in `settings.json` remain untouched.
+- **Target file:** `.zed/settings.json` (project) / `~/.config/zed/settings.json` (global)
+- **Notes:** Nests `stdio` execution inside
+  `"command": { "path", "args", "env" }` under `"context_servers"`. Requires a
+  non-destructive JSONC merge so editor settings remain untouched.
 
 ```json
 {

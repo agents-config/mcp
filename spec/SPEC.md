@@ -1,6 +1,6 @@
 # Unified Agents MCP Configuration Specification (`v0.1.0`)
 
-**Status:** Draft Specification  
+**Status:** Approved (`v0.1.0`)  
 **Schema URI:** `https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json`  
 **License:** CC0 1.0 Universal (Public Domain)
 
@@ -55,9 +55,9 @@ Each entry inside `servers` is a discriminated union keyed by the required `tran
 
 | Property | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `transport` | `"stdio" \| "http" \| "sse"` | **Yes** | — | Explicitly defines the MCP transport protocol. |
+| `transport` | `"stdio" \| "http"` | **Yes** | — | Explicitly defines the MCP transport protocol. |
 | `disabled` | `boolean` | No | `false` | When `true`, the server is temporarily inactive and MUST NOT be loaded by target agents. |
-| `targets` | `string[]` | No | *(All agents)* | Optional allowlist of canonical agent IDs (e.g., `["claude-code", "opencode"]`) that should load this server. When omitted, the server applies to all agents. |
+| `targets` | `string[]` | No | *(All agents)* | Optional non-empty allowlist of canonical agent IDs (e.g., `["claude-code", "opencode"]`) that should load this server. Values MUST be canonical IDs from §6; an empty array is invalid. When omitted, the server applies to all agents. |
 
 ### 4.2 Local Process Transport (`transport: "stdio"`)
 
@@ -71,13 +71,17 @@ Used for MCP servers spawned as local child processes communicating over standar
 | `env` | `Record<string, string>` | No | `{}` | Key-value map of environment variables injected into the server process. |
 | `cwd` | `string` | No | *(Project root)* | Optional working directory for the child process. |
 
-### 4.3 Remote Network Transport (`transport: "http"` | `"sse"`)
+> **Compiler support for `cwd`:** The canonical field is preserved as-is. In `v0.1.0`, none of the supported agents exposes a documented native working-directory field, so compilers MUST omit `cwd` with a warning. Adapters MAY start emitting it once a target agent documents native support, without requiring a schema change.
 
-Used for remote MCP servers accessed over Streamable HTTP (`"http"`) or legacy HTTP+SSE (`"sse"`).
+### 4.3 Remote Network Transport (`transport: "http"`)
+
+Used for remote MCP servers accessed over Streamable HTTP.
+
+The format defines exactly two transport discriminators: `"stdio"` and `"http"`. Any other value is invalid. Implementations importing existing agent files whose native format does not distinguish transports, or that expose only a `url`, MUST treat the entry as `"http"` and emit a warning.
 
 | Property | Type | Required | Default | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `transport` | `"http" \| "sse"` | **Yes** | — | Discriminator for remote network servers. |
+| `transport` | `"http"` | **Yes** | — | Discriminator for remote network servers. |
 | `url` | `string` (URI) | **Yes** | — | Full endpoint URL of the remote MCP server. |
 | `headers` | `Record<string, string>` | No | `{}` | Key-value map of HTTP headers sent with requests (e.g., `Authorization`). |
 
@@ -90,12 +94,27 @@ Because `.agents/mcp.json` is designed to be committed to version control, **pla
 ### 5.1 Placeholder Syntax
 Conformant parsers and compilers MUST support POSIX-style variable interpolation inside string values of `args`, `env`, `url`, and `headers`:
 
-* **Required variable:** `${VAR_NAME}`  
-  Resolves to the value of `VAR_NAME` from the host environment or workspace `.env` file.
-* **Variable with default fallback:** `${VAR_NAME:-default_value}`  
+* **Required variable:** `${VAR_NAME}`
+  Resolves to the value of `VAR_NAME` from the workspace `.env` file or the host environment.
+* **Variable with default fallback:** `${VAR_NAME:-default_value}`
   Resolves to `VAR_NAME` if set and non-empty; otherwise evaluates to `default_value`.
 
-### 5.2 Compilation to Target Agents
+Variable names MUST match `[A-Za-z_][A-Za-z0-9_]*`. Values are interpolated **once**; the result of a substitution is never re-scanned for further placeholders. Placeholders are not expanded by the compiler when writing native files: they are translated to the target agent's syntax and remain symbolic, so plaintext secrets never reach the canonical file or the derived files.
+
+### 5.2 Resolution Order
+
+Implementations that resolve placeholders MUST use the following precedence:
+
+1. **Local `.env` file** of the active scope:
+   - project scope → `<project-root>/.env`
+   - global scope → `~/.agents/.env`
+2. **Host environment** (`process.env`).
+
+The local `.env` value **takes precedence** over a system environment variable with the same name. This is the opposite of the common `dotenv` default and is deliberate: the repository-local file is the source of truth for a project's MCP credentials.
+
+An unresolved placeholder without a `:-default` fallback MUST produce a warning at compile time and an error in `doctor`.
+
+### 5.3 Compilation to Target Agents
 When projecting `.agents/mcp.json` into native agent files that use proprietary interpolation syntax, compilers MUST translate `${VAR_NAME}` into the target agent's native format (see [`MATRIX.md`](./MATRIX.md)):
 - **Agents with native fallback support** (e.g., `claude-code`): preserve `${VAR_NAME:-default_value}` as-is.
 - **Agents without native fallback syntax** (`cursor`, `vscode`, `opencode`, `windsurf`, `zed`): discard the `:-default_value` suffix when translating to `${env:VAR_NAME}`, `{env:VAR_NAME}`, or `${VAR_NAME}` and emit a warning so the user knows the fallback was dropped.
@@ -153,5 +172,30 @@ AI coding agent maintainers wishing to adopt native support for `.agents/mcp.jso
 
 1.  **Discovery:** Check for `<project-root>/.agents/mcp.json` and `~/.agents/mcp.json` during workspace initialization.
 2.  **Filtering:** Ignore any server where `disabled === true`, or where `targets` is defined and does not include the agent's canonical ID.
-3.  **Interpolation:** Resolve `${VAR_NAME}` and `${VAR_NAME:-fallback}` against process environment variables and workspace `.env` files prior to spawning processes or opening network connections.
-4.  **Precedence:** If a user also maintains a legacy agent-specific file (e.g.,  `.cursor/mcp.json`), agent-specific overrides MAY take precedence over `.agents/mcp.json` for local experimentation while this spec is under adoption.
+3.  **Interpolation:** Resolve `${VAR_NAME}` and `${VAR_NAME:-fallback}` using the precedence defined in §5.2 (`.env` of the active scope first, then the host environment) prior to spawning processes or opening network connections.
+4.  **Precedence:** If a user also maintains an agent-specific file (e.g.,  `.cursor/mcp.json`), agent-specific overrides MAY take precedence over `.agents/mcp.json` for local experimentation while this spec is under adoption.
+
+---
+
+## 9. Local State & Untracked Artifacts
+
+The specification defines a canonical, shareable file; tooling state MUST NOT leak into it.
+
+1. **Sync state:** Implementations MAY keep a local state file at `.agents/.mcp-sync-state.json` (project scope) and `~/.agents/.mcp-sync-state.json` (global scope). Its format is implementation-defined. It MUST be listed in `.gitignore` and MUST NOT be required by conformant readers of `.agents/mcp.json`.
+2. **Secrets:** Real values live only in `.env` (project scope) or `~/.agents/.env` (global scope), never in `.agents/mcp.json`. `.env.example` contains key names only.
+3. **Agent files:** Native agent configuration files belong to the user. Compilers MUST NOT add them to `.gitignore`, and MUST NOT delete or move them.
+4. **Gitignore changes:** The only entries a compiler may add to `.gitignore` are `.env` and the sync-state file, and only when it is about to write those files.
+
+## 10. Compiler Safety Guarantees
+
+A conformant compiler:
+
+- Writes canonical and native files atomically (temporary file in the same directory, then rename).
+- Preserves unrelated keys, arrays (e.g. VS Code `inputs`), comments, and formatting of JSONC targets by performing AST-level edits.
+- Removes only entries that it previously managed, never hands-off entries.
+- Aborts instead of overwriting a file it cannot parse, and keeps a `.bak` copy before destructive recovery operations.
+- Produces byte-identical output when run twice against unchanged input (idempotence).
+
+## 11. Versioning & Evolution
+
+The `$schema` URI is the single version identifier. It MUST resolve to `https://agents-mcp.dev/schema/v<major>.<minor>.<patch>/mcp.schema.json`, and the published schema document MUST set its `$id` to that same URI. Implementations SHOULD accept any structurally valid file and SHOULD warn — not fail — when `$schema` points to a different version than the one they implement. There is no `version` property inside the file.

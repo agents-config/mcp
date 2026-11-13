@@ -33,8 +33,19 @@
   "license": "MIT",
   "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
   "type": "module",
-  "main": "index.js",
   "scripts": {
-    "test": "echo 'not implemented'"
+    "test": "echo 'not implemented'",
+    "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
+    "dist:build": "npm run build",
+    "dist:package": "tsx package.ts",
+    "dist:publish": "npm publish ./dist",
+    "dist": "run-s dist:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "npm-run-all2": "^9.0.4",
+    "prettier": "^3.10.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

@@ -1,6 +1,18 @@
 {
   "version": 2,
   "skills": {
+    "architect-worker": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/architect-worker/SKILL.md",
+      "computedHash": "f3c9a13d55b7d938ee91b93e3ed6a9ba37833c02f7e92bcac70b45708707bbff"
+    },
+    "changelog-management": {
+      "source": "alexbruno/dev-skills",
+      "sourceType": "github",
+      "skillPath": "skills/changelog-management/SKILL.md",
+      "computedHash": "a672da9f6e4496ba8a07ab5970c26b1d4f1dc101e5a3fd6c6e3b095e8020ea25"
+    },
     "code-review": {
       "source": "alexbruno/dev-skills",
       "sourceType": "github",
@@ -47,7 +59,7 @@
       "source": "alexbruno/dev-skills",
       "sourceType": "github",
       "skillPath": "skills/spec-driven-workflow/SKILL.md",
-      "computedHash": "f07c7dbbd9f8fe2af01b7d0862c3500b4e35bca706c016af4d7522c0fa5cfd18"
+      "computedHash": "b1e74733981d4ebff6c90a5b2be0ebca2db495eb65f72a7212118b0fc0f16b03"
     },
     "systematic-debugging": {
       "source": "alexbruno/dev-skills",
