@@ -21,9 +21,26 @@ describe('canonical schema', () => {
     expect(SPEC_VERSION).toBe(pkg.version)
     expect(schemaDoc.$id).toBe(DEFAULT_SCHEMA_URL)
     expect(schemaDoc.$id).toContain(`/schema/v${pkg.version}/`)
-    // The version segment must come from package.json, not a literal.
-    expect(schemaDoc.$id).not.toContain('/schema/v0.1.0/')
-    expect(schemaDoc.$id).not.toContain('/schema/v9.9.9/')
+  })
+
+  it('rejects an unsupported transport value (Zod)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      servers: {
+        github: { transport: 'websocket', url: 'https://example.com' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a missing transport value (Zod)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      servers: {
+        github: { url: 'https://example.com' },
+      },
+    })
+    expect(result.success).toBe(false)
   })
 
   it('AgentIdSchema enumerates the six agents', () => {

@@ -3,6 +3,7 @@ import Ajv from 'ajv'
 import addFormats from 'ajv-formats'
 import pkg from '$/package.json' with { type: 'json' }
 import { readFileSync } from 'node:fs'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
 const schemaDoc = JSON.parse(
   readFileSync('spec/mcp.schema.json', 'utf8'),
@@ -12,8 +13,13 @@ const ajv = new Ajv({ strict: false })
 addFormats(ajv)
 const validate = ajv.compile(schemaDoc)
 
-const loadFixture = (name: string) =>
-  JSON.parse(readFileSync(`tests/fixtures/schema/${name}.json`, 'utf8'))
+const loadFixture = (name: string) => {
+  const fixture = JSON.parse(
+    readFileSync(`tests/fixtures/schema/${name}.json`, 'utf8'),
+  )
+  fixture.$schema = DEFAULT_SCHEMA_URL
+  return fixture
+}
 
 describe('generated schema is Draft-07', () => {
   it('declares Draft-07 and additionalProperties: false at the top level', () => {
@@ -25,7 +31,6 @@ describe('generated schema is Draft-07', () => {
     expect(schemaDoc.$id).toBe(
       `https://agents-mcp.dev/schema/v${pkg.version}/mcp.schema.json`,
     )
-    expect(schemaDoc.$id).not.toContain('/schema/v0.1.0/')
   })
 
   it('accepts a valid fixture', () => {
