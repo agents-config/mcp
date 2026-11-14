@@ -1,21 +1,3 @@
-/**
- * `package.ts` — dist/ packaging script (§15).
- *
- * Creates the publishable `dist/` package from the root manifest:
- *   - create `dist/` if missing;
- *   - derive `dist/package.json` from root manifest, removing `scripts`,
- *     `devDependencies`, and `dependencies` (everything is bundled);
- *   - expose exactly one binary: `bin: { "agents-mcp": "./index.js" }`,
- *     with `main`/`exports` pointing at `./index.js`, explicit `files`,
- *     and `engines.node: ">=22"`;
- *   - verify that `spec/mcp.schema.json` `$id` ends with
- *     `v<version>/mcp.schema.json` and fail otherwise;
- *   - copy `LICENSE` and `README.md`; copy `CHANGELOG.md` when present
- *     (maintained by the changelog-management skill) and warn instead of
- *     failing when absent;
- *   - write the manifest with a trailing newline.
- */
-
 import {
   copyFileSync,
   existsSync,

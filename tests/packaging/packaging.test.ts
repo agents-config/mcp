@@ -1,13 +1,13 @@
-import { describe, expect, it } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { describe, expect, it, beforeAll } from 'vitest'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 const root = process.cwd()
 const distDir = resolve(root, 'dist')
 
-// Ensure dist/ is populated by running package.ts before tests
-execFileSync('npx', ['tsx', 'package.ts'], {
+// Ensure dist/ is populated by running dist:package before tests
+execFileSync('npm', ['run', 'dist:package'], {
   cwd: root,
   stdio: 'pipe',
 })
@@ -67,7 +67,7 @@ describe('packaging', () => {
 
   it('dist:package script runs without errors', () => {
     expect(() => {
-      execFileSync('npx', ['tsx', 'package.ts'], {
+      execFileSync('npm', ['run', 'dist:package'], {
         cwd: root,
         stdio: 'pipe',
       })

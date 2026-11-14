@@ -48,7 +48,7 @@
     "verify": "run-s typecheck format:check test schema:check build",
     "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
     "dist:build": "npm run verify",
-    "dist:package": "tsx package.ts",
+    "dist:package": "tsx scripts/dist-package.ts",
     "dist:publish": "npm publish ./dist",
     "dist": "run-s dist:*"
   },
