@@ -45,7 +45,9 @@ describe('packaging', () => {
 
   it('dist/ contains expected files and index.js starts with shebang', () => {
     const actualFiles = readdirSync(distDir).sort()
-    expect(actualFiles).toEqual(['LICENSE', 'README.md', 'index.js', 'package.json'].sort())
+    expect(actualFiles).toEqual(
+      ['LICENSE', 'README.md', 'index.js', 'package.json'].sort(),
+    )
 
     const indexJs = readFileSync(resolve(distDir, 'index.js'), 'utf8')
     expect(indexJs.startsWith('#!/usr/bin/env node')).toBe(true)

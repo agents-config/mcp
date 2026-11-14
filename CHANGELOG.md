@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - Initial `agents-mcp` CLI implementation: single-source `.agents/mcp.json` compiler for 6 AI coding agents (Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed)
 - Canonical `.agents/mcp.json` format with Zod 4 schema and Draft-07 JSON Schema generation
 - `init` command: scaffold canonical config and select target agents
@@ -23,18 +24,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Per-agent targeting (`targets`) and disabled server handling
 
 ### Changed
+
 - None
 
 ### Deprecated
+
 - None
 
 ### Removed
+
 - None
 
 ### Fixed
+
 - None
 
 ### Security
+
 - `.env` and `.mcp-sync-state.json` added to `.gitignore` (lazy, managed block)
 - `.env` written with mode `0600`; existing keys never overwritten
 - Secret values never reach canonical/native files, logs, errors, or `--dry-run` output
