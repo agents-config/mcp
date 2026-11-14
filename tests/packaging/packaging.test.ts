@@ -6,6 +6,12 @@ import { execFileSync } from 'node:child_process'
 const root = process.cwd()
 const distDir = resolve(root, 'dist')
 
+// Ensure dist/ is populated by running package.ts before tests
+execFileSync('npx', ['tsx', 'package.ts'], {
+  cwd: root,
+  stdio: 'pipe',
+})
+
 describe('packaging', () => {
   it('dist/package.json has exactly one bin, no dependencies/scripts, engines.node >= 22', () => {
     const distPkg = JSON.parse(
@@ -46,7 +52,13 @@ describe('packaging', () => {
   it('dist/ contains expected files and index.js starts with shebang', () => {
     const actualFiles = readdirSync(distDir).sort()
     expect(actualFiles).toEqual(
-      ['LICENSE', 'README.md', 'index.js', 'package.json'].sort(),
+      [
+        'CHANGELOG.md',
+        'LICENSE',
+        'README.md',
+        'index.js',
+        'package.json',
+      ].sort(),
     )
 
     const indexJs = readFileSync(resolve(distDir, 'index.js'), 'utf8')
