@@ -19,13 +19,6 @@ export interface SyncState {
   agents: Partial<Record<AgentId, SyncStateAgent>>
 }
 
-export interface EmptySyncState {
-  version: 1
-  scope: ConfigScope
-  targets: []
-  agents: {}
-}
-
 export interface LoadStateResult {
   state: SyncState
   warnings: string[]
@@ -41,7 +34,7 @@ const SyncStateSchema = z.object({
   version: z.literal(STATE_VERSION),
   scope: z.enum(['project', 'global']),
   targets: z.array(AgentIdSchema),
-  agents: z.record(z.string(), SyncStateAgentSchema).optional(),
+  agents: z.partialRecord(AgentIdSchema, SyncStateAgentSchema).default({}),
 })
 
 /**
@@ -94,7 +87,7 @@ export function loadState(
     }
   }
 
-  return { state: result.data as SyncState, warnings: [] }
+  return { state: result.data, warnings: [] }
 }
 
 /**

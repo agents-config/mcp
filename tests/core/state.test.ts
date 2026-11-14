@@ -153,6 +153,60 @@ describe('state', () => {
     }
   })
 
+  it('loadState treats missing agents key as empty state', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.state.agents).toEqual({})
+      expect(result.warnings).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadState rejects unknown agent key in agents as corrupt state', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        path,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+          agents: {
+            'not-an-agent': {
+              path: `${ctx.cwd}/.mcp.json`,
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings.length).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('seedAgentNames creates and merges agent records', () => {
     const state: SyncState = emptyState('project')
     const next = seedAgentNames(

@@ -1,8 +1,7 @@
 import { z } from 'zod'
 import type { ParseError } from 'jsonc-parser'
 import { parse, printParseErrorCode } from 'jsonc-parser'
-import { readTextFile } from '$/src/core/fs-atomic'
-import { writeFileAtomic } from '$/src/core/fs-atomic'
+import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import { AGENTS_DIR, CONFIG_FILE, DEFAULT_SCHEMA_URL } from '$/src/config'
 import { CanonicalMcpConfigSchema, validateConfig } from '$/src/core/schema'
@@ -56,7 +55,7 @@ export function readConfig(
     const first = errors[0]!
     const code = printParseErrorCode(first.error)
     throw new ConfigValidationError(
-      `Invalid JSONC at ${path}:${first.offset + 1} (${code})`,
+      `Invalid JSONC at ${path} (offset ${first.offset}): ${code}`,
       path,
       [
         {

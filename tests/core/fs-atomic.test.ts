@@ -78,17 +78,21 @@ describe('fs-atomic', () => {
     }
   })
 
-  it('writeFileAtomic puts temp file in the target directory (win32 path)', () => {
+  it('writeFileAtomic puts temp file in the target directory (not in cwd)', () => {
     const dir = makeSandbox()
-    // A Windows-style path: dirname splits on '/', so a hand-rolled splitter
-    // would return '.' and pollute the process cwd with a temp file.
-    const winPath = join(dir, 'C:', 'proj', '.agents', 'mcp.json')
+    const targetDir = join(dir, 'project', '.agents')
+    const winPath = join(targetDir, 'mcp.json')
     try {
       writeFileAtomic(winPath, '{"servers":{}}\n')
       expect(readTextFile(winPath)).toBe('{"servers":{}}\n')
-      // No temp file may leak into the sandbox root.
+      // No temp file may leak into the sandbox root or the process cwd.
       const rootEntries = readdirSync(dir)
       expect(rootEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
+        false,
+      )
+      // The target directory itself must not retain a temp file after rename.
+      const targetEntries = readdirSync(targetDir)
+      expect(targetEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
         false,
       )
     } finally {

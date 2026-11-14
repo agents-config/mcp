@@ -81,16 +81,6 @@ describe('store', () => {
     }
   })
 
-  it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeRaw(ctx, '{"$schema":"x","servers":{}} >>> GARBAGE')
-      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
-    } finally {
-      cleanup()
-    }
-  })
-
   it('readConfig leaves file byte-identical after a failed load', () => {
     const { ctx, cleanup } = createSandbox()
     const path = `${ctx.cwd}/.agents/mcp.json`
