@@ -41,6 +41,38 @@ function diffValues(a: unknown, b: unknown): string {
   return `- ${aStr}\n+ ${bStr}`
 }
 
+/**
+ * Coleta ocorrências de uma flag repetível (`--arg`, `--env`, `--header`)
+ * diretamente de `rawArgs`.
+ *
+ * O `citty` (`parseArgs`) não acumula `type: 'string'` repetidas em um
+ * array — sobrescreve com a última ocorrência (bloqueador [R53]). Esta
+ * leitura direta preserva todas as ocorrências.
+ *
+ * Suporta:
+ * - `--flag=valor` (o valor é tudo depois do primeiro `=`)
+ * - `--flag valor` (o próximo token é o valor, mesmo começando com `-`,
+ *   ex. `--arg -y`; um próximo token que começa com `--` não é consumido)
+ */
+function collectRepeatableFlags(rawArgs: string[], flag: string): string[] {
+  const values: string[] = []
+  const longFlag = `--${flag}`
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+    if (token.startsWith(longFlag + '=')) {
+      values.push(token.slice(longFlag.length + 1))
+    } else if (token === longFlag) {
+      const next = rawArgs[i + 1]
+      if (next !== undefined && !next.startsWith('--')) {
+        values.push(next)
+        i++ // consome o valor do próximo token
+      }
+    }
+  }
+  return values
+}
+
 export const addCommand = defineCommand({
   meta: {
     name: 'add',
@@ -61,7 +93,7 @@ export const addCommand = defineCommand({
       description: 'Write detected secrets to .env',
     },
   },
-  run: async ({ args }) => {
+  run: async ({ args, rawArgs }) => {
     const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
     const scope = (args.global ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
@@ -70,24 +102,16 @@ export const addCommand = defineCommand({
     const force = args.force === true
     const extractSecrets = args['extract-secrets'] === true
 
+    // NOTE (R53): `citty`'s `parseArgs` does not accumulate repeated
+    // `type: 'string'` flags into an array — it overwrites with the last
+    // occurrence. Collect `--arg`, `--env` and `--header` directly from
+    // `rawArgs` so every occurrence is preserved.
     const options = {
       stdio: args.stdio as string | undefined,
-      arg: (Array.isArray(args.arg)
-        ? args.arg
-        : args.arg
-          ? [String(args.arg)]
-          : []) as string[],
+      arg: collectRepeatableFlags(rawArgs, 'arg'),
       http: args.http as string | undefined,
-      env: (Array.isArray(args.env)
-        ? args.env
-        : args.env
-          ? [String(args.env)]
-          : []) as string[],
-      header: (Array.isArray(args.header)
-        ? args.header
-        : args.header
-          ? [String(args.header)]
-          : []) as string[],
+      env: collectRepeatableFlags(rawArgs, 'env'),
+      header: collectRepeatableFlags(rawArgs, 'header'),
       cwd: args.cwd as string | undefined,
       name: args.name as string | undefined,
     }
