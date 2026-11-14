@@ -92,6 +92,21 @@ export const addCommand = defineCommand({
       name: args.name as string | undefined,
     }
 
+    // Validate that at least one source is provided (--stdio, --http, or
+    // positional argument). Without a source, there is nothing to add.
+    const positionalArgs = (args._ as string[] | undefined) ?? []
+    if (
+      !options.stdio &&
+      !options.http &&
+      options.arg.length === 0 &&
+      positionalArgs.length === 0
+    ) {
+      ui.error(
+        'Usage: agents-mcp add <source> --stdio <cmd> [--arg <token>...] | --http <url>',
+      )
+      process.exit(2)
+    }
+
     const resolved = resolveDirect(options)
     const name = options.name ?? resolved.suggestedName
 

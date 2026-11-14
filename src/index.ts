@@ -84,7 +84,7 @@ export async function main(): Promise<void> {
     return
   }
 
-  // Handle --help / -h only at root level (no subcommand specified) → exit 0.
+  // Handle --help / -h at root level (no subcommand specified) → exit 0.
   const hasSubcommand = rawArgs.some((a) => SUBCOMMANDS.includes(a))
   if (
     !hasSubcommand &&
@@ -92,6 +92,16 @@ export async function main(): Promise<void> {
   ) {
     await showUsage(app)
     return
+  }
+
+  // Handle --help / -h with a subcommand → show subcommand help → exit 0.
+  const subcmd = rawArgs.find((a) => SUBCOMMANDS.includes(a))
+  if (subcmd && (rawArgs.includes('--help') || rawArgs.includes('-h'))) {
+    const subCommandDef = (app.subCommands as Record<string, unknown>)[subcmd]
+    if (subCommandDef) {
+      await showUsage(subCommandDef, app)
+      return
+    }
   }
 
   try {
