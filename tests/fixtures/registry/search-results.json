@@ -1,0 +1,12 @@
+{
+  "servers": [
+    {
+      "name": "server-github",
+      "url": "https://github.com/modelcontextprotocol/server-github"
+    },
+    {
+      "name": "server-linear",
+      "url": "https://github.com/modelcontextprotocol/server-linear"
+    }
+  ]
+}

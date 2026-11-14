@@ -1,0 +1,7 @@
+{
+  "name": "@modelcontextprotocol/server-github",
+  "version": "0.1.0",
+  "bin": {
+    "server-github": "dist/index.js"
+  }
+}

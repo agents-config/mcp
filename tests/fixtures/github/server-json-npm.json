@@ -1,0 +1,9 @@
+{
+  "name": "server-github",
+  "registry_type": "npm",
+  "identifier": "@modelcontextprotocol/server-github",
+  "environment_variables": [
+    { "name": "GITHUB_PERSONAL_ACCESS_TOKEN", "is_secret": true },
+    { "name": "GITHUB_APP_ID", "is_secret": false }
+  ]
+}
