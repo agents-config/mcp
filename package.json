@@ -1,6 +1,6 @@
 {
   "name": "agents-mcp",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "One .agents/mcp.json to rule them all. A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across any AI agent.",
   "keywords": [
     "mcp",

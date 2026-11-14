@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://agents-mcp.dev/schema/v0.0.0/mcp.schema.json",
+  "$id": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
   "title": "Unified Agents MCP Configuration",
   "description": "Canonical MCP server configuration for AI coding agents.",
   "type": "object",
