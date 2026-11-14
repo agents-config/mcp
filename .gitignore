@@ -21,6 +21,3 @@ npm-debug.log*
 
 # Package artifacts
 *.tgz
-
-# Local workflow artifacts (never published or tracked)
-workflow/
