@@ -11,9 +11,10 @@ import { resolveGithub } from '$/src/sources/github'
 import { resolveRegistry } from '$/src/sources/registry'
 
 export interface SourceOptions {
-  stdio?: string
+  command?: string
   arg?: string[]
   http?: string
+  sse?: string
   env?: string[]
   header?: string[]
   cwd?: string
@@ -26,7 +27,7 @@ export async function resolveSource(
 ): Promise<ResolvedServerPackage> {
   // 1. Explicit flags (direct source)
   if (
-    options.stdio ||
+    options.command ||
     options.http ||
     options.arg?.length ||
     options.env?.length ||
@@ -51,6 +52,6 @@ export async function resolveSource(
   }
 
   throw new Error(
-    'No source specified. Pass --stdio/--http/--arg/--env/--header or a source argument.',
+    'No source specified. Pass --command/--http/--arg/--env/--header or a source argument.',
   )
 }

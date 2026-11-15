@@ -1,10 +1,9 @@
-import pkg from '$/package.json' with { type: 'json' }
-
-export const SPEC_SITE_URL = 'https://agents-mcp.dev'
-export const SPEC_VERSION = pkg.version // e.g. "0.0.0"
-export const SPEC_VERSION_TAG = `v${SPEC_VERSION}` // e.g. "v0.0.0"
-export const DEFAULT_SCHEMA_URL = `${SPEC_SITE_URL}/schema/${SPEC_VERSION_TAG}/mcp.schema.json`
-export const SCHEMA_DRAFT = 'draft-07'
+export const AGENT_PLUGINS_MCP_SCHEMA_URL =
+  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+export const AGENT_PLUGINS_MCP_SPEC_URL =
+  'https://agent-plugins.org/plugin-authors/mcp-servers'
+export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
+export const SCHEMA_DRAFT = 'draft-2020-12'
 
 export const AGENTS_DIR = '.agents'
 export const CONFIG_FILE = 'mcp.json'

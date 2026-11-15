@@ -34,7 +34,7 @@ export async function resolveRegistry(
       ?.latest
     const spec = version ? `${name}@${version}` : name
     const definition: CanonicalServer = {
-      transport: 'stdio',
+      type: 'stdio',
       command: `npx -y ${spec}`,
       args: [],
     }
@@ -62,7 +62,7 @@ export async function resolveRegistry(
   const selected = results[0]!
   const name = selected.name ?? ref
   const definition: CanonicalServer = {
-    transport: 'stdio',
+    type: 'stdio',
     command: `npx -y ${name}`,
     args: [],
   }

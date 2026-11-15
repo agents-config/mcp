@@ -1,8 +1,10 @@
 # ADR-0001: Canonical transports are `stdio` and `http`
 
-- **Status**: Accepted
+> **Superseded by [ADR-0010](./0010-adopt-agent-plugins-mcp-schema.md)** — esta decisão foi substituída pela adoção do padrão Agent Plugins MCP 1.0.0, que define três transportes (`stdio`, `streamable-http`, `sse`) sob o discriminador `type`.
+
+- **Status**: Superseded by ADR-0010
 - **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md), [`docs/decisions/0010-adopt-agent-plugins-mcp-schema.md`](./0010-adopt-agent-plugins-mcp-schema.md)
 
 ## Context
 

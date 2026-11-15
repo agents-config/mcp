@@ -26,7 +26,7 @@ afterAll(() => {
 /** Executa `add` num sandbox e devolve o canonical config gravado. */
 async function runAddInSandbox(
   rawArgs: string[],
-  opts: { stdio?: string; http?: string } = {},
+  opts: { command?: string; http?: string; sse?: string } = {},
 ) {
   const { ctx, cleanup } = createSandbox()
   let content = ''
@@ -47,8 +47,9 @@ async function runAddInSandbox(
         'no-sync': true,
         force: false,
         'extract-secrets': false,
-        stdio: opts.stdio ?? 'npx',
+        command: opts.command ?? 'npx',
         http: opts.http,
+        sse: opts.sse,
         cwd: undefined,
         name: 'st',
         _: [],
@@ -65,13 +66,14 @@ async function runAddInSandbox(
 describe('commands add (R53: repeatable flags from rawArgs)', () => {
   it('acumula múltiplas --arg= valor, incluindo valor iniciado com -', async () => {
     const content = await runAddInSandbox([
-      '--stdio=npx',
+      '--command=npx',
       '--arg=-y',
       '--arg=@modelcontextprotocol/server-sequential-thinking',
       '--name=st',
     ])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual([
+    expect(config.mcpServers.st.type).toBe('stdio')
+    expect(config.mcpServers.st.args).toEqual([
       '-y',
       '@modelcontextprotocol/server-sequential-thinking',
     ])
@@ -79,7 +81,7 @@ describe('commands add (R53: repeatable flags from rawArgs)', () => {
 
   it('acumula múltiplas --arg na forma --flag valor (espaço)', async () => {
     const content = await runAddInSandbox([
-      '--stdio=npx',
+      '--command=npx',
       '--arg',
       '-y',
       '--arg',
@@ -87,18 +89,18 @@ describe('commands add (R53: repeatable flags from rawArgs)', () => {
       '--name=st',
     ])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual(['-y', '@scope/pkg'])
+    expect(config.mcpServers.st.args).toEqual(['-y', '@scope/pkg'])
   })
 
   it('acumula múltiplas --env', async () => {
     const content = await runAddInSandbox([
-      '--stdio=npx',
+      '--command=npx',
       '--env=FOO=bar',
       '--env=BAZ=qux',
       '--name=st',
     ])
     const config = JSON.parse(content)
-    expect(config.servers.st.env).toEqual({ FOO: 'bar', BAZ: 'qux' })
+    expect(config.mcpServers.st.env).toEqual({ FOO: 'bar', BAZ: 'qux' })
   })
 
   it('acumula múltiplas --header', async () => {
@@ -112,47 +114,94 @@ describe('commands add (R53: repeatable flags from rawArgs)', () => {
       { http: 'https://api.example.com/mcp' },
     )
     const config = JSON.parse(content)
-    expect(config.servers.st.headers).toEqual({ X: '1', Y: '2' })
+    expect(config.mcpServers.st.headers).toEqual({ X: '1', Y: '2' })
   })
 
   it('mantém uma única --arg (não regressa)', async () => {
     const content = await runAddInSandbox([
-      '--stdio=npx',
+      '--command=npx',
       '--arg=-y',
       '--name=st',
     ])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual(['-y'])
+    expect(config.mcpServers.st.args).toEqual(['-y'])
   })
 
   it('mescla --flag=valor com --flag valor', async () => {
     const content = await runAddInSandbox([
-      '--stdio=npx',
+      '--command=npx',
       '--arg=-y',
       '--arg',
       '@scope/pkg',
       '--name=st',
     ])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual(['-y', '@scope/pkg'])
+    expect(config.mcpServers.st.args).toEqual(['-y', '@scope/pkg'])
   })
 
   it('não consome o próximo token quando ele começa com --', async () => {
-    const content = await runAddInSandbox(['--arg', '--stdio=npx', '--name=st'])
+    const content = await runAddInSandbox([
+      '--arg',
+      '--command=npx',
+      '--name=st',
+    ])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual([])
+    expect(config.mcpServers.st.args).toEqual([])
   })
 
   it('não grava nada quando não há --arg/--env/--header', async () => {
-    const content = await runAddInSandbox(['--stdio=npx', '--name=st'])
+    const content = await runAddInSandbox(['--command=npx', '--name=st'])
     const config = JSON.parse(content)
-    expect(config.servers.st.args).toEqual([])
-    expect(config.servers.st.env).toBeUndefined()
-    expect(config.servers.st.headers).toBeUndefined()
+    expect(config.mcpServers.st.args).toEqual([])
+    expect(config.mcpServers.st.env).toBeUndefined()
+    expect(config.mcpServers.st.headers).toBeUndefined()
   })
 
   it('não chama process.exit ao adicionar com sucesso', async () => {
-    await runAddInSandbox(['--stdio=npx', '--arg=-y', '--name=st'])
+    await runAddInSandbox(['--command=npx', '--arg=-y', '--name=st'])
     expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it('exibe --command (e não --stdio) na mensagem de uso sem fonte', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const errorMock = vi.fn()
+    // `restoreMocks` (vitest.config.ts) restaura process.exit antes de cada
+    // teste, então re-mockamos aqui para não lançar ao chamar process.exit(2).
+    vi.spyOn(process, 'exit').mockImplementation(
+      (() => {}) as NodeJS.Process['exit'],
+    )
+    try {
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx,
+        ui: {
+          error: errorMock,
+          warn: vi.fn(),
+          note: vi.fn(),
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: false,
+          global: false,
+          'no-sync': true,
+          force: false,
+          'extract-secrets': false,
+          command: undefined,
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: 'st',
+          _: [],
+        },
+        rawArgs: [],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+    } finally {
+      cleanup()
+    }
+
+    const message = errorMock.mock.calls[0]?.[0] as string
+    expect(message).toContain('--command')
+    expect(message).not.toContain('--stdio')
   })
 })

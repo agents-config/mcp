@@ -44,18 +44,16 @@ describe('store', () => {
   it('readConfig parses JSONC with comments and trailing commas', () => {
     const { ctx, cleanup } = createSandbox()
     const path = `${ctx.cwd}/.agents/mcp.json`
-    const raw = `{\n  // comment\n  "servers": {\n    "github": {\n      "transport": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
+    const raw = `{\n  // comment\n  "mcpServers": {\n    "github": {\n      "type": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
     try {
       writeRaw(ctx, raw)
 
       const result = readConfig('project', ctx)
       expect(result).not.toBeNull()
       expect(result!.raw).toBe(raw)
-      const servers = (result!.config as Record<string, unknown>)
-        .servers as Record<string, unknown>
-      expect((servers.github as Record<string, unknown>).transport).toBe(
-        'stdio',
-      )
+      const mcpServers = (result!.config as Record<string, unknown>)
+        .mcpServers as Record<string, unknown>
+      expect((mcpServers.github as Record<string, unknown>).type).toBe('stdio')
     } finally {
       cleanup()
     }
@@ -74,7 +72,7 @@ describe('store', () => {
   it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
     const { ctx, cleanup } = createSandbox()
     try {
-      writeRaw(ctx, '{"$schema":"x","servers":{}} >>> GARBAGE')
+      writeRaw(ctx, '{"$schema":"x","mcpServers":{}} >>> GARBAGE')
       expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
     } finally {
       cleanup()
@@ -102,9 +100,9 @@ describe('store', () => {
         ctx,
         config: {
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             github: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               args: ['-y', '@modelcontextprotocol/server-github'],
             },
@@ -114,9 +112,9 @@ describe('store', () => {
 
       const result = readConfig('project', ctx)
       expect(result).not.toBeNull()
-      const servers = (result!.config as Record<string, unknown>)
-        .servers as Record<string, unknown>
-      expect((servers.github as Record<string, unknown>).command).toBe('npx')
+      const mcpServers = (result!.config as Record<string, unknown>)
+        .mcpServers as Record<string, unknown>
+      expect((mcpServers.github as Record<string, unknown>).command).toBe('npx')
       expect(result!.config.$schema).toBe(DEFAULT_SCHEMA_URL)
     } finally {
       cleanup()
@@ -131,8 +129,8 @@ describe('store', () => {
         ctx,
         config: {
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
-            github: { transport: 'stdio', command: 'npx' },
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
           },
         },
       })
@@ -162,34 +160,33 @@ describe('store', () => {
       writeRaw(
         ctx,
         JSON.stringify({
-          $schema: 'https://example.com/other.json',
-          servers: {
-            github: { transport: 'stdio', command: 'npx' },
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
           },
         }),
       )
 
       const result = loadValidatedConfig('project', ctx)
       expect(result).not.toBeNull()
-      const servers = (result!.config.servers as Record<string, unknown>)
+      const mcpServers = (result!.config.mcpServers as Record<string, unknown>)
         .github as Record<string, unknown>
-      expect(servers.command).toBe('npx')
-      expect(result!.warnings.length).toBeGreaterThan(0)
-      expect(result!.warnings[0]).toContain('$schema')
+      expect(mcpServers.command).toBe('npx')
+      expect(result!.warnings.length).toBe(0)
     } finally {
       cleanup()
     }
   })
 
-  it('loadValidatedConfig throws ConfigValidationError with field path', () => {
+  it('loadValidatedConfig throws ConfigValidationError on wrong $schema', () => {
     const { ctx, cleanup } = createSandbox()
     try {
       writeRaw(
         ctx,
         JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          servers: {
-            'Bad Name': { transport: 'stdio', command: 'npx' },
+          $schema: 'https://example.com/other.json',
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
           },
         }),
       )
@@ -199,12 +196,6 @@ describe('store', () => {
         throw new Error('should have thrown')
       } catch (err) {
         expect(err).toBeInstanceOf(ConfigValidationError)
-        const cve = err as ConfigValidationError
-        expect(cve.path).toContain('.agents/mcp.json')
-        expect(cve.issues.length).toBeGreaterThan(0)
-        // The offending server name should appear in some issue path/message.
-        const issueText = JSON.stringify(cve.issues)
-        expect(issueText).toContain('Bad Name')
       }
     } finally {
       cleanup()

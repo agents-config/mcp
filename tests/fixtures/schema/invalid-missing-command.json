@@ -1,7 +1,7 @@
 {
-  "servers": {
+  "mcpServers": {
     "github": {
-      "transport": "stdio"
+      "type": "stdio"
     }
   }
 }

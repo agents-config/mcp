@@ -111,7 +111,7 @@ describe('env.resolveVar', () => {
 
 describe('env.planSecretExtraction', () => {
   const stdioServer: CanonicalServer = {
-    transport: 'stdio',
+    type: 'stdio',
     command: 'npx',
     args: ['-y', '@scope/pkg'],
     env: {
@@ -122,7 +122,7 @@ describe('env.planSecretExtraction', () => {
   }
 
   const httpServer: CanonicalServer = {
-    transport: 'http',
+    type: 'streamable-http',
     url: 'https://api.example.com/mcp',
     headers: { Authorization: 'sk-live_1234567890abcdef' },
   }
@@ -142,7 +142,7 @@ describe('env.planSecretExtraction', () => {
 
   it('flags secret value prefixes and URL credentials', () => {
     const httpServerWithCreds: CanonicalServer = {
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://user:pass@api.example.com/mcp',
       headers: { Authorization: 'sk-live_1234567890abcdef' },
     }
@@ -156,7 +156,7 @@ describe('env.planSecretExtraction', () => {
 
   it('does not flag a plain URL without embedded credentials', () => {
     const httpServer: CanonicalServer = {
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://api.example.com/mcp',
       headers: { Authorization: 'sk-live_1234567890abcdef' },
     }
@@ -183,13 +183,25 @@ describe('env.planSecretExtraction', () => {
 
   it('never flags values already wrapped in ${...}', () => {
     const symbolic: CanonicalServer = {
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
       headers: { Authorization: 'Bearer ${API_TOKEN}' },
     }
     const result = planSecretExtraction(symbolic, { policy: 'extract' })
     expect(result.writes).toEqual([])
     expect(result.warnings).toEqual([])
+  })
+
+  it('handles SSE servers for secret extraction', () => {
+    const sseServer: CanonicalServer = {
+      type: 'sse',
+      url: 'https://api.example.com/sse',
+      headers: { Authorization: 'sk-live_sse1234567890abcdef' },
+    }
+    const result = planSecretExtraction(sseServer, { policy: 'extract' })
+    const keys = result.writes.map((w) => w.key)
+    expect(keys).toContain('HTTP_AUTHORIZATION')
+    expect(keys).not.toContain('HTTP_URL')
   })
 })
 
@@ -297,7 +309,7 @@ describe('env.syncEnvExample', () => {
 describe('env.collectRequiredVarsForServer', () => {
   it('collects placeholder names from env, headers, args, and url', () => {
     const server: CanonicalServer = {
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://api.example.com/${PATH}',
       headers: { Authorization: 'Bearer ${TOKEN}' },
     }
@@ -308,9 +320,21 @@ describe('env.collectRequiredVarsForServer', () => {
     expect(names).toContain('TOKEN')
   })
 
+  it('collects from SSE servers', () => {
+    const server: CanonicalServer = {
+      type: 'sse',
+      url: 'https://api.example.com/${PATH}',
+      headers: { Authorization: 'Bearer ${TOKEN}' },
+    }
+    const result = collectRequiredVars(server)
+    const names = result.map((v) => v.name)
+    expect(names).toContain('PATH')
+    expect(names).toContain('TOKEN')
+  })
+
   it('derives isSecret from the secret key pattern', () => {
     const server: CanonicalServer = {
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: [],
       env: { API_TOKEN: '${T}', NODE_ENV: '${E}' },

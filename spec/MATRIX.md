@@ -50,17 +50,13 @@ directory that exists. All paths are resolved from the injected
 | `claude-code` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
 | `cursor` | `{ "command", "args", "env" }` | `{ "url", "headers" }` |
 | `vscode` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
-| `opencode` | `{ "type": "local", "command": [command, ...args], "environment": env, "enabled": !disabled }` | `{ "type": "remote", "url", "headers", "enabled": !disabled }` |
+| `opencode` | `{ "type": "local", "command": [command, ...args], "environment": env }` | `{ "type": "remote", "url", "headers" }` |
 | `windsurf` | `{ "command", "args", "env" }` | `{ "serverUrl": url, "headers" }` |
 | `zed` | `{ "command": { "path": command, "args", "env" } }` | `{ "url", "headers" }` |
 
 Rules:
 
 - Omit `args` when empty and `env`/`headers` when absent.
-- Omit servers with `disabled: true` for every agent except `opencode`, which
-  maps them to `enabled: false`.
-- Apply `targets` before writing: a server whose `targets` excludes the agent is
-  not emitted (and is removed if previously managed).
 - `cwd` is preserved in the canonical file but omitted for every agent in
   `v0.1.0` (`CWD_UNSUPPORTED` warning).
 - Never emit a literal secret value. Placeholders are translated, never resolved,
@@ -91,10 +87,10 @@ rules:
 
 | Agent | `stdio` inference | `http` inference | Transformations |
 | :--- | :--- | :--- | :--- |
-| `claude-code` | `type === "stdio"`, or `command` present without `url` | `type === "http"` or `url` present | `${VAR}` unchanged; `targets` not representable; omitted servers are unrecoverable |
+| `claude-code` | `type === "stdio"`, or `command` present without `url` | `type === "http"` or `url` present | `${VAR}` unchanged; omitted servers are unrecoverable |
 | `cursor` | `command` present | `url` present | `${env:VAR}` → `${VAR}` |
 | `vscode` | `type === "stdio"` | `type === "http"` or `url` present | `${env:VAR}` → `${VAR}`; `inputs` ignored; any other transport with `url` → `http` + warning |
-| `opencode` | `type === "local"` | `type === "remote"` | `command[0]` → command, rest → args, `environment` → env, `enabled: false` → `disabled: true`, `{env:VAR}` → `${VAR}` |
+| `opencode` | `type === "local"` | `type === "remote"` | `command[0]` → command, rest → args, `environment` → env, `{env:VAR}` → `${VAR}` |
 | `windsurf` | `command` present | `serverUrl` present | `serverUrl` → `url`, `${env:VAR}` → `${VAR}` |
 | `zed` | `command.path` present | `url` present | nested command unpacked; `source` ignored; `${VAR}` unchanged |
 
@@ -102,9 +98,8 @@ When an entry has both `command` and `url`, `url` wins with a
 `AMBIGUOUS_ENTRY` warning. Unknown native fields are dropped with
 `UNKNOWN_FIELD_DROPPED`; extraction never mutates the source file.
 
-Native formats do not store `targets`, so imported servers have no targets.
-`disabled` is recoverable only from `opencode` (`enabled: false`); for the other
-agents an omitted server simply cannot be reconstructed.
+Native formats do not store server-level targeting or disabled flags; imported
+servers have no such fields.
 
 ---
 
@@ -114,13 +109,11 @@ agents an omitted server simply cannot be reconstructed.
 | :--- | :--- | :--- |
 | `DEFAULT_DROPPED` | cursor, vscode, opencode, windsurf, zed | `:-fallback` has no native equivalent and was discarded. |
 | `CWD_UNSUPPORTED` | all (v0.1.0) | `cwd` cannot be represented natively. |
-| `TARGETS_NOT_NATIVE` | all | `targets` is a compiler-side filter with no native field. |
 | `SCOPE_UNSUPPORTED` | windsurf (project) | Agent only supports global scope; operation skipped. |
 | `TRANSPORT_INFERRED` | vscode, cursor, windsurf, zed | An entry without a canonical transport (for example, URL-only) was imported as `http`. |
 | `UNKNOWN_FIELD_DROPPED` | all | A native field had no canonical equivalent. |
 | `AMBIGUOUS_ENTRY` | all | Both `command` and `url` were present. |
 | `UNKNOWN_PLACEHOLDER` | all | A placeholder did not match the supported grammar. |
-| `DISABLE_UNSUPPORTED` | claude-code, cursor, vscode, windsurf, zed | A disabled server is omitted instead of flagged. |
 | `MANUAL_ENTRY_PRESERVED` | all | A native entry not owned by the compiler was left untouched. |
 
 Warnings never fail a command; `doctor` reports them and `--strict` promotes
@@ -135,10 +128,10 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
 
 ```json
 {
-  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
-  "servers": {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
     "github": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
@@ -146,14 +139,12 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
       }
     },
     "postgres": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "uvx",
-      "args": ["mcp-server-postgres", "${DATABASE_URL}"],
-      "targets": ["claude-code", "opencode"],
-      "disabled": false
+      "args": ["mcp-server-postgres", "${DATABASE_URL}"]
     },
     "linear": {
-      "transport": "http",
+      "type": "streamable-http",
       "url": "https://mcp.linear.app/mcp",
       "headers": {
         "Authorization": "Bearer ${LINEAR_API_KEY}"
@@ -168,8 +159,7 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
 ### 7.1 Claude Code (`claude-code`)
 
 - **Target file:** `.mcp.json` (project) / `~/.claude.json` (global)
-- **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. There is no inline
-  `disabled` flag, so disabled servers are omitted. The global file stores
+- **Notes:** Supports `${VAR}` and `${VAR:-default}` natively. The global file stores
   general Claude Code state (projects, history, flags) alongside `mcpServers`, so
   compilers MUST perform a non-destructive AST merge.
 

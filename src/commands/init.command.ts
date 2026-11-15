@@ -1,7 +1,7 @@
 /**
  * `init` command (§11).
  *
- * Scaffold `<scope>/.agents/mcp.json` (`$schema`, `servers: {}`), select agents
+ * Scaffold `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents
  * (multi-select; `--agents` bypasses), persist `targets` in state. Existing
  * file → exit `1` unless `--force` (writes a `.bak.<timestamp>` first). Never
  * touches `.gitignore`. Non-interactive targets come from `--agents` or
@@ -87,7 +87,7 @@ export const initCommand = defineCommand({
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
         $schema: DEFAULT_SCHEMA_URL,
-        servers: {},
+        mcpServers: {},
       })
       const nextState = {
         ...state,

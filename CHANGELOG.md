@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sync` command: compile canonical config into all targeted agent config files (byte-idempotent)
 - `remove` command: remove a server and clean from managed agent configs
 - `list` command: inspect configured servers, targets, and sync status
-- `add` command: install an MCP server from direct flags (--stdio/--arg/--http/--env/--header/--cwd/--name)
+- `add` command: install an MCP server from direct flags (--command/--arg/--http/--env/--header/--cwd/--name)
 - `doctor` command: audit schema validity, env vars, runtime binaries, semantic drift, state, hygiene
 - Non-destructive JSONC AST edits (jsonc-parser) preserving comments, unrelated keys, and manual MCP entries
 - Secret hygiene: symbolic `${VAR}` placeholders in versioned files, real values only in `.env` (mode 0600)

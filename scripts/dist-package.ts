@@ -34,29 +34,18 @@ const distPkg: Record<string, unknown> = {
   files: ['index.js'],
 }
 
-// 1. Verify that spec/mcp.schema.json $id ends with v<version>/mcp.schema.json
-const schemaPath = resolve(root, 'spec', 'mcp.schema.json')
-const schemaDoc = JSON.parse(readFileSync(schemaPath, 'utf8'))
-const expectedSchemaIdSuffix = `v${version}/mcp.schema.json`
-if (!schemaDoc.$id?.endsWith(expectedSchemaIdSuffix)) {
-  console.error(
-    `❌ Error: spec/mcp.schema.json $id "${schemaDoc.$id}" does not end with "${expectedSchemaIdSuffix}"`,
-  )
-  process.exit(1)
-}
-
-// 2. Create dist/ if missing
+// 1. Create dist/ if missing
 if (!existsSync(distDir)) {
   mkdirSync(distDir, { recursive: true })
 }
 
-// 3. Write dist/package.json with trailing newline
+// 2. Write dist/package.json with trailing newline
 writeFileSync(
   resolve(distDir, 'package.json'),
   JSON.stringify(distPkg, null, 2) + '\n',
 )
 
-// 4. Copy metadata files
+// 3. Copy metadata files
 const metadataFiles = ['LICENSE', 'README.md']
 for (const file of metadataFiles) {
   const src = resolve(root, file)
@@ -68,7 +57,7 @@ for (const file of metadataFiles) {
   }
 }
 
-// 5. Copy CHANGELOG.md when present, warn instead of failing when absent
+// 4. Copy CHANGELOG.md when present, warn instead of failing when absent
 const changelogSrc = resolve(root, 'CHANGELOG.md')
 const changelogDest = resolve(distDir, 'CHANGELOG.md')
 if (existsSync(changelogSrc)) {

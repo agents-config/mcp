@@ -14,6 +14,7 @@ import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { translate } from '$/src/core/placeholder'
 import type {
   AgentId,
@@ -59,12 +60,6 @@ export async function detect(
   return readTextFile(path) !== null
 }
 
-function isStdioServer(
-  server: CanonicalServer,
-): server is Extract<CanonicalServer, { transport: 'stdio' }> {
-  return server.transport === 'stdio'
-}
-
 function translateField(
   value: string,
   field: string,
@@ -87,10 +82,6 @@ export function compile(server: CanonicalServer): {
 } {
   const warnings: Warning[] = []
 
-  if (server.disabled) {
-    return { entry: null, warnings }
-  }
-
   if (isStdioServer(server)) {
     if (server.cwd !== undefined && server.cwd !== '') {
       warnings.push({
@@ -102,7 +93,6 @@ export function compile(server: CanonicalServer): {
     }
     const entry: Record<string, unknown> = {
       command: server.command,
-      enabled: !server.disabled,
     }
     if (server.args && server.args.length > 0) {
       const translatedArgs: string[] = []
@@ -138,7 +128,6 @@ export function compile(server: CanonicalServer): {
   warnings.push(...urlWarnings)
   const entry: Record<string, unknown> = {
     serverUrl: translatedUrl,
-    enabled: !server.disabled,
   }
   if (server.headers) {
     const headers: Record<string, string> = {}
@@ -211,14 +200,19 @@ export function extractServers(
 
     if (isHttp) {
       const resolvedUrl = hasUrl ? (url as string) : (serverUrl as string)
-      const server: CanonicalServer = { transport: 'http', url: resolvedUrl }
+      // Windsurf nativo não distingue streamable-http de sse: emite
+      // 'streamable-http' para entradas remotas.
+      const server: CanonicalServer = {
+        type: 'streamable-http',
+        url: resolvedUrl,
+      }
+      // Windsurf http entries have no `type` field → inferred.
       if ((hasUrl || hasServerUrl) && !hasCommand) {
-        // Windsurf http entries have no `type` field → inferred.
         warnings.push({
           code: 'TRANSPORT_INFERRED',
           agent: 'windsurf',
           server: name,
-          message: `Transport inferred as http for \`${name}\``,
+          message: `Transport inferred as streamable-http for \`${name}\``,
         })
       }
       if (
@@ -241,7 +235,7 @@ export function extractServers(
 
     if (isStdio) {
       const server: CanonicalServer = {
-        transport: 'stdio',
+        type: 'stdio',
         command: command as string,
         args: [],
       }

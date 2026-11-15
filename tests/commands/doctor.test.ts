@@ -34,9 +34,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               env: { MISSING_VAR: '${MISSING_VAR}' },
             },
@@ -67,9 +67,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               env: { MY_TOKEN: '${MY_TOKEN}' },
             },
@@ -99,9 +99,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               env: { MY_TOKEN: '${MISSING_VAR:-fallback}' },
             },
@@ -131,9 +131,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             nonexistent: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'nonexistent-binary-xyz',
             },
           },
@@ -162,9 +162,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               args: ['-y', 'pkg'],
             },
@@ -220,9 +220,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               args: ['-y', 'pkg'],
             },
@@ -263,9 +263,9 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {
+          mcpServers: {
             test: {
-              transport: 'stdio',
+              type: 'stdio',
               command: 'npx',
               env: { MISSING_VAR: '${MISSING_VAR}' },
             },
@@ -303,7 +303,7 @@ describe('doctor', () => {
         join(ctx.cwd, '.agents', 'mcp.json'),
         JSON.stringify({
           $schema: DEFAULT_SCHEMA_URL,
-          servers: {},
+          mcpServers: {},
         }),
       )
       // Write corrupt state

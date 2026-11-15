@@ -1,43 +1,131 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import pkg from '$/package.json' with { type: 'json' }
 import {
   CanonicalMcpConfigSchema,
   validateConfig,
   AgentIdSchema,
+  isStdioServer,
+  isHttpServer,
 } from '$/src/core/schema'
-import {
-  DEFAULT_SCHEMA_URL,
-  SPEC_VERSION,
-  SERVER_NAME_PATTERN,
-} from '$/src/config'
-
-const schemaDoc = JSON.parse(readFileSync('spec/mcp.schema.json', 'utf8')) as {
-  $id: string
-}
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
 describe('canonical schema', () => {
-  it('derives $id from package.json version (never hardcoded)', () => {
-    expect(SPEC_VERSION).toBe(pkg.version)
-    expect(schemaDoc.$id).toBe(DEFAULT_SCHEMA_URL)
-    expect(schemaDoc.$id).toContain(`/schema/v${pkg.version}/`)
-  })
-
-  it('rejects an unsupported transport value (Zod)', () => {
+  it('rejects an unsupported type value (Zod)', () => {
     const result = CanonicalMcpConfigSchema.safeParse({
       $schema: DEFAULT_SCHEMA_URL,
-      servers: {
-        github: { transport: 'websocket', url: 'https://example.com' },
+      mcpServers: {
+        github: { type: 'websocket', url: 'https://example.com' },
       },
     })
     expect(result.success).toBe(false)
   })
 
-  it('rejects a missing transport value (Zod)', () => {
+  it('rejects a missing type value (Zod)', () => {
     const result = CanonicalMcpConfigSchema.safeParse({
       $schema: DEFAULT_SCHEMA_URL,
-      servers: {
+      mcpServers: {
         github: { url: 'https://example.com' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a missing $schema (required)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
+      },
+    })
+    expect(result.success).toBe(false)
+    expect(result.error?.issues.some((i) => i.path.includes('$schema'))).toBe(
+      true,
+    )
+  })
+
+  it('rejects disabled field on server', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', disabled: true },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects targets field on server', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', targets: ['claude-code'] },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects PLUGIN_ROOT as an env key', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', env: { PLUGIN_ROOT: '/x' } },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects PLUGIN_DATA as an env key', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', env: { PLUGIN_DATA: '/x' } },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects cwd outside allowed plugin paths', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '/absolute/path' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('accepts cwd with ./ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: './subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts cwd with ${PLUGIN_ROOT}/ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_ROOT}/subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts cwd with ${PLUGIN_DATA}/ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects $schema with a different URI', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: 'https://example.com/other.json',
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
       },
     })
     expect(result.success).toBe(false)
@@ -54,43 +142,49 @@ describe('canonical schema', () => {
     ])
   })
 
-  it('SERVER_NAME_PATTERN accepts valid names and rejects invalid ones', () => {
-    expect(SERVER_NAME_PATTERN.test('github')).toBe(true)
-    expect(SERVER_NAME_PATTERN.test('my.server_v1')).toBe(true)
-    expect(SERVER_NAME_PATTERN.test('GitHub')).toBe(false)
-    expect(SERVER_NAME_PATTERN.test('-bad')).toBe(false)
-    expect(SERVER_NAME_PATTERN.test('')).toBe(false)
-  })
-
   it('parses a valid canonical config', () => {
     const config = CanonicalMcpConfigSchema.parse({
       $schema: DEFAULT_SCHEMA_URL,
-      servers: {
+      mcpServers: {
         github: {
-          transport: 'stdio',
+          type: 'stdio',
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-github'],
         },
         linear: {
-          transport: 'http',
+          type: 'streamable-http',
           url: 'https://mcp.linear.app/mcp',
+        },
+        'linear-sse': {
+          type: 'sse',
+          url: 'https://mcp.linear.app/sse',
         },
       },
     })
-    expect(config.servers.github!.transport).toBe('stdio')
-    expect(config.servers.linear!.transport).toBe('http')
+    expect(isStdioServer(config.mcpServers.github!)).toBe(true)
+    if (isStdioServer(config.mcpServers.github!)) {
+      expect(config.mcpServers.github!.command).toBe('npx')
+    }
+    expect(isHttpServer(config.mcpServers.linear!)).toBe(true)
+    if (isHttpServer(config.mcpServers.linear!)) {
+      expect(config.mcpServers.linear!.type).toBe('streamable-http')
+    }
+    expect(isHttpServer(config.mcpServers['linear-sse']!)).toBe(true)
+    if (isHttpServer(config.mcpServers['linear-sse']!)) {
+      expect(config.mcpServers['linear-sse']!.type).toBe('sse')
+    }
   })
 
   it('applies args default without materializing on write', () => {
     const parsed = CanonicalMcpConfigSchema.parse({
       $schema: DEFAULT_SCHEMA_URL,
-      servers: {
-        github: { transport: 'stdio', command: 'npx' },
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
       },
     })
-    const github = parsed.servers.github!
-    expect(github.transport).toBe('stdio')
-    if (github.transport === 'stdio') {
+    const github = parsed.mcpServers.github!
+    expect(isStdioServer(github)).toBe(true)
+    if (isStdioServer(github)) {
       expect(github.args).toEqual([])
     }
   })
@@ -99,7 +193,7 @@ describe('canonical schema', () => {
     expect(() =>
       CanonicalMcpConfigSchema.parse({
         $schema: DEFAULT_SCHEMA_URL,
-        servers: {},
+        mcpServers: {},
         bogus: true,
       }),
     ).toThrow()
@@ -108,7 +202,7 @@ describe('canonical schema', () => {
   it('validateConfig warns on $schema mismatch but does not fail', () => {
     const { warnings } = validateConfig({
       $schema: 'https://example.com/other.json',
-      servers: {},
+      mcpServers: {},
     })
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain(DEFAULT_SCHEMA_URL)
@@ -117,7 +211,7 @@ describe('canonical schema', () => {
   it('validateConfig does not warn when $schema matches', () => {
     const { warnings } = validateConfig({
       $schema: DEFAULT_SCHEMA_URL,
-      servers: {},
+      mcpServers: {},
     })
     expect(warnings).toEqual([])
   })

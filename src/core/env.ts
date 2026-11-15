@@ -12,6 +12,7 @@ import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import { AGENTS_DIR, ENV_FILE, STATE_FILE } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 import { SECRET_KEY_RE, derivedKey } from '$/src/core/placeholder'
 import { ensureIgnored } from '$/src/core/gitignore'
 
@@ -199,7 +200,7 @@ export function planSecretExtraction(
       return
     }
     const envVarKey = derivedKey(
-      server.transport === 'stdio' ? server.command : 'http',
+      isStdioServer(server) ? server.command : 'http',
       key,
     )
     if (policy === 'extract') {
@@ -210,7 +211,7 @@ export function planSecretExtraction(
     )
   }
 
-  if (server.transport === 'stdio') {
+  if (isStdioServer(server)) {
     if (server.args) {
       for (const arg of server.args) {
         // Args can embed secrets (e.g. a token passed positionally).

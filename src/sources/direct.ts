@@ -1,21 +1,23 @@
 /**
  * Direct source resolver (§10.2).
  *
- * Parses CLI flags (--stdio, --arg, --http, --env, --header, --cwd, --name)
+ * Parses CLI flags (--command, --arg, --http, --env, --header, --cwd, --name)
  * into a `ResolvedServerPackage`.
  */
 
 import parseArgv from 'string-argv'
 import type { ResolvedServerPackage, RequiredEnvVar } from '$/src/sources/types'
 import { SERVER_NAME_PATTERN } from '$/src/config'
-import type { CanonicalServer } from '$/src/core/schema'
+import type { CanonicalServer, StdioServer } from '$/src/core/schema'
 import { collectRequiredVars } from '$/src/core/placeholder'
 import { isSecretValue } from '$/src/core/env'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 
 export interface DirectOptions {
-  stdio?: string
+  command?: string
   arg?: string[]
   http?: string
+  sse?: string
   env?: string[]
   header?: string[]
   cwd?: string
@@ -26,27 +28,30 @@ export function resolveDirect(options: DirectOptions): ResolvedServerPackage {
   let command: string | undefined
   let args: string[] = []
 
-  if (options.stdio) {
+  if (options.command) {
     if (options.arg && options.arg.length > 0) {
-      command = options.stdio
+      command = options.command
       args = [...options.arg]
     } else {
-      const tokens = parseArgv(options.stdio)
+      const tokens = parseArgv(options.command)
       if (tokens.length === 0) {
-        throw new Error('--stdio requires a non-empty command')
+        throw new Error('--command requires a non-empty command')
       }
       command = tokens[0]
       args = tokens.slice(1)
     }
   }
 
-  let transport: 'stdio' | 'http' = 'stdio'
+  let type: 'stdio' | 'streamable-http' | 'sse' = 'stdio'
   let url: string | undefined
   const headers: Record<string, string> = {}
   const env: Record<string, string> = {}
 
-  if (options.http) {
-    transport = 'http'
+  if (options.sse) {
+    type = 'sse'
+    url = options.sse
+  } else if (options.http) {
+    type = 'streamable-http'
     url = options.http
   }
 
@@ -73,21 +78,21 @@ export function resolveDirect(options: DirectOptions): ResolvedServerPackage {
   }
 
   const definition: CanonicalServer =
-    transport === 'http'
+    type === 'stdio'
       ? {
-          transport: 'http',
-          url: url as string,
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-        }
-      : {
-          transport: 'stdio',
+          type: 'stdio',
           command: command as string,
           args: args.length > 0 ? args : [],
           env: Object.keys(env).length > 0 ? env : undefined,
         }
+      : {
+          type,
+          url: url as string,
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+        }
 
-  if (options.cwd && definition.transport === 'stdio') {
-    definition.cwd = options.cwd
+  if (options.cwd && type === 'stdio') {
+    ;(definition as StdioServer).cwd = options.cwd
   }
 
   const suggestedName = options.name ?? suggestName(definition)
@@ -101,7 +106,7 @@ export function resolveDirect(options: DirectOptions): ResolvedServerPackage {
 }
 
 function suggestName(def: CanonicalServer): string {
-  if (def.transport === 'http' && def.url) {
+  if (isHttpServer(def) && def.url) {
     try {
       const u = new URL(def.url)
       const base = u.hostname.replace(/[^a-z0-9]/g, '-')
@@ -112,7 +117,7 @@ function suggestName(def: CanonicalServer): string {
       return sanitize(def.url)
     }
   }
-  if (def.transport === 'stdio' && def.command) {
+  if (isStdioServer(def) && def.command) {
     return sanitize((def.command as string).split(/[ /]/)[0] ?? '')
   }
   return 'server'

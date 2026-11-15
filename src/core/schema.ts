@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { DEFAULT_SCHEMA_URL, SERVER_NAME_PATTERN } from '$/src/config'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
 export const AgentIdSchema = z.enum([
   'claude-code',
@@ -10,45 +10,76 @@ export const AgentIdSchema = z.enum([
   'zed',
 ])
 
-const commonFields = {
-  disabled: z.boolean().optional(),
-  targets: z.array(AgentIdSchema).min(1).optional(),
-}
+/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
+const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
+
+/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
+const CWD_PATTERN =
+  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
 
 export const StdioServerSchema = z.strictObject({
-  transport: z.literal('stdio'),
+  type: z.literal('stdio'),
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string(), z.string()).optional(),
-  cwd: z.string().min(1).optional(),
-  ...commonFields,
+  env: z
+    .record(z.string(), z.string())
+    .optional()
+    .refine(
+      (env) =>
+        !env ||
+        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
+      {
+        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
+      },
+    ),
+  cwd: z.string().regex(CWD_PATTERN).optional(),
 })
 
-export const HttpServerSchema = z.strictObject({
-  transport: z.literal('http'),
-  url: z.url(),
+export const StreamableHttpServerSchema = z.strictObject({
+  type: z.literal('streamable-http'),
+  url: z.string().min(1),
   headers: z.record(z.string(), z.string()).optional(),
-  ...commonFields,
 })
 
-export const CanonicalServerSchema = z.discriminatedUnion('transport', [
+export const SseServerSchema = z.strictObject({
+  type: z.literal('sse'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const CanonicalServerSchema = z.discriminatedUnion('type', [
   StdioServerSchema,
-  HttpServerSchema,
+  StreamableHttpServerSchema,
+  SseServerSchema,
 ])
 
 export const CanonicalMcpConfigSchema = z.strictObject({
-  $schema: z.url(),
-  servers: z.record(
-    z.string().regex(SERVER_NAME_PATTERN),
-    CanonicalServerSchema,
-  ),
+  $schema: z.literal(DEFAULT_SCHEMA_URL),
+  mcpServers: z.record(z.string(), CanonicalServerSchema),
 })
 
 export type CanonicalMcpConfig = z.infer<typeof CanonicalMcpConfigSchema>
 export type CanonicalServer = z.infer<typeof CanonicalServerSchema>
 
+export type StdioServer = z.infer<typeof StdioServerSchema>
+export type StreamableHttpServer = z.infer<typeof StreamableHttpServerSchema>
+export type SseServer = z.infer<typeof SseServerSchema>
+
 /**
- * Non-JSON-Schema checks that cannot be expressed in the generated Draft-07
+ * Type guards over the canonical `type` discriminator.
+ */
+export function isStdioServer(server: CanonicalServer): server is StdioServer {
+  return server.type === 'stdio'
+}
+
+export function isHttpServer(
+  server: CanonicalServer,
+): server is StreamableHttpServer | SseServer {
+  return server.type === 'streamable-http' || server.type === 'sse'
+}
+
+/**
+ * Non-JSON-Schema checks that cannot be expressed in the generated Draft 2020-12
  * document. Never fails; returns warnings only.
  */
 export function validateConfig(config: unknown): { warnings: string[] } {
@@ -61,6 +92,8 @@ export function validateConfig(config: unknown): { warnings: string[] } {
         `$schema mismatch: expected ${DEFAULT_SCHEMA_URL}, got ${String(schemaUrl)}`,
       )
     }
+  } else {
+    warnings.push(`Missing required \$schema; expected ${DEFAULT_SCHEMA_URL}`)
   }
 
   return { warnings }

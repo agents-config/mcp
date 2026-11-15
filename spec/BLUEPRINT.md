@@ -53,7 +53,7 @@ Principles, in priority order:
 | JSONC | `jsonc-parser@^3.3` | `parseTree` + `modify` + `applyEdits`. |
 | Argv splitting | `string-argv@^0.4` | Only for `--stdio "cmd args"` convenience. |
 | Tests | `vitest@^5` | Node environment, real temp filesystem, mocked `fetch`. |
-| Schema tests | `ajv@^8` + `ajv-formats@^3` (dev) | Validate the generated Draft-07 document and fixtures. |
+| Schema tests | `ajv@^8` + `ajv-formats@^3` (dev) | Validate the generated Draft 2020-12 document and fixtures. |
 | Packaging | `tsx` + `npm-run-all2` (dev) | `npm run dist` builds, packages, publishes. |
 | Formatting | `prettier@^3` | `format:check` runs in CI. |
 
@@ -111,12 +111,10 @@ agents-mcp/
 ├── docs/
 │   └── decisions/                    # ADRs (published)
 ├── scripts/
-│   └── generate-schema.ts            # emits spec/mcp.schema.json from Zod
 ├── spec/
 │   ├── SPEC.md                       # published format specification
 │   ├── MATRIX.md                     # published per-agent translation matrix
-│   ├── BLUEPRINT.md                  # this document
-│   └── mcp.schema.json               # generated, committed
+│   └── BLUEPRINT.md                  # this document
 ├── src/
 │   ├── config.ts                     # constants (site, version, state, aliases)
 │   ├── index.ts                      # citty entrypoint
@@ -177,13 +175,11 @@ All constants live in one dependency-free module. Nothing here reads
 `process.env`; the schema URL must be reproducible on any machine.
 
 ```ts
-import pkg from '$/package.json' with { type: 'json' }
-
-export const SPEC_SITE_URL = 'https://agents-mcp.dev'
-export const SPEC_VERSION = pkg.version                  // e.g. "0.1.0"
-export const SPEC_VERSION_TAG = `v${SPEC_VERSION}`       // e.g. "v0.1.0"
-export const DEFAULT_SCHEMA_URL =
-  `${SPEC_SITE_URL}/schema/${SPEC_VERSION_TAG}/mcp.schema.json`
+export const AGENT_PLUGINS_MCP_SCHEMA_URL =
+  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+export const AGENT_PLUGINS_MCP_SPEC_URL =
+  'https://agent-plugins.org/plugin-authors/mcp-servers'
+export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
 export const SCHEMA_DRAFT = 'draft-07'
 
 export const AGENTS_DIR = '.agents'
@@ -204,9 +200,8 @@ export const AGENT_ORDER = [
 Rules:
 
 - The URL keeps the `v` prefix (`/schema/v0.1.0/...`), matching the README, the
-  spec text, and the generated `$id`.
+  spec text, and the published Agent Plugins schema URI.
 - `AGENTS_MCP_SITE_URL` is intentionally **not** supported. Determinism wins.
-- `spec/mcp.schema.json` MUST have `$id === DEFAULT_SCHEMA_URL`.
 
 ---
 
@@ -219,34 +214,52 @@ export const AgentIdSchema = z.enum([
   'claude-code', 'cursor', 'vscode', 'opencode', 'windsurf', 'zed',
 ])
 
-const commonFields = {
-  disabled: z.boolean().optional(),
-  targets: z.array(AgentIdSchema).min(1).optional(),
-}
+/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
+const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
+
+/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
+const CWD_PATTERN =
+  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
 
 export const StdioServerSchema = z.strictObject({
-  transport: z.literal('stdio'),
+  type: z.literal('stdio'),
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
-  env: z.record(z.string(), z.string()).optional(),
-  cwd: z.string().min(1).optional(),
-  ...commonFields,
+  env: z
+    .record(z.string(), z.string())
+    .optional()
+    .refine(
+      (env) =>
+        !env ||
+        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
+      {
+        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
+      },
+    ),
+  cwd: z.string().regex(CWD_PATTERN).optional(),
 })
 
-export const HttpServerSchema = z.strictObject({
-  transport: z.literal('http'),
-  url: z.url(),
+export const StreamableHttpServerSchema = z.strictObject({
+  type: z.literal('streamable-http'),
+  url: z.string().min(1),
   headers: z.record(z.string(), z.string()).optional(),
-  ...commonFields,
 })
 
-export const CanonicalServerSchema =
-  z.discriminatedUnion('transport', [StdioServerSchema, HttpServerSchema])
+export const SseServerSchema = z.strictObject({
+  type: z.literal('sse'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const CanonicalServerSchema = z.discriminatedUnion('type', [
+  StdioServerSchema,
+  StreamableHttpServerSchema,
+  SseServerSchema,
+])
 
 export const CanonicalMcpConfigSchema = z.strictObject({
-  $schema: z.url(),
-  // SERVER_NAME_PATTERN is imported from src/config.ts
-  servers: z.record(z.string().regex(SERVER_NAME_PATTERN), CanonicalServerSchema),
+  $schema: z.literal(DEFAULT_SCHEMA_URL),
+  mcpServers: z.record(z.string(), CanonicalServerSchema),
 })
 ```
 
@@ -255,41 +268,16 @@ Decisions:
 - **`z.strictObject()` everywhere.** Unknown keys are rejected at read time instead
   of silently disappearing on the next `sync`.
 - **`z.url()`** (Zod 4 top-level format), not `z.string().url()`.
-- **Two transports only.** `transport` is `stdio | http` (ADR-0001).
+- **Three transports.** `type` is `'stdio' | 'streamable-http' | 'sse'` (ADR-0010).
+- **`$schema` is fixed.** `$schema: z.literal(DEFAULT_SCHEMA_URL)` enforces the
+  official Agent Plugins MCP 1.0.0 URI; `validateConfig()` warns on mismatch.
 - **No `.refine()`/`.transform()` in this file.** `z.toJSONSchema()` throws by
   default on unrepresentable schemas. Extras that cannot be expressed in JSON
   Schema live in a separate `validateConfig()` function:
-  - warn when `$schema !== DEFAULT_SCHEMA_URL` (do not fail);
-  - warn when the same server name appears with different casing in `targets`
-    (defensive; names are unique in JSON by definition).
-
-### 5.2 Schema generation (`scripts/generate-schema.ts`)
-
-```ts
-const generated = z.toJSONSchema(CanonicalMcpConfigSchema, {
-  target: 'draft-7',
-  io: 'input',
-})
-
-const document = {
-  $schema: 'http://json-schema.org/draft-07/schema#',
-  $id: DEFAULT_SCHEMA_URL,
-  title: 'Unified Agents MCP Configuration',
-  description: 'Canonical MCP server configuration for AI coding agents.',
-  ...generated,
-}
-
-writeFileSync('spec/mcp.schema.json', JSON.stringify(document, null, 2) + '\n')
-```
-
-- **Draft-07** because VS Code/Cursor's JSON language service and the JSON Schema
-  Store ecosystem support it reliably; 2019-09/2020-12 support is still uneven and
-  we need none of its features (ADR-0002).
-- `io: 'input'` so `args` stays optional in the published schema (it has a
-  default). `z.strictObject()` still emits `additionalProperties: false`, which
-  `z.object()` would omit in input mode.
-- Output is byte-stable: fixed key order, 2-space indentation, trailing newline.
-- `npm run schema:check` fails when the committed file drifts from the source.
+  - warn when `$schema !== DEFAULT_SCHEMA_URL` (do not fail).
+- **No `disabled`/`targets` on server objects.** These extensions were removed
+  to match the official Agent Plugins MCP 1.0.0 schema (`additionalProperties:
+  false`).
 
 ### 5.3 Defaults and write-back policy
 
@@ -397,10 +385,10 @@ Canonical file access only:
 - `getConfigPath(scope, ctx)` → `<cwd>/.agents/mcp.json` |
   `<homeDir>/.agents/mcp.json`.
 - `readConfig(scope, ctx)` → `{ config, raw } | null`.
-- `writeConfig(scope, ctx, config)` → serializes `$schema` + `servers` (minimal,
+- `writeConfig(scope, ctx, config)` → serializes `$schema` + `mcpServers` (minimal,
   defaults not materialized), atomic write.
 - `loadValidatedConfig(scope, ctx)` → `{ config, warnings }`; throws
-  `ConfigValidationError` with a readable path (`servers.github.url`).
+  `ConfigValidationError` with a readable path (`mcpServers.github.url`).
 - Values are read with `jsonc-parser` even for `.json` files (tolerant of comments
   and trailing commas).
 
@@ -586,8 +574,6 @@ false positives whenever the user reformats a file.
 The normative per-agent mapping is in [`MATRIX.md`](./MATRIX.md). Adapter
 implementation must satisfy:
 
-- `targets` filtering before compiling;
-- `disabled` → omit (all except `opencode`) or `enabled: false` (`opencode`);
 - `previousManagedNames` cleanup without touching manual entries;
 - scope support (`windsurf` is global-only) reported through
   `capabilities.scopes`;
@@ -632,7 +618,7 @@ export interface ResolvedServerPackage {
 - `--stdio <command>` + repeatable `--arg <token>`.
 - If `--arg` is absent and the `--stdio` value contains whitespace, tokenize with
   `string-argv`; reject empty argv or an empty first token.
-- `--http <url>` (or a bare `http(s)://` source) → `transport: "http"`.
+- `--http <url>` (or a bare `http(s)://` source) → `type: "streamable-http"`.
 - `--env KEY=VALUE` → value is written to `.env` (via `core/env.ts`) and the
   canonical entry uses `${KEY}`. `--env KEY` → reference only; warns when
   unresolved.
@@ -691,12 +677,12 @@ default are needed, the default wins and the decision is printed.
 
 | Command | Behavior |
 | :--- | :--- |
-| `init` | Create `<scope>/.agents/mcp.json` (`$schema`, `servers: {}`), select agents (multi-select; `--agents` bypasses), persist `targets` in state. Existing file → exit `1` unless `--force` (which writes a `.bak.<timestamp>` first). Never touches `.gitignore`. In non-interactive mode, targets come from `--agents`, else from detection; if neither yields an agent, exit `1` with a hint to pass `--agents` (never assume all six). |
+| `init` | Create `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents (multi-select; `--agents` bypasses), persist `targets` in state. Existing file → exit `1` unless `--force` (which writes a `.bak.<timestamp>` first). Never touches `.gitignore`. In non-interactive mode, targets come from `--agents`, else from detection; if neither yields an agent, exit `1` with a hint to pass `--agents` (never assume all six). |
 | `import` | Scan every adapter for the active scope, extract, normalize, dedupe/conflict-resolve, apply the secret policy, merge into canonical (existing entries win unless `--force`), seed state names for all scanned agents, then `sync` unless `--no-sync`. Native files are never deleted. |
 | `add <source>` | Resolve source, prompt/accept `--name`, resolve/Create env vars, write canonical, then `sync` unless `--no-sync`. Same name + same normalized definition → exit `0`, no write (idempotent). Same name + different definition → exit `1` with a diff; `--force` overwrites; interactive offers rename. |
 | `sync` | Validate canonical; targets = flag → state → detection; compile per adapter; write; update state; print summary. No targets → exit `1` with a hint (never a silent no-op). Idempotent: a second run produces no byte changes. |
 | `remove <name>` | Name must exist, else exit `1`. Remove from canonical, then `sync` unless `--no-sync`. |
-| `list` | Read-only table: name, transport, command/URL, targets, enabled/disabled, and per-agent sync status. `--all` includes the global file and marks shadowed entries (project wins). |
+| `list` | Read-only table: name, type, command/URL, and per-agent sync status. `--all` includes the global file and marks shadowed entries (project wins). |
 | `doctor` | Schema, env resolution (all string fields), stdio binaries (`PATH` + `PATHEXT`, skip shell builtins), semantic drift per managed entry, unsupported-scope warnings, `.env`-tracked warning, state sanity. Exit `1` on errors; `--strict` promotes warnings. |
 
 Exit codes: `0` success, `1` validation/runtime failure, `2` usage error, `130`
@@ -796,8 +782,7 @@ The build pipeline is finalized together with the implementation (`T1`/`T11`); t
 - `typecheck` → `tsc --noEmit`;
 - `test` / `test:watch` → Vitest;
 - `format` / `format:check` → Prettier;
-- `schema:gen` / `schema:check` → deterministic schema generation and drift check;
-- `verify` → typecheck + format check + tests + schema check + build;
+- `verify` → typecheck + format check + tests + build;
 - `dist:build` → full `verify`;
 - `dist:package` → `tsx package.ts`;
 - `dist:publish` → `npm publish ./dist`;
@@ -809,7 +794,6 @@ The build pipeline is finalized together with the implementation (`T1`/`T11`); t
 - create `dist/` if missing;
 - derive `dist/package.json` from the root manifest, removing `scripts`, `devDependencies`, **and `dependencies`** (everything is bundled);
 - expose exactly one binary: `bin: { "agents-mcp": "./index.js" }`, with `main`/`exports` pointing at `./index.js`, explicit `files`, and `engines.node: ">=22"`;
-- verify that `spec/mcp.schema.json` `$id` ends with `v<version>/mcp.schema.json` and fail otherwise;
 - copy `LICENSE` and `README.md`; copy `CHANGELOG.md` when present (the changelog is maintained by the `changelog-management` skill) and warn instead of failing when it is absent;
 - write the manifest with a trailing newline.
 
@@ -818,7 +802,7 @@ Constraints:
 - **Exactly one binary:** `agents-mcp`.
 - No runtime `dependencies` in the published manifest.
 - `npm run dist` runs build → package → publish in that order. Publishing is always manual and happens after a version bump.
-- `dist:build` runs the full `verify` suite, so a stale `spec/mcp.schema.json` blocks publication.
+- `dist:build` runs the full `verify` suite, so CI catches drift before publication.
 
 ---
 
@@ -829,14 +813,13 @@ Constraints:
 | Path | Coverage |
 | :--- | :--- |
 | `tests/core/schema.test.ts` | positive/negative fixtures, strictness, defaults, name pattern |
-| `tests/schema/draft7.test.ts` | generated schema compiles with Ajv (Draft-07) and rejects invalid fixtures |
 | `tests/core/placeholder.test.ts` | grammar, fallbacks, all three env syntaxes, idempotence |
 | `tests/core/env.test.ts` | `.env` parsing, precedence (dotenv wins), secret heuristics, `.env.example`, no overwrite |
 | `tests/core/store.test.ts` | atomic write, minimal serialization, invalid JSONC abort |
 | `tests/core/state.test.ts` | targets persistence, corrupt state, pruning |
 | `tests/core/gitignore.test.ts` | lazy managed block, no duplicate entries, no agent files |
 | `tests/adapters/contract.test.ts` | table-driven contract across all 6 adapters |
-| `tests/adapters/<agent>.test.ts` | compile/extract/apply, JSONC preservation, targets, disabled, previousManagedNames, CRLF/BOM |
+| `tests/adapters/<agent>.test.ts` | compile/extract/apply, JSONC preservation, previousManagedNames, CRLF/BOM |
 | `tests/sources/*.test.ts` | direct parsing, GitHub chain, registry, mocked `fetch`, fixtures |
 | `tests/commands/*.test.ts` | integration in temp dirs: `init → add → sync → list → remove`, `import`, `doctor` |
 | `tests/helpers/sandbox.ts` | temp `cwd`/`homeDir`/`XDG_CONFIG_HOME`, guard that fails if not under `os.tmpdir()` |
@@ -854,7 +837,6 @@ Rules:
 - `verify`: Ubuntu, Node `22`, `24`, `26` → `npm ci` + `npm run verify`.
 - `windows-paths`: Windows, Node `22` → `typecheck` + `tests/core` +
   `tests/adapters` (path resolution and atomic-rename behavior).
-- `npm run schema:check` runs inside `verify` (no schema drift can merge).
 - No test may hit the network; everything is mocked or fixture-driven.
 
 Coverage (optional, enabled from day one): `@vitest/coverage-v8`, thresholds 80%
@@ -868,23 +850,21 @@ lines/functions and 75% branches over `src/core` and `src/adapters`.
 | :--- | :--- |
 | Corrupting `~/.claude.json` or `.zed/settings.json` | JSONC AST edits only; abort on parse error; atomic writes; `.bak` before `--force`; tests with real fixture files. |
 | Secret leakage | Symbolic placeholders end-to-end; `.env` git-ignored before write; `0600`; masked logs; warn-only in CI. |
-| Stale generated schema | `schema:check` inside `verify` and `dist:build`. |
+| Stale generated schema | Schema is derived from Zod at build time; no committed artifact to drift. |
 | Node/TS version drift | `engines >=22`, `@types/node@^22`, CI matrix; TS 7 is the only type checker, bundling does not depend on it. |
 | Windows path/rename differences | Injected platform, XDG/APPDATA resolution, Windows CI job, rename fallback. |
 | `jsonc-parser` multi-edit offset bugs | One shared helper, descending edits, dedicated tests. |
 | False-positive drift | Semantic comparison via `compile()`, never text diff. |
 | Network flakiness in `add` | Timeouts, one retry, fixtures in tests, no network in `verify`. |
 | Overwriting user MCP entries | Manage only names present in state; manual entries are preserved and reported. |
-| `zod` upgrade breaking schema output | Snapshot test on `spec/mcp.schema.json`; pinned major range. |
+| `zod` upgrade breaking schema output | Pinned major range; `verify` runs `typecheck` + `build`. |
 
 ---
 
 ## 18. Definition of Done (`v0.1.0`)
 
-- `spec/mcp.schema.json` is generated, committed, Draft-07-valid, and its `$id`
-  matches `https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json`.
-- All six adapters implement the contract and pass round-trip, JSONC, `targets`,
-  `disabled`, `previousManagedNames`, and warning tests.
+- All six adapters implement the contract and pass round-trip, JSONC,
+  `previousManagedNames`, and warning tests.
 - All seven commands work in project and global scopes, interactively (via the
   prompt port) and non-interactively (`--yes`), with `--dry-run` honored.
 - `sync` is idempotent byte-for-byte; `remove` propagates without touching manual
@@ -902,11 +882,13 @@ lines/functions and 75% branches over `src/core` and `src/adapters`.
 
 | ADR | Decision |
 | :--- | :--- |
-| [0001](../docs/decisions/0001-canonical-transports.md) | Canonical transports are `stdio` and `http`. |
-| [0002](../docs/decisions/0002-schema-source-and-versioning.md) | Zod 4 is the single schema source; Draft-07 output; versioned `$id` URL. |
+| [0001](../docs/decisions/0001-canonical-transports.md) | Canonical transports are `stdio` and `http`. **Superseded by ADR-0010**. |
+| [0002](../docs/decisions/0002-schema-source-and-versioning.md) | Zod 4 is the single schema source; Draft 2020-12 output; fixed `$id` URL. **Superseded by ADR-0010**. |
 | [0003](../docs/decisions/0003-bundler-tsup.md) | `tsup` (esbuild) single-file ESM bundle, no `.d.ts`. |
 | [0004](../docs/decisions/0004-runtime-context-and-pure-compilers.md) | Injected runtime context and pure native compilers. |
 | [0005](../docs/decisions/0005-local-sync-state.md) | Local sync state + persisted targets. |
 | [0006](../docs/decisions/0006-non-destructive-compilation.md) | Native files are preserved in place. |
 | [0007](../docs/decisions/0007-env-and-secrets.md) | `.env` precedence and safe secret extraction. |
 | [0008](../docs/decisions/0008-packaging-and-runtime-floor.md) | Node `>=22`, publish from `dist/` only, single binary. |
+| [0009](../docs/decisions/0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`. |
+| [0010](../docs/decisions/0010-adopt-agent-plugins-mcp-schema.md) | Adopt Agent Plugins MCP 1.0.0 as the normative basis. |

@@ -96,7 +96,7 @@ export async function resolveGithub(
       throw new Error(`Repository ${owner}/${repo} is not an MCP server`)
     }
     const definition: CanonicalServer = {
-      transport: 'stdio',
+      type: 'stdio',
       command,
       args: [],
     }
@@ -175,25 +175,25 @@ function manifestToServer(manifest: {
   switch (type) {
     case 'npm':
       return {
-        transport: 'stdio',
+        type: 'stdio',
         command: `npx -y ${id}`,
         args: [],
       }
     case 'pypi':
       return {
-        transport: 'stdio',
+        type: 'stdio',
         command: `uvx ${id}`,
         args: [],
       }
     case 'oci':
       return {
-        transport: 'stdio',
+        type: 'stdio',
         command: `docker run -i --rm ${id}`,
         args: [],
       }
     default:
       return {
-        transport: 'stdio',
+        type: 'stdio',
         command: `npx -y ${id}`,
         args: [],
       }

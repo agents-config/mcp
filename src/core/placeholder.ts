@@ -9,6 +9,7 @@
  */
 
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 
 /**
  * Grammar: `${NAME}` or `${NAME:-fallback}`, where `NAME` is
@@ -195,7 +196,7 @@ export function collectRequiredVars(server: CanonicalServer): RequiredEnvVar[] {
     }
   }
 
-  if (server.transport === 'stdio') {
+  if (isStdioServer(server)) {
     for (const arg of server.args ?? []) {
       scanString(arg, false)
     }

@@ -91,10 +91,10 @@ export function writeConfig({ scope, ctx, config }: WriteConfigOptions): void {
 }
 
 function serializeMinimal(config: Record<string, unknown>): string {
-  const servers = config['servers']
+  const mcpServers = config['mcpServers']
   const document: Record<string, unknown> = {
     $schema: DEFAULT_SCHEMA_URL,
-    servers,
+    mcpServers,
   }
   return JSON.stringify(document, null, 2) + '\n'
 }

@@ -14,6 +14,12 @@ import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import type { CanonicalServer } from '$/src/core/schema'
+import {
+  isStdioServer,
+  isHttpServer,
+  type StreamableHttpServer,
+  type SseServer,
+} from '$/src/core/schema'
 import { translate } from '$/src/core/placeholder'
 import type {
   AgentId,
@@ -58,12 +64,6 @@ export async function detect(
   return readTextFile(path) !== null
 }
 
-function isStdioServer(
-  server: CanonicalServer,
-): server is Extract<CanonicalServer, { transport: 'stdio' }> {
-  return server.transport === 'stdio'
-}
-
 function translateField(
   value: string,
   field: string,
@@ -85,10 +85,6 @@ export function compile(server: CanonicalServer): {
   warnings: readonly Warning[]
 } {
   const warnings: Warning[] = []
-
-  if (server.disabled) {
-    return { entry: null, warnings }
-  }
 
   if (isStdioServer(server)) {
     if (server.cwd !== undefined && server.cwd !== '') {
@@ -130,14 +126,15 @@ export function compile(server: CanonicalServer): {
     return { entry, warnings }
   }
 
-  // http
+  // streamable-http → 'http', sse → 'sse' (vscode preserva ambos nativamente)
+  const nativeType = server.type === 'sse' ? 'sse' : 'http'
   const { value: translatedUrl, warnings: urlWarnings } = translateField(
     server.url,
     'url',
   )
   warnings.push(...urlWarnings)
   const entry: Record<string, unknown> = {
-    type: 'http',
+    type: nativeType,
     url: translatedUrl,
   }
   if (server.headers) {
@@ -192,7 +189,8 @@ export function extractServers(
 
     const hasCommand = typeof command === 'string' && command.length > 0
     const hasUrl = typeof url === 'string' && url.length > 0
-    const isHttp = type === 'http' || hasUrl
+    const isHttp =
+      type === 'http' || type === 'streamable-http' || type === 'sse' || hasUrl
     const isStdio = type === 'stdio' || (hasCommand && !hasUrl)
 
     if (isHttp && isStdio) {
@@ -206,14 +204,31 @@ export function extractServers(
 
     if (isHttp) {
       const resolvedUrl = url as string
-      const server: CanonicalServer = { transport: 'http', url: resolvedUrl }
-      // URL-only (or non-explicit http) → inferred transport.
-      if (hasUrl && type !== 'http') {
+      // Determina o tipo canônico: 'sse' preservado do nativo, caso contrário
+      // 'streamable-http' (incluindo o legado 'http' e a inferência por URL).
+      let canonicalType: 'streamable-http' | 'sse' = 'streamable-http'
+      let inferred = false
+      if (type === 'sse') {
+        canonicalType = 'sse'
+      } else if (type === 'streamable-http') {
+        canonicalType = 'streamable-http'
+      } else if (type === 'http') {
+        canonicalType = 'streamable-http'
+      } else if (hasUrl) {
+        inferred = true
+        canonicalType = 'streamable-http'
+      }
+      const server: StreamableHttpServer | SseServer = {
+        type: canonicalType,
+        url: resolvedUrl,
+      }
+      // URL-only (ou tipo não explícito) → transporte inferido.
+      if (inferred) {
         warnings.push({
           code: 'TRANSPORT_INFERRED',
           agent: 'vscode',
           server: name,
-          message: `Transport inferred as http for \`${name}\``,
+          message: `Transport inferred as streamable-http for \`${name}\``,
         })
       }
       if (
@@ -236,7 +251,7 @@ export function extractServers(
 
     if (isStdio) {
       const server: CanonicalServer = {
-        transport: 'stdio',
+        type: 'stdio',
         command: command as string,
         args: [],
       }
@@ -268,7 +283,7 @@ export function extractServers(
       agent: 'vscode',
       server: name,
       field: 'type',
-      message: `No stdio/http entry for \`${name}\`; entry dropped`,
+      message: `No command/http entry for \`${name}\`; entry dropped`,
     })
   }
 

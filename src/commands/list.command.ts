@@ -1,8 +1,7 @@
 /**
  * `list` command (§11).
  *
- * Read-only table: name, transport, command/URL, targets, enabled/disabled,
- * per-agent sync status. `--all` includes the global scope and marks shadowed
+ * Read-only table: name, type, command/URL, per-agent sync status. `--all` includes the global scope and marks shadowed
  * entries (project wins).
  */
 
@@ -44,7 +43,7 @@ export const listCommand = defineCommand({
       const validated = loadValidatedConfig(scope, ctx)
       const stateResult = loadState(scope, ctx)
       const state = stateResult.state
-      const servers = validated?.config.servers ?? {}
+      const servers = validated?.config.mcpServers ?? {}
       scopeData.push({ scope, servers, state })
       if (scope === 'project') {
         for (const name of Object.keys(servers)) {
@@ -58,22 +57,21 @@ export const listCommand = defineCommand({
 
       for (const name of names) {
         const server = servers[name] as {
-          transport?: string
+          type?: string
           command?: string
           url?: string
-          targets?: string[]
-          disabled?: boolean
         }
-        const transport = server.transport ?? (server.url ? 'http' : 'stdio')
+        const type = server.type ?? (server.url ? 'streamable-http' : 'stdio')
+        const displayType =
+          type === 'stdio'
+            ? 'command'
+            : type === 'streamable-http'
+              ? 'http'
+              : type
         const target =
-          transport === 'http' ? (server.url ?? '') : (server.command ?? '')
-        const targets = server.targets ? server.targets.join(',') : ''
-        const enabled =
-          server.disabled === false
-            ? 'enabled'
-            : server.disabled === true
-              ? 'disabled'
-              : 'enabled'
+          type === 'streamable-http'
+            ? (server.url ?? '')
+            : (server.command ?? '')
 
         // Sync status: is this server managed by any agent in this scope?
         let synced = false
@@ -91,7 +89,7 @@ export const listCommand = defineCommand({
             : ''
 
         ui.note(
-          `${name.padEnd(14)} ${transport.padEnd(7)} ${target.padEnd(24)} ${targets.padEnd(16)} ${enabled.padEnd(10)} ${
+          `${name.padEnd(14)} ${displayType.padEnd(8)} ${target.padEnd(24)} ${
             synced ? 'synced' : 'not-synced'
           }${shadowed}`,
         )

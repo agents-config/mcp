@@ -8,6 +8,7 @@ import {
   detect,
 } from '$/src/adapters/cursor'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
 
@@ -48,7 +49,7 @@ describe('cursor adapter identity', () => {
 describe('cursor compile', () => {
   it('stdio server: no type, ${env:VAR}, default dropped', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', 'pkg'],
       env: { TOKEN: '${TOKEN:-secret}' },
@@ -62,9 +63,9 @@ describe('cursor compile', () => {
     expect(warnings[0]!.code).toBe('DEFAULT_DROPPED')
   })
 
-  it('http server: no type', () => {
+  it('streamable-http server: no type', () => {
     const { entry } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
       headers: { Authorization: 'Bearer ${env:KEY}' },
     })
@@ -74,19 +75,21 @@ describe('cursor compile', () => {
     })
   })
 
-  it('disabled omitted', () => {
+  it('sse server: no type', () => {
     const { entry } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      args: [],
-      disabled: true,
+      type: 'sse',
+      url: 'https://x/sse',
+      headers: { Authorization: 'Bearer ${env:KEY}' },
     })
-    expect(entry).toBeNull()
+    expect(entry).toEqual({
+      url: 'https://x/sse',
+      headers: { Authorization: 'Bearer ${env:KEY}' },
+    })
   })
 })
 
 describe('cursor extractServers', () => {
-  it('extracts stdio (command) and http (url)', () => {
+  it('extracts stdio (command) and streamable-http (url)', () => {
     const raw = JSON.stringify({
       mcpServers: {
         gh: { command: 'npx', args: ['-y', 'pkg'] },
@@ -94,12 +97,30 @@ describe('cursor extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    const gh = servers.gh as Extract<CanonicalServer, { transport: 'stdio' }>
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(gh.transport).toBe('stdio')
-    expect(lin.transport).toBe('http')
+    const gh = servers.gh as Extract<CanonicalServer, { type: 'stdio' }>
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isStdioServer(gh)).toBe(true)
+    expect(gh.command).toBe('npx')
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
+    expect(lin.url).toBe('https://x/mcp')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
+  })
+
+  it('extracts sse from native type sse', () => {
+    const raw = JSON.stringify({
+      mcpServers: {
+        lin: { type: 'sse', url: 'https://x/sse' },
+      },
+    })
+    const { servers } = extractServers(raw, 'project')
+    const lin = servers.lin as Extract<CanonicalServer, { type: 'sse' }>
+    expect(lin.type).toBe('sse')
+    expect(lin.url).toBe('https://x/sse')
   })
 })
 
@@ -110,7 +131,7 @@ describe('cursor applyServers', () => {
     })
     const { content, managedNames } = applyServers(
       existing,
-      { gh: { transport: 'stdio', command: 'npx', args: [] } },
+      { gh: { type: 'stdio', command: 'npx', args: [] } },
       { ...ctx, scope: 'project', previousManagedNames: new Set(['old']) },
     )
     expect(managedNames).toEqual(['gh'])

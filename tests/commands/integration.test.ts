@@ -12,9 +12,9 @@ describe('commands integration', () => {
       // init with agents and a server
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
-        servers: {
+        mcpServers: {
           github: {
-            transport: 'stdio',
+            type: 'stdio',
             command: 'npx',
             args: ['-y', '@modelcontextprotocol/server-github'],
           },
@@ -55,9 +55,9 @@ describe('commands integration', () => {
     try {
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
-        servers: {
+        mcpServers: {
           github: {
-            transport: 'stdio',
+            type: 'stdio',
             command: 'npx',
             args: ['-y', '@modelcontextprotocol/server-github'],
           },
@@ -91,7 +91,7 @@ describe('commands integration', () => {
     try {
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
-        servers: {},
+        mcpServers: {},
       })
 
       const exitSpy = vi
@@ -119,9 +119,9 @@ describe('commands integration', () => {
     try {
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
-        servers: {
+        mcpServers: {
           github: {
-            transport: 'stdio',
+            type: 'stdio',
             command: 'npx',
             args: ['-y', '@modelcontextprotocol/server-github'],
           },

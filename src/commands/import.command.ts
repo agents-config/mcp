@@ -29,6 +29,7 @@ import {
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { AgentId } from '$/src/adapters/types'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 
 export const importCommand = defineCommand({
@@ -64,9 +65,9 @@ export const importCommand = defineCommand({
     let canonical: Record<string, CanonicalServer> = {}
     let schemaUrl = DEFAULT_SCHEMA_URL
     if (validated) {
-      schemaUrl = validated.config.$schema
+      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
       canonical = {
-        ...(validated.config.servers as Record<string, CanonicalServer>),
+        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
       }
     }
 
@@ -135,7 +136,7 @@ export const importCommand = defineCommand({
     // Replace literal secret values in canonical with ${KEY} placeholders so
     // secrets never reach versioned files (§13).
     for (const server of Object.values(canonical)) {
-      if (server.transport === 'stdio') {
+      if (isStdioServer(server)) {
         if (server.env) {
           for (const [key, value] of Object.entries(server.env)) {
             const write = allWrites.find((w) => w.value === value)
@@ -179,7 +180,7 @@ export const importCommand = defineCommand({
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
         $schema: schemaUrl,
-        servers: canonical,
+        mcpServers: canonical,
       })
 
       const nextState: SyncState = {

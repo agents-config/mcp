@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { resolveRegistry } from '$/src/sources/registry'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 
 const originalFetch = global.fetch
 
@@ -20,7 +21,7 @@ function mockFetch(response: unknown, status = 200) {
 }
 
 function asStdio(server: CanonicalServer) {
-  return server as Extract<CanonicalServer, { transport: 'stdio' }>
+  return server as Extract<CanonicalServer, { type: 'stdio' }>
 }
 
 describe('sources registry', () => {
@@ -42,7 +43,7 @@ describe('sources registry', () => {
 
     expect(result.suggestedName).toBe('@modelcontextprotocol/server-github')
     const s = asStdio(result.definition)
-    expect(s.transport).toBe('stdio')
+    expect(isStdioServer(s)).toBe(true)
     expect(s.command).toBe('npx -y @modelcontextprotocol/server-github@0.1.0')
   })
 
@@ -53,6 +54,7 @@ describe('sources registry', () => {
 
     expect(result.suggestedName).toBe('server-github')
     const s = asStdio(result.definition)
+    expect(isStdioServer(s)).toBe(true)
     expect(s.command).toBe('npx -y server-github@1.0.0')
   })
 
@@ -79,7 +81,7 @@ describe('sources registry', () => {
 
     expect(result.suggestedName).toBe('server-linear')
     const s = asStdio(result.definition)
-    expect(s.transport).toBe('stdio')
+    expect(isStdioServer(s)).toBe(true)
     expect(s.command).toBe('npx -y server-linear')
   })
 

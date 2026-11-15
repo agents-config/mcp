@@ -77,16 +77,16 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
 
 ## Canonical Format (`.agents/mcp.json`)
 
-Every `.agents/mcp.json` is backed by a strict JSON Schema (`https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json`) for instant autocomplete and validation in modern editors.
+Every `.agents/mcp.json` is backed by a strict JSON Schema (`https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`) for instant autocomplete and validation in modern editors.
 
 Example:
 
 ```json
 {
-  "$schema": "https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json",
-  "servers": {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
     "github": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": {
@@ -94,13 +94,12 @@ Example:
       }
     },
     "postgres": {
-      "transport": "stdio",
+      "type": "stdio",
       "command": "uvx",
-      "args": ["mcp-server-postgres", "${DATABASE_URL}"],
-      "targets": ["claude-code", "opencode"]
+      "args": ["mcp-server-postgres", "${DATABASE_URL}"]
     },
     "linear": {
-      "transport": "http",
+      "type": "streamable-http",
       "url": "https://mcp.linear.app/mcp",
       "headers": {
         "Authorization": "Bearer ${LINEAR_API_KEY}"
@@ -115,9 +114,8 @@ Example:
 - **Zero-Friction Onboarding (`import`):** Absorbs existing configurations from 6+ agents without manual rewriting.
 - **Non-Destructive by Design:** AST-level edits (`jsonc-parser`) keep comments, VS Code `inputs`, and non-MCP settings intact — and native agent files are never deleted or moved.
 - **Secret Hygiene by Default:** Enforces `${VAR}` placeholders in versioned configs while syncing required keys to `.env` and `.env.example`.
-- **Per-Agent Targeting (`targets`):** Restrict heavy MCP servers to specific tools (e.g., UI servers only in Cursor/VS Code) to save context tokens elsewhere.
 - **Environment Diagnostics (`doctor`):** Validates schema compliance, checks missing `.env` variables, verifies local binaries (`npx`, `uvx`, `docker`), and detects configuration drift semantically.
-- **Deterministic Schema:** A single Zod source generates the published Draft-07 JSON Schema, so types, runtime validation, and editor autocomplete never drift.
+- **Deterministic Schema:** A single Zod source generates the published Draft 2020-12 JSON Schema, so types, runtime validation, and editor autocomplete never drift.
 - **Project & Global Scopes:** Works seamlessly at the repository level (`.agents/mcp.json`) or user level (`~/.agents/mcp.json` via `-g`).
 
 ## Supported Agents
@@ -133,7 +131,7 @@ Example:
 
 See the full field-by-field translation rules in [`spec/MATRIX.md`](./spec/MATRIX.md).
 
-Remote servers use **Streamable HTTP** (`transport: "http"`).
+Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy **SSE** (`type: "sse"`).
 
 ## CLI Reference
 
@@ -144,7 +142,7 @@ Remote servers use **Streamable HTTP** (`transport: "http"`).
 | `agents-mcp add <source>`  | Install an MCP server from GitHub, npm, MCP Registry, or CLI flags |
 | `agents-mcp sync`          | Compile `.agents/mcp.json` into all targeted agent config files    |
 | `agents-mcp remove <name>` | Remove a server and clean it from managed agent configs            |
-| `agents-mcp list`          | Inspect configured servers, targets, and sync state                |
+| `agents-mcp list`          | Inspect configured servers and sync state                          |
 | `agents-mcp doctor`        | Audit schema validity, env vars, runtime binaries, and drift       |
 
 Global flags: `-g`/`--global`, `-y`/`--yes`, `--agents <list>`, `--dry-run`.
@@ -153,8 +151,18 @@ Global flags: `-g`/`--global`, `-y`/`--yes`, `--agents <list>`, `--dry-run`.
 
 The `.agents/mcp.json` format is an open, public-domain specification ([CC0 1.0](./spec/SPEC.md)).
 
+### Normative basis
+
+This CLI adopts **Agent Plugins MCP 1.0.0** as its normative basis for MCP server configuration:
+
+- **Official schema:** `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`
+- **Implementation reference:** `https://agent-plugins.org/plugin-authors/mcp-servers`
+
+### Delimitação de valor
+
+A CLI `agents-mcp` gerencia e sincroniza MCPs de forma padronizada dentro do contexto de um projeto (e no escopo global do usuário). O padrão Agent Plugins MCP 1.0.0 continua sendo a referência normativa para a configuração de servidores MCP em plugins individuais. A proposta não cria nem propõe uma variante concorrente do schema Agent Plugins, e não transforma o projeto em um gerenciador geral de plugins além do gerenciamento de MCPs por projeto.
+
 - **Formal Specification:** [`spec/SPEC.md`](./spec/SPEC.md)
-- **JSON Schema:** [`spec/mcp.schema.json`](./spec/mcp.schema.json)
 - **Agent Translation Matrix:** [`spec/MATRIX.md`](./spec/MATRIX.md)
 - **Technical Blueprint:** [`spec/BLUEPRINT.md`](./spec/BLUEPRINT.md)
 - **Architecture Decisions:** [`docs/decisions/`](./docs/decisions/)

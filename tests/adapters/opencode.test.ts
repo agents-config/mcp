@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import {
   compile,
   extractServers,
@@ -38,37 +39,25 @@ describe('opencode adapter identity', () => {
 })
 
 describe('opencode compile', () => {
-  it('stdio server: merged command array, {env:VAR}, enabled', () => {
+  it('stdio server: merged command array, {env:VAR}', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', '${ARG:-fallback}'],
       env: { TOKEN: '${TOKEN}' },
-      disabled: false,
     })
     expect(entry).toEqual({
       type: 'local',
       command: ['npx', '-y', '{env:ARG}'],
       environment: { TOKEN: '{env:TOKEN}' },
-      enabled: true,
     })
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('DEFAULT_DROPPED')
   })
 
-  it('disabled server: enabled: false', () => {
+  it('streamable-http server: serverUrl, {env:VAR}', () => {
     const { entry } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      disabled: true,
-      args: [],
-    })
-    expect(entry).toEqual({ type: 'local', command: ['npx'], enabled: false })
-  })
-
-  it('http server: serverUrl, {env:VAR}', () => {
-    const { entry } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
       headers: { Authorization: 'Bearer ${KEY}' },
     })
@@ -76,7 +65,19 @@ describe('opencode compile', () => {
       type: 'remote',
       url: 'https://x/mcp',
       headers: { Authorization: 'Bearer {env:KEY}' },
-      enabled: true,
+    })
+  })
+
+  it('sse server: serverUrl, {env:VAR}', () => {
+    const { entry } = compile({
+      type: 'sse',
+      url: 'https://x/sse',
+      headers: { Authorization: 'Bearer ${KEY}' },
+    })
+    expect(entry).toEqual({
+      type: 'remote',
+      url: 'https://x/sse',
+      headers: { Authorization: 'Bearer {env:KEY}' },
     })
   })
 })
@@ -95,32 +96,31 @@ describe('opencode extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    const gh = servers.gh as Extract<CanonicalServer, { transport: 'stdio' }>
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(gh.transport).toBe('stdio')
+    const gh = servers.gh as Extract<CanonicalServer, { type: 'stdio' }>
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isStdioServer(gh)).toBe(true)
     expect(gh.command).toBe('npx')
     expect(gh.args).toEqual(['pkg'])
-    expect(lin.transport).toBe('http')
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
     expect(lin.url).toBe('https://x/mcp')
     expect(warnings).toEqual([])
   })
 
-  it('imports serverUrl-only as http with TRANSPORT_INFERRED', () => {
+  it('imports serverUrl-only as streamable-http with TRANSPORT_INFERRED', () => {
     const raw = JSON.stringify({ mcp: { lin: { serverUrl: 'https://x/mcp' } } })
     const { servers, warnings } = extractServers(raw, 'project')
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(lin.transport).toBe('http')
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
-  })
-
-  it('enabled: false → disabled: true', () => {
-    const raw = JSON.stringify({
-      mcp: { gh: { type: 'local', command: ['npx'], enabled: false } },
-    })
-    const { servers } = extractServers(raw, 'project')
-    const gh = servers.gh as Extract<CanonicalServer, { transport: 'stdio' }>
-    expect(gh.disabled).toBe(true)
   })
 })
 
@@ -131,7 +131,7 @@ describe('opencode applyServers', () => {
     })
     const { content, managedNames } = applyServers(
       existing,
-      { gh: { transport: 'stdio', command: 'npx', args: [] } },
+      { gh: { type: 'stdio', command: 'npx', args: [] } },
       { ...ctx, scope: 'project', previousManagedNames: new Set(['old']) },
     )
     expect(managedNames).toEqual(['gh'])
@@ -139,7 +139,6 @@ describe('opencode applyServers', () => {
     expect(parsed.mcp.gh).toEqual({
       type: 'local',
       command: ['npx'],
-      enabled: true,
     })
     expect(parsed.mcp.old).toBeUndefined()
   })

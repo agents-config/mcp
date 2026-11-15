@@ -14,6 +14,12 @@ import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import type { CanonicalServer } from '$/src/core/schema'
+import {
+  isStdioServer,
+  isHttpServer,
+  type StreamableHttpServer,
+  type SseServer,
+} from '$/src/core/schema'
 import { translate } from '$/src/core/placeholder'
 import type {
   AgentId,
@@ -58,12 +64,6 @@ export async function detect(
   return readTextFile(path) !== null
 }
 
-function isStdioServer(
-  server: CanonicalServer,
-): server is Extract<CanonicalServer, { transport: 'stdio' }> {
-  return server.transport === 'stdio'
-}
-
 function translateField(
   value: string,
   field: string,
@@ -85,10 +85,6 @@ export function compile(server: CanonicalServer): {
   warnings: readonly Warning[]
 } {
   const warnings: Warning[] = []
-
-  if (server.disabled) {
-    return { entry: null, warnings }
-  }
 
   if (isStdioServer(server)) {
     if (server.cwd !== undefined && server.cwd !== '') {
@@ -201,14 +197,29 @@ export function extractServers(
 
     if (hasUrl) {
       const resolvedUrl = url as string
-      const server: CanonicalServer = { transport: 'http', url: resolvedUrl }
-      // URL-only (or non-explicit http) → inferred transport.
-      if (type !== 'http') {
+      // Cursor nativo não distingue streamable-http de sse: preserva 'sse'
+      // quando explícito, caso contrário 'streamable-http'.
+      let canonicalType: 'streamable-http' | 'sse' = 'streamable-http'
+      let inferred = false
+      if (type === 'sse') {
+        canonicalType = 'sse'
+      } else if (type === 'streamable-http') {
+        canonicalType = 'streamable-http'
+      } else {
+        inferred = true
+        canonicalType = 'streamable-http'
+      }
+      const server: StreamableHttpServer | SseServer = {
+        type: canonicalType,
+        url: resolvedUrl,
+      }
+      // URL sem tipo explícito → transporte inferido.
+      if (inferred) {
         warnings.push({
           code: 'TRANSPORT_INFERRED',
           agent: 'cursor',
           server: name,
-          message: `Transport inferred as http for \`${name}\``,
+          message: `Transport inferred as streamable-http for \`${name}\``,
         })
       }
       if (
@@ -231,7 +242,7 @@ export function extractServers(
 
     if (hasCommand) {
       const server: CanonicalServer = {
-        transport: 'stdio',
+        type: 'stdio',
         command: command as string,
         args: [],
       }

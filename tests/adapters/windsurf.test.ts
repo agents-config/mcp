@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import {
   compile,
   extractServers,
@@ -51,7 +52,7 @@ describe('windsurf adapter identity', () => {
 describe('windsurf compile', () => {
   it('global scope: stdio server, ${env:VAR}, default dropped', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', '${ARG:-fallback}'],
       env: { TOKEN: '${TOKEN}' },
@@ -60,33 +61,30 @@ describe('windsurf compile', () => {
       command: 'npx',
       args: ['-y', '${env:ARG}'],
       env: { TOKEN: '${env:TOKEN}' },
-      enabled: true,
     })
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('DEFAULT_DROPPED')
   })
 
-  it('global scope: http server uses serverUrl', () => {
+  it('global scope: streamable-http server uses serverUrl', () => {
     const { entry } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
     })
-    expect(entry).toEqual({ serverUrl: 'https://x/mcp', enabled: true })
+    expect(entry).toEqual({ serverUrl: 'https://x/mcp' })
   })
 
-  it('disabled omitted', () => {
+  it('global scope: sse server uses serverUrl', () => {
     const { entry } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      disabled: true,
-      args: [],
+      type: 'sse',
+      url: 'https://x/sse',
     })
-    expect(entry).toBeNull()
+    expect(entry).toEqual({ serverUrl: 'https://x/sse' })
   })
 })
 
 describe('windsurf extractServers', () => {
-  it('extracts stdio (command) and http (serverUrl)', () => {
+  it('extracts stdio (command) and streamable-http (serverUrl)', () => {
     const raw = JSON.stringify({
       mcpServers: {
         gh: { command: 'npx', args: ['-y', 'pkg'] },
@@ -94,10 +92,16 @@ describe('windsurf extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'global')
-    const gh = servers.gh as Extract<CanonicalServer, { transport: 'stdio' }>
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(gh.transport).toBe('stdio')
-    expect(lin.transport).toBe('http')
+    const gh = servers.gh as Extract<CanonicalServer, { type: 'stdio' }>
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isStdioServer(gh)).toBe(true)
+    expect(gh.command).toBe('npx')
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
+    expect(lin.url).toBe('https://x/mcp')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
   })
@@ -110,12 +114,12 @@ describe('windsurf applyServers', () => {
     })
     const { content, managedNames } = applyServers(
       existing,
-      { gh: { transport: 'stdio', command: 'npx', args: [] } },
+      { gh: { type: 'stdio', command: 'npx', args: [] } },
       { ...ctx, scope: 'global', previousManagedNames: new Set(['old']) },
     )
     expect(managedNames).toEqual(['gh'])
     const parsed = JSON.parse(content)
-    expect(parsed.mcpServers.gh).toEqual({ command: 'npx', enabled: true })
+    expect(parsed.mcpServers.gh).toEqual({ command: 'npx' })
     expect(parsed.mcpServers.old).toBeUndefined()
   })
 
@@ -123,7 +127,7 @@ describe('windsurf applyServers', () => {
     const existing = JSON.stringify({ mcpServers: { old: { command: 'old' } } })
     const { content, managedNames, warnings } = applyServers(
       existing,
-      { gh: { transport: 'stdio', command: 'npx', args: [] } },
+      { gh: { type: 'stdio', command: 'npx', args: [] } },
       { ...ctx, scope: 'project' as const, previousManagedNames: new Set() },
     )
     expect(managedNames).toEqual([])

@@ -21,8 +21,7 @@ types or modules.
   dependencies) and copies LICENSE/README plus the changelog when present.
 - `npm run dist` = build (full `verify`) → package → publish, in that order;
   publishing is always a manual, post-bump action.
-- `dist:build` includes `schema:check`, so a stale `spec/mcp.schema.json` blocks
-  publication.
+- `dist:build` runs the full `verify` suite before publication.
 
 ## Alternatives Considered
 
@@ -34,8 +33,6 @@ types or modules.
 
 ## Consequences
 
-- **Positive**: simple install, single artifact, reproducible release, no stale
-  schema releases.
-- **Negative / Trade-offs**: users on an older runtime must upgrade; a failed
-  schema check blocks a release until regeneration is committed.
+- **Positive**: simple install, single artifact, reproducible release.
+- **Negative / Trade-offs**: users on an older runtime must upgrade.
 - **Follow-up**: verify `dist/package.json` in CI after `npm run build`.

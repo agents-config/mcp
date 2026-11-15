@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { resolveGithub } from '$/src/sources/github'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 
 const originalFetch = global.fetch
 
@@ -20,7 +21,7 @@ function mockFetch(response: unknown, status = 200) {
 }
 
 function asStdio(server: CanonicalServer) {
-  return server as Extract<CanonicalServer, { transport: 'stdio' }>
+  return server as Extract<CanonicalServer, { type: 'stdio' }>
 }
 
 describe('sources github', () => {
@@ -44,7 +45,7 @@ describe('sources github', () => {
 
     expect(result.suggestedName).toBe('server-github')
     const s = asStdio(result.definition)
-    expect(s.transport).toBe('stdio')
+    expect(isStdioServer(s)).toBe(true)
     expect(s.command).toBe('npx -y @modelcontextprotocol/server-github')
     expect(result.requiredEnv).toHaveLength(1)
     expect(result.requiredEnv[0]!.name).toBe('GITHUB_TOKEN')
@@ -80,7 +81,7 @@ describe('sources github', () => {
 
     expect(result.suggestedName).toBe('test-pkg')
     const s = asStdio(result.definition)
-    expect(s.transport).toBe('stdio')
+    expect(isStdioServer(s)).toBe(true)
     expect(s.command).toBe('npx -y test-pkg')
   })
 

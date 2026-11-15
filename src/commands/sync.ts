@@ -91,10 +91,7 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     }
 
     const serversForAgent: Record<string, CanonicalServer> = {}
-    for (const [name, server] of Object.entries(config.servers)) {
-      if (server.targets && !server.targets.includes(agentId)) {
-        continue
-      }
+    for (const [name, server] of Object.entries(config.mcpServers)) {
       serversForAgent[name] = server
     }
 

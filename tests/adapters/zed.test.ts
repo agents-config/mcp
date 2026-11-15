@@ -8,6 +8,7 @@ import {
   detect,
 } from '$/src/adapters/zed'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
 
@@ -50,7 +51,7 @@ describe('zed adapter identity', () => {
 describe('zed compile', () => {
   it('stdio server: nested command, ${VAR} unchanged', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', 'pkg'],
       env: { TOKEN: '${TOKEN}' },
@@ -65,27 +66,25 @@ describe('zed compile', () => {
     expect(warnings).toEqual([])
   })
 
-  it('http server', () => {
+  it('streamable-http server', () => {
     const { entry } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
     })
     expect(entry).toEqual({ url: 'https://x/mcp' })
   })
 
-  it('disabled omitted', () => {
+  it('sse server', () => {
     const { entry } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      disabled: true,
-      args: [],
+      type: 'sse',
+      url: 'https://x/sse',
     })
-    expect(entry).toBeNull()
+    expect(entry).toEqual({ url: 'https://x/sse' })
   })
 })
 
 describe('zed extractServers', () => {
-  it('extracts stdio (command.path) and http (url)', () => {
+  it('extracts stdio (command.path) and streamable-http (url)', () => {
     const raw = JSON.stringify({
       context_servers: {
         gh: { command: { path: 'npx', args: ['-y', 'pkg'] } },
@@ -93,11 +92,16 @@ describe('zed extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    const gh = servers.gh as Extract<CanonicalServer, { transport: 'stdio' }>
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(gh.transport).toBe('stdio')
+    const gh = servers.gh as Extract<CanonicalServer, { type: 'stdio' }>
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isStdioServer(gh)).toBe(true)
     expect(gh.command).toBe('npx')
-    expect(lin.transport).toBe('http')
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
+    expect(lin.url).toBe('https://x/mcp')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
   })
@@ -110,7 +114,7 @@ describe('zed applyServers', () => {
     })
     const { content, managedNames } = applyServers(
       existing,
-      { gh: { transport: 'stdio', command: 'npx', args: [] } },
+      { gh: { type: 'stdio', command: 'npx', args: [] } },
       { ...ctx, scope: 'project', previousManagedNames: new Set(['old']) },
     )
     expect(managedNames).toEqual(['gh'])

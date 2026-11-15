@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parse as jsoncParse, type ParseError } from 'jsonc-parser'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import {
   compile,
   extractServers,
@@ -54,7 +55,7 @@ describe('claude-code adapter identity', () => {
 describe('claude-code compile', () => {
   it('stdio server with env placeholder kept as-is (nativeDefault)', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-github'],
       env: { GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}' },
@@ -68,9 +69,9 @@ describe('claude-code compile', () => {
     expect(warnings).toEqual([])
   })
 
-  it('http server with headers translated', () => {
+  it('streamable-http server compiles to type http (claude-code preserves)', () => {
     const { entry, warnings } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://mcp.linear.app/mcp',
       headers: { Authorization: 'Bearer ${LINEAR_API_KEY}' },
     })
@@ -82,9 +83,23 @@ describe('claude-code compile', () => {
     expect(warnings).toEqual([])
   })
 
+  it('sse server compiles to type sse (claude-code preserves)', () => {
+    const { entry, warnings } = compile({
+      type: 'sse',
+      url: 'https://mcp.linear.app/sse',
+      headers: { Authorization: 'Bearer ${LINEAR_API_KEY}' },
+    })
+    expect(entry).toEqual({
+      type: 'sse',
+      url: 'https://mcp.linear.app/sse',
+      headers: { Authorization: 'Bearer ${LINEAR_API_KEY}' },
+    })
+    expect(warnings).toEqual([])
+  })
+
   it('omits args when empty and env when absent', () => {
     const { entry } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: [],
     })
@@ -93,20 +108,9 @@ describe('claude-code compile', () => {
     expect(entry).not.toHaveProperty('env')
   })
 
-  it('disabled server is omitted (null entry)', () => {
-    const { entry, warnings } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      args: [],
-      disabled: true,
-    })
-    expect(entry).toBeNull()
-    expect(warnings).toEqual([])
-  })
-
   it('reports CWD_UNSUPPORTED warning', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: [],
       cwd: '/some/dir',
@@ -118,7 +122,7 @@ describe('claude-code compile', () => {
 })
 
 describe('claude-code extractServers', () => {
-  it('extracts stdio and http servers from .mcp.json', () => {
+  it('extracts stdio and streamable-http servers from .mcp.json', () => {
     const raw = JSON.stringify({
       mcpServers: {
         github: {
@@ -135,33 +139,52 @@ describe('claude-code extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    const github = servers.github as Extract<
-      CanonicalServer,
-      { transport: 'stdio' }
-    >
-    expect(github.transport).toBe('stdio')
+    const github = servers.github as Extract<CanonicalServer, { type: 'stdio' }>
+    expect(isStdioServer(github)).toBe(true)
     expect(github.command).toBe('npx')
     expect(github.args).toEqual(['-y', '@modelcontextprotocol/server-github'])
     expect(github.env).toEqual({ GITHUB_TOKEN: '${GITHUB_TOKEN}' })
-    expect(servers.linear).toEqual({
-      transport: 'http',
-      url: 'https://mcp.linear.app/mcp',
-      headers: { Authorization: 'Bearer ${LINEAR_API_KEY}' },
-    })
+    // legacy native 'http' → canonical streamable-http
+    expect(isHttpServer(servers.linear!)).toBe(true)
+    if (isHttpServer(servers.linear!)) {
+      expect(servers.linear!.type).toBe('streamable-http')
+      expect(servers.linear!.url).toBe('https://mcp.linear.app/mcp')
+      expect(servers.linear!.headers).toEqual({
+        Authorization: 'Bearer ${LINEAR_API_KEY}',
+      })
+    }
     expect(warnings).toEqual([])
   })
 
-  it('imports a URL-only entry as http with TRANSPORT_INFERRED', () => {
+  it('extracts sse server from native type sse', () => {
+    const raw = JSON.stringify({
+      mcpServers: {
+        linearSse: {
+          type: 'sse',
+          url: 'https://mcp.linear.app/sse',
+        },
+      },
+    })
+    const { servers, warnings } = extractServers(raw, 'project')
+    expect(isHttpServer(servers.linearSse!)).toBe(true)
+    if (isHttpServer(servers.linearSse!)) {
+      expect(servers.linearSse!.type).toBe('sse')
+    }
+    expect(warnings).toEqual([])
+  })
+
+  it('imports a URL-only entry as streamable-http with TRANSPORT_INFERRED', () => {
     const raw = JSON.stringify({
       mcpServers: {
         linear: { url: 'https://mcp.linear.app/mcp' },
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    expect(servers.linear).toEqual({
-      transport: 'http',
-      url: 'https://mcp.linear.app/mcp',
-    })
+    expect(isHttpServer(servers.linear!)).toBe(true)
+    if (isHttpServer(servers.linear!)) {
+      expect(servers.linear!.type).toBe('streamable-http')
+      expect(servers.linear!.url).toBe('https://mcp.linear.app/mcp')
+    }
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
   })
@@ -173,11 +196,8 @@ describe('claude-code extractServers', () => {
       },
     })
     const { servers } = extractServers(raw, 'project')
-    const github = servers.github as Extract<
-      CanonicalServer,
-      { transport: 'stdio' }
-    >
-    expect(github.transport).toBe('stdio')
+    const github = servers.github as Extract<CanonicalServer, { type: 'stdio' }>
+    expect(isStdioServer(github)).toBe(true)
     expect(github.command).toBe('npx')
   })
 
@@ -193,7 +213,7 @@ describe('claude-code applyServers', () => {
       null,
       {
         github: {
-          transport: 'stdio',
+          type: 'stdio',
           command: 'npx',
           args: ['-y', '@modelcontextprotocol/server-github'],
         },
@@ -218,7 +238,7 @@ describe('claude-code applyServers', () => {
       existing,
       {
         github: {
-          transport: 'stdio',
+          type: 'stdio',
           command: 'npx',
           args: [],
         },
@@ -249,7 +269,7 @@ describe('claude-code applyServers', () => {
     const { content } = applyServers(
       existing,
       {
-        github: { transport: 'stdio', command: 'npx', args: [] },
+        github: { type: 'stdio', command: 'npx', args: [] },
       },
       { ...ctx, scope: 'project', previousManagedNames: new Set() },
     )
@@ -265,7 +285,7 @@ describe('claude-code applyServers', () => {
     const { content } = applyServers(
       '',
       {
-        github: { transport: 'stdio', command: 'npx', args: [] },
+        github: { type: 'stdio', command: 'npx', args: [] },
       },
       { ...ctx, scope: 'project', previousManagedNames: new Set() },
     )

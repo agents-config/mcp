@@ -1,8 +1,10 @@
 # ADR-0002: Zod 4 is the schema source of truth; publish Draft-07
 
-- **Status**: Accepted
+> **Superseded by [ADR-0010](./0010-adopt-agent-plugins-mcp-schema.md)** — esta decisão foi substituída pela adoção do schema Agent Plugins MCP 1.0.0 (`https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`) como base normativa.
+
+- **Status**: Superseded by ADR-0010
 - **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md), [`docs/decisions/0010-adopt-agent-plugins-mcp-schema.md`](./0010-adopt-agent-plugins-mcp-schema.md)
 
 ## Context
 

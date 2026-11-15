@@ -14,6 +14,7 @@ import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { translate } from '$/src/core/placeholder'
 import type {
   AgentId,
@@ -56,12 +57,6 @@ export async function detect(
     return false
   }
   return readTextFile(path) !== null
-}
-
-function isStdioServer(
-  server: CanonicalServer,
-): server is Extract<CanonicalServer, { transport: 'stdio' }> {
-  return server.transport === 'stdio'
 }
 
 function translateField(
@@ -115,7 +110,6 @@ export function compile(server: CanonicalServer): {
     const entry: Record<string, unknown> = {
       type: 'local',
       command: commandArray,
-      enabled: server.disabled !== true,
     }
     if (server.env) {
       const environment: Record<string, string> = {}
@@ -140,7 +134,6 @@ export function compile(server: CanonicalServer): {
   const entry: Record<string, unknown> = {
     type: 'remote',
     url: translatedUrl,
-    enabled: server.disabled !== true,
   }
   if (server.headers) {
     const headers: Record<string, string> = {}
@@ -210,14 +203,19 @@ export function extractServers(
 
     if (isRemote) {
       const resolvedUrl = hasUrl ? (url as string) : (serverUrl as string)
-      const server: CanonicalServer = { transport: 'http', url: resolvedUrl }
-      // URL/serverUrl-only (or non-explicit remote) → inferred transport.
+      // OpenCode nativo não distingue streamable-http de sse: emite
+      // 'streamable-http' para entradas remotas.
+      const server: CanonicalServer = {
+        type: 'streamable-http',
+        url: resolvedUrl,
+      }
+      // URL/serverUrl-only (ou non-explicit remote) → inferred transport.
       if ((hasUrl || hasServerUrl) && type !== 'remote') {
         warnings.push({
           code: 'TRANSPORT_INFERRED',
           agent: 'opencode',
           server: name,
-          message: `Transport inferred as http for \`${name}\``,
+          message: `Transport inferred as streamable-http for \`${name}\``,
         })
       }
       if (
@@ -234,9 +232,6 @@ export function extractServers(
           }
         }
       }
-      if (entry.enabled === false) {
-        server.disabled = true
-      }
       resultServers[name] = server
       continue
     }
@@ -246,7 +241,7 @@ export function extractServers(
       const serverCommand =
         typeof cmdArray[0] === 'string' ? (cmdArray[0] as string) : ''
       const server: CanonicalServer = {
-        transport: 'stdio',
+        type: 'stdio',
         command: serverCommand,
         args: [],
       }
@@ -268,9 +263,6 @@ export function extractServers(
             server.env[k] = v
           }
         }
-      }
-      if (entry.enabled === false) {
-        server.disabled = true
       }
       resultServers[name] = server
       continue

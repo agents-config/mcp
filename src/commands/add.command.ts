@@ -1,7 +1,7 @@
 /**
  * `add` command (§11) — direct-source variant (T9).
  *
- * Resolve direct flags (--stdio/--arg/--http/--env/--header/--cwd/--name),
+ * Resolve direct flags (--command/--arg/--http/--env/--header/--cwd/--name),
  * prompt/accept `--name`, write canonical, then `runSync` unless `--no-sync`.
  * Idempotent: same name + same definition → exit 0, no write.
  * Conflict: same name + different definition → exit 1 with diff; `--force`
@@ -30,6 +30,7 @@ import {
   syncEnvExample,
 } from '$/src/core/env'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 
 function diffValues(a: unknown, b: unknown): string {
@@ -79,9 +80,13 @@ export const addCommand = defineCommand({
     description: 'Install an MCP server from direct flags',
   },
   args: {
-    stdio: { type: 'string' },
+    command: {
+      type: 'string',
+      description: 'Executable command for command-based MCP server',
+    },
     arg: { type: 'string', description: 'Argument token (repeatable)' },
     http: { type: 'string' },
+    sse: { type: 'string' },
     env: { type: 'string', description: 'KEY=VALUE (repeatable)' },
     header: { type: 'string', description: '"Name: Value" (repeatable)' },
     cwd: { type: 'string' },
@@ -107,26 +112,28 @@ export const addCommand = defineCommand({
     // occurrence. Collect `--arg`, `--env` and `--header` directly from
     // `rawArgs` so every occurrence is preserved.
     const options = {
-      stdio: args.stdio as string | undefined,
+      command: args.command as string | undefined,
       arg: collectRepeatableFlags(rawArgs, 'arg'),
       http: args.http as string | undefined,
+      sse: args.sse as string | undefined,
       env: collectRepeatableFlags(rawArgs, 'env'),
       header: collectRepeatableFlags(rawArgs, 'header'),
       cwd: args.cwd as string | undefined,
       name: args.name as string | undefined,
     }
 
-    // Validate that at least one source is provided (--stdio, --http, or
-    // positional argument). Without a source, there is nothing to add.
+    // Validate that at least one source is provided (--command, --http, --sse,
+    // or positional argument). Without a source, there is nothing to add.
     const positionalArgs = (args._ as string[] | undefined) ?? []
     if (
-      !options.stdio &&
+      !options.command &&
       !options.http &&
+      !options.sse &&
       options.arg.length === 0 &&
       positionalArgs.length === 0
     ) {
       ui.error(
-        'Usage: agents-mcp add <source> --stdio <cmd> [--arg <token>...] | --http <url>',
+        'Usage: agents-mcp add <source> --command <cmd> [--arg <token>...] | --http <url>',
       )
       process.exit(2)
     }
@@ -138,9 +145,9 @@ export const addCommand = defineCommand({
     let canonical: Record<string, CanonicalServer> = {}
     let schemaUrl = DEFAULT_SCHEMA_URL
     if (validated) {
-      schemaUrl = validated.config.$schema
+      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
       canonical = {
-        ...(validated.config.servers as Record<string, CanonicalServer>),
+        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
       }
     }
 
@@ -171,7 +178,7 @@ export const addCommand = defineCommand({
     // Replace literal secret values with ${KEY} placeholders in canonical.
     const definition = { ...resolved.definition }
     for (const w of writes) {
-      if (definition.transport === 'stdio') {
+      if (isStdioServer(definition)) {
         if (definition.env) {
           for (const [key, value] of Object.entries(definition.env)) {
             if (value === w.value) {
@@ -214,7 +221,7 @@ export const addCommand = defineCommand({
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
         $schema: schemaUrl,
-        servers: canonical,
+        mcpServers: canonical,
       })
 
       const stateResult = loadState(scope, ctx)

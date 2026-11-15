@@ -45,7 +45,9 @@ export const removeCommand = defineCommand({
       process.exit(1)
     }
 
-    const servers = { ...(validated.config.servers as Record<string, unknown>) }
+    const servers = {
+      ...(validated.config.mcpServers as Record<string, unknown>),
+    }
     if (!(name in servers)) {
       ui.error(`Unknown server \`${name}\`. Not found in canonical config.`)
       process.exit(1)

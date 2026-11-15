@@ -38,17 +38,6 @@ describe('packaging', () => {
     expect(distPkg.files).toEqual(['index.js'])
   })
 
-  it('spec/mcp.schema.json $id matches package.json version', () => {
-    const rootPkg = JSON.parse(
-      readFileSync(resolve(root, 'package.json'), 'utf8'),
-    )
-    const schemaDoc = JSON.parse(
-      readFileSync(resolve(root, 'spec', 'mcp.schema.json'), 'utf8'),
-    )
-    const expectedSuffix = `v${rootPkg.version}/mcp.schema.json`
-    expect(schemaDoc.$id.endsWith(expectedSuffix)).toBe(true)
-  })
-
   it('dist/ contains expected files and index.js starts with shebang', () => {
     const actualFiles = readdirSync(distDir).sort()
     expect(actualFiles).toEqual(

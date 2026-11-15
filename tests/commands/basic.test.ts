@@ -11,7 +11,7 @@ describe('commands runSync', () => {
       // Create a canonical config first so runSync doesn't return early
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
-        servers: {},
+        mcpServers: {},
       })
 
       const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import {
   compile,
   extractServers,
@@ -38,7 +39,7 @@ describe('vscode adapter identity', () => {
 describe('vscode compile', () => {
   it('stdio server with type, ${env:VAR}, default dropped', () => {
     const { entry, warnings } = compile({
-      transport: 'stdio',
+      type: 'stdio',
       command: 'uvx',
       args: ['mcp-server-postgres', '${DB_URL:-local}'],
       env: { DB_URL: '${DB_URL}' },
@@ -53,27 +54,25 @@ describe('vscode compile', () => {
     expect(warnings[0]!.code).toBe('DEFAULT_DROPPED')
   })
 
-  it('http server with type', () => {
+  it('streamable-http server with type http (vscode preserves)', () => {
     const { entry } = compile({
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://x/mcp',
     })
     expect(entry).toEqual({ type: 'http', url: 'https://x/mcp' })
   })
 
-  it('disabled omitted', () => {
+  it('sse server with type sse (vscode preserves)', () => {
     const { entry } = compile({
-      transport: 'stdio',
-      command: 'npx',
-      disabled: true,
-      args: [],
+      type: 'sse',
+      url: 'https://x/sse',
     })
-    expect(entry).toBeNull()
+    expect(entry).toEqual({ type: 'sse', url: 'https://x/sse' })
   })
 })
 
 describe('vscode extractServers', () => {
-  it('extracts stdio and http from servers key', () => {
+  it('extracts stdio and streamable-http from servers key', () => {
     const raw = JSON.stringify({
       servers: {
         pg: {
@@ -86,18 +85,40 @@ describe('vscode extractServers', () => {
       },
     })
     const { servers, warnings } = extractServers(raw, 'project')
-    const pg = servers.pg as Extract<CanonicalServer, { transport: 'stdio' }>
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(pg.transport).toBe('stdio')
-    expect(lin.transport).toBe('http')
+    const pg = servers.pg as Extract<CanonicalServer, { type: 'stdio' }>
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isStdioServer(pg)).toBe(true)
+    expect(pg.command).toBe('uvx')
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
+    expect(lin.url).toBe('https://x/mcp')
     expect(warnings).toEqual([])
   })
 
-  it('imports URL-only as http with TRANSPORT_INFERRED', () => {
+  it('extracts sse from native type sse', () => {
+    const raw = JSON.stringify({
+      servers: {
+        lin: { type: 'sse', url: 'https://x/sse' },
+      },
+    })
+    const { servers } = extractServers(raw, 'project')
+    const lin = servers.lin as Extract<CanonicalServer, { type: 'sse' }>
+    expect(lin.type).toBe('sse')
+    expect(lin.url).toBe('https://x/sse')
+  })
+
+  it('imports URL-only as streamable-http with TRANSPORT_INFERRED', () => {
     const raw = JSON.stringify({ servers: { lin: { url: 'https://x/mcp' } } })
     const { servers, warnings } = extractServers(raw, 'project')
-    const lin = servers.lin as Extract<CanonicalServer, { transport: 'http' }>
-    expect(lin.transport).toBe('http')
+    const lin = servers.lin as Extract<
+      CanonicalServer,
+      { type: 'streamable-http' }
+    >
+    expect(isHttpServer(lin)).toBe(true)
+    expect(lin.type).toBe('streamable-http')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]!.code).toBe('TRANSPORT_INFERRED')
   })
@@ -110,7 +131,7 @@ describe('vscode applyServers', () => {
     })
     const { content, managedNames } = applyServers(
       existing,
-      { pg: { transport: 'stdio', command: 'uvx', args: [] } },
+      { pg: { type: 'stdio', command: 'uvx', args: [] } },
       { ...ctx, scope: 'project', previousManagedNames: new Set(['old']) },
     )
     expect(managedNames).toEqual(['pg'])
@@ -126,7 +147,7 @@ describe('vscode applyServers', () => {
     })
     const { content } = applyServers(
       existing,
-      { pg: { transport: 'stdio', command: 'uvx', args: [] } },
+      { pg: { type: 'stdio', command: 'uvx', args: [] } },
       { ...ctx, scope: 'project', previousManagedNames: new Set(['old']) },
     )
     const parsed = JSON.parse(content)

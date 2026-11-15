@@ -28,6 +28,7 @@ import { readDotenv, resolveVar } from '$/src/core/env'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
 
 export interface DoctorResult {
   code: string
@@ -73,7 +74,7 @@ export async function runDoctor(
       })
     }
     // Schema structure is valid by virtue of loadValidatedConfig parsing.
-    const servers = config.servers
+    const servers = config.mcpServers
 
     // Resolve targets for drift/state checks.
     const stateResult = loadState(scope, ctx)
@@ -106,7 +107,7 @@ export async function runDoctor(
 
     // 3. Runtime check — stdio binaries.
     for (const server of Object.values(servers)) {
-      if (server.transport !== 'stdio') continue
+      if (!isStdioServer(server)) continue
       const cmd = server.command
       if (isAbsolutePath(cmd)) {
         if (!existsSync(cmd) || !isExecutable(cmd)) {
@@ -136,8 +137,6 @@ export async function runDoctor(
       const existing = readTextFile(nativePath)
 
       for (const [name, server] of Object.entries(servers)) {
-        if (server.disabled) continue
-        if (server.targets && !server.targets.includes(agentId)) continue
         const { entry } = adapter.compile(server)
         if (existing === null) {
           results.push({
@@ -318,7 +317,7 @@ function placeholderFields(
   server: CanonicalServer,
 ): Array<{ name: string; value: string }> {
   const fields: Array<{ name: string; value: string }> = []
-  if (server.transport === 'stdio') {
+  if (isStdioServer(server)) {
     fields.push({ name: 'command', value: server.command })
     for (const [i, arg] of (server.args ?? []).entries()) {
       fields.push({ name: `args[${i}]`, value: arg })

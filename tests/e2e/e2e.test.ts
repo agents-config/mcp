@@ -5,6 +5,7 @@ import { runDoctor } from '$/src/commands/doctor.command'
 import { persistCanonicalConfig } from '$/src/commands/util'
 import { createSandbox } from '$/tests/helpers/sandbox'
 import type { AgentId } from '$/src/adapters/types'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
 const ALL_AGENTS: AgentId[] = [
   'claude-code',
@@ -16,10 +17,10 @@ const ALL_AGENTS: AgentId[] = [
 ]
 
 const CANONICAL_CONFIG = {
-  $schema: 'https://agents-mcp.dev/schema/v0.1.0/mcp.schema.json',
-  servers: {
+  $schema: DEFAULT_SCHEMA_URL,
+  mcpServers: {
     github: {
-      transport: 'stdio',
+      type: 'stdio',
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-github'],
       env: {
@@ -27,13 +28,12 @@ const CANONICAL_CONFIG = {
       },
     },
     postgres: {
-      transport: 'stdio',
+      type: 'stdio',
       command: 'uvx',
       args: ['mcp-server-postgres', '${DATABASE_URL}'],
-      targets: ['claude-code', 'opencode'],
     },
     linear: {
-      transport: 'http',
+      type: 'streamable-http',
       url: 'https://mcp.linear.app/mcp',
       headers: {
         Authorization: 'Bearer ${LINEAR_API_KEY}',
@@ -82,8 +82,8 @@ async function runFullFlow(
   // 1. init - create canonical config with one server
   persistCanonicalConfig('project', ctx, {
     $schema: CANONICAL_CONFIG.$schema,
-    servers: {
-      github: CANONICAL_CONFIG.servers.github,
+    mcpServers: {
+      github: CANONICAL_CONFIG.mcpServers.github,
     },
   })
 
@@ -130,7 +130,7 @@ async function runFullFlow(
   // 6. Remove all servers from canonical config
   persistCanonicalConfig(scope, ctx, {
     $schema: CANONICAL_CONFIG.$schema,
-    servers: {},
+    mcpServers: {},
   })
 
   // 7. doctor after removal - should still pass (no servers to check)
@@ -164,8 +164,8 @@ describe('E2E: agents-mcp full flow', () => {
       fs.mkdirSync(`${ctx.homeDir}/.agents`, { recursive: true })
       persistCanonicalConfig('global', ctx, {
         $schema: CANONICAL_CONFIG.$schema,
-        servers: {
-          github: CANONICAL_CONFIG.servers.github,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
         },
       })
 
@@ -181,8 +181,8 @@ describe('E2E: agents-mcp full flow', () => {
       createMockBinaries(ctx)
       persistCanonicalConfig('project', ctx, {
         $schema: CANONICAL_CONFIG.$schema,
-        servers: {
-          github: CANONICAL_CONFIG.servers.github,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
         },
       })
 
@@ -214,7 +214,7 @@ describe('E2E: agents-mcp full flow', () => {
       createMockBinaries(ctx)
       persistCanonicalConfig('project', ctx, {
         $schema: CANONICAL_CONFIG.$schema,
-        servers: CANONICAL_CONFIG.servers,
+        mcpServers: CANONICAL_CONFIG.mcpServers,
       })
 
       // sync with all six agents
