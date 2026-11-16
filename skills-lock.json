@@ -3,87 +3,101 @@
   "skills": {
     "architect-worker": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/architect-worker/SKILL.md",
-      "computedHash": "036e04213a6a71743bb93cccc9021486236f53d38b20862c1b82addf404a45c7"
+      "computedHash": "89a43f1845e46b0653e1b35a21fc647d2f483c2af96bc03d539154a19b25411b"
     },
     "changelog-management": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/changelog-management/SKILL.md",
-      "computedHash": "a672da9f6e4496ba8a07ab5970c26b1d4f1dc101e5a3fd6c6e3b095e8020ea25"
+      "computedHash": "a340bc51c2123257c6c8ffc879f138c7bf350b7d68a84e7ccab2a28b26ad22e9"
     },
     "code-review": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/code-review/SKILL.md",
-      "computedHash": "dd466725e8fc6f851d9d99c34c4a886f4998d7cf81067ca1fc2eb558369d5f6e"
+      "computedHash": "b390efa66426d690d47e3e64ecbd3e0f0df59f4ab12a32e69e15e1b49317fe18"
     },
     "code-simplification": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/code-simplification/SKILL.md",
-      "computedHash": "f205fcbebc44ce27c87923d98ac8d1047cde03a279a3841b0152e72e541121f7"
+      "computedHash": "98f29e95ab341345651370636d8d7b03e3bf1f6c205d76a7ac666d7d5bc3914c"
     },
     "codebase-indexing": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/codebase-indexing/SKILL.md",
       "computedHash": "c7567e317f37dcf7eae248f360ff85c0f1c39f2114931f59ec71a781a8b69433"
     },
     "decision-records": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/decision-records/SKILL.md",
-      "computedHash": "b5444c33f3bdabe39439915ede3f79eab44da1ef3528a10660c8d2fa143c0f54"
+      "computedHash": "8cef5912b2a2d24f894ef70502233a3c3cb56bc0fb98fc57a3bb710343a10284"
     },
     "environment-preflight": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/environment-preflight/SKILL.md",
       "computedHash": "a114e3cbdeccbc22a8d60318713c85b83d29edde173af0c644550182e3f2130f"
     },
     "incremental-implementation": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/incremental-implementation/SKILL.md",
-      "computedHash": "85172018933c4e2b161e71063b60c7793f5c648220c2375098c27f75518dec30"
+      "computedHash": "e65803637333fb09c32bd8090fdd998163b7e61cbcadf62cbfd681f73c17e08d"
     },
     "npm-version-management": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/npm-version-management/SKILL.md",
       "computedHash": "00bf02eb55459a27880cd14db2c03cbfd677cb81ba4e6a0f13452f03e7a4b4fc"
     },
     "planning-and-task-breakdown": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/planning-and-task-breakdown/SKILL.md",
-      "computedHash": "ffb62667cc06cbede985c3569c53d015cc4ca579e3db7f98f0eb579f54f75d8d"
+      "computedHash": "0a6a5591116d291636ecf970433972b059f2a0bb398360183a5218a81d00f84a"
     },
     "product-owner": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/product-owner/SKILL.md",
-      "computedHash": "9e221f16be23ab892133b9962e3182d710923ed08ab6438c277d152364c6ddab"
+      "computedHash": "43337ceb4e1df8ba1efe093c99b73154555c3e889e7b3ec44230a82e16afb377"
     },
     "spec-driven-workflow": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/spec-driven-workflow/SKILL.md",
-      "computedHash": "427d0be0f9ab32d6d11c5cfe830ba636e224b7914276015c6dc2d7910141062c"
+      "computedHash": "53030b527b01bf198e6d4b18ae47af395ed312a4ecd185998719adfc93779f47"
     },
     "systematic-debugging": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/systematic-debugging/SKILL.md",
-      "computedHash": "1b9d917589d51319271f41c66ef10a290c3e478bdd07c9513942eeaa1a14464d"
+      "computedHash": "a2c30f92a2d4c750876fb6c5f03a2bc17568c7a4b3472bf75df2c04136d77f2b"
     },
     "verification-and-testing": {
       "source": "alexbruno/dev-skills",
+      "commit": "d8543b3d6c8ecdc7a3615cb3a122e0b6b635fd88",
       "sourceType": "github",
       "skillPath": "skills/verification-and-testing/SKILL.md",
-      "computedHash": "3ab04c649d7f79852cf8e5ca0b2bba7403340de41414ba68bacccd591128b8e3"
+      "computedHash": "5b5c612692cdf61a4f62f6a7893fcbdc8545a8db25369eeb53c9b1c7d6b84843"
     }
   }
 }

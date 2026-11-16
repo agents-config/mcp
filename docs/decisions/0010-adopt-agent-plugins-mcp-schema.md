@@ -3,7 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-11-14
 - **Supersedes**: [ADR-0001](./0001-canonical-transports.md), [ADR-0002](./0002-schema-source-and-versioning.md)
-- **Related Docs**: [`spec/SPEC.md`](../../spec/SPEC.md), [`UPSTREAM.md`](../../workflow/UPSTREAM.md#U4)
+- **Related Docs**: [`spec/SPEC.md`](../../spec/SPEC.md), [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md) — upstream item `U4` (backlog interno do projeto)
 
 ## Context
 

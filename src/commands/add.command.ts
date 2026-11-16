@@ -20,6 +20,7 @@ import {
   isDryRun,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
+import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
 import { resolveDirect } from '$/src/sources/direct'
 import { loadValidatedConfig } from '$/src/core/store'
 import { loadState, writeState } from '$/src/core/state'
@@ -122,24 +123,15 @@ export const addCommand = defineCommand({
       name: args.name as string | undefined,
     }
 
-    // Validate that at least one source is provided (--command, --http, --sse,
-    // or positional argument). Without a source, there is nothing to add.
+    // Dispatch between flag-driven mode and the interactive wizard. A direct
+    // source is any of --command/--http/--sse/--arg; without one, a positional
+    // `<name>` alone is not enough to build a server.
     const positionalArgs = (args._ as string[] | undefined) ?? []
-    if (
-      !options.command &&
-      !options.http &&
-      !options.sse &&
-      options.arg.length === 0 &&
-      positionalArgs.length === 0
-    ) {
-      ui.error(
-        'Usage: agents-mcp add <source> --command <cmd> [--arg <token>...] | --http <url>',
-      )
-      process.exit(2)
-    }
-
-    const resolved = resolveDirect(options)
-    const name = options.name ?? resolved.suggestedName
+    const hasDirectSource =
+      Boolean(options.command || options.http || options.sse) ||
+      options.arg.length > 0
+    const isInteractive =
+      ctx.isTTY && ctx.env.CI !== 'true' && args.yes !== true
 
     const validated = loadValidatedConfig(scope, ctx)
     let canonical: Record<string, CanonicalServer> = {}
@@ -149,6 +141,40 @@ export const addCommand = defineCommand({
       canonical = {
         ...(validated.config.mcpServers as Record<string, CanonicalServer>),
       }
+    }
+
+    let resolved: ReturnType<typeof resolveDirect>
+    let name: string
+    let interactiveAdd = false
+
+    if (!hasDirectSource) {
+      if (!isInteractive) {
+        ui.error(
+          'Usage: agents-mcp add <name> --command <cmd> [--arg <token>...] | --http <url>',
+        )
+        process.exit(2)
+        return
+      }
+
+      const result = await collectInteractiveAddOptions({
+        ui,
+        initialName: options.name ?? positionalArgs[0],
+        checkConflict: (candidate) => {
+          if (candidate in canonical && !force) {
+            ui.error(
+              `Server \`${candidate}\` already exists. Use --force to overwrite.`,
+            )
+            process.exit(1)
+            return
+          }
+        },
+      })
+      interactiveAdd = true
+      name = result.name
+      resolved = resolveDirect(result.options)
+    } else {
+      resolved = resolveDirect(options)
+      name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
     }
 
     if (name in canonical && !force) {
@@ -245,6 +271,10 @@ export const addCommand = defineCommand({
         dryRun: false,
         yes: args.yes === true,
       })
+    }
+
+    if (interactiveAdd && !dryRun) {
+      ui.outro(`Server \`${name}\` added.`)
     }
   },
 })

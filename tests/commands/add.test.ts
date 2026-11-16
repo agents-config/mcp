@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { addCommand } from '$/src/commands/add.command'
 import { createUiAndCtx } from '$/src/commands/util'
 import { getConfigPath } from '$/src/core/store'
@@ -203,5 +203,157 @@ describe('commands add (R53: repeatable flags from rawArgs)', () => {
     const message = errorMock.mock.calls[0]?.[0] as string
     expect(message).toContain('--command')
     expect(message).not.toContain('--stdio')
+  })
+})
+
+describe('commands add (B2: interactive flow)', () => {
+  it('inicia o fluxo interativo no TTY e grava o canonical config', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const intro = vi.fn()
+    const outro = vi.fn()
+    const note = vi.fn()
+    const select = vi.fn(async () => 'command')
+    const text = vi.fn().mockResolvedValueOnce('npx').mockResolvedValueOnce('')
+    const confirm = vi.fn(async () => false)
+    try {
+      const interactiveCtx = {
+        ...ctx,
+        isTTY: true,
+        env: { ...ctx.env, CI: undefined },
+      }
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx: interactiveCtx,
+        ui: {
+          intro,
+          outro,
+          note,
+          warn: vi.fn(),
+          error: vi.fn(),
+          select,
+          text,
+          confirm,
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: false,
+          global: false,
+          'no-sync': true,
+          force: false,
+          'extract-secrets': false,
+          command: undefined,
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: undefined,
+          _: ['my-server'],
+        },
+        rawArgs: [],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      const content = readFileSync(
+        getConfigPath('project', interactiveCtx),
+        'utf8',
+      )
+      const config = JSON.parse(content)
+      expect(config.mcpServers['my-server']).toMatchObject({
+        type: 'stdio',
+        command: 'npx',
+        args: [],
+      })
+      expect(intro).toHaveBeenCalledWith('Add MCP server')
+      expect(outro).toHaveBeenCalled()
+      expect(note).toHaveBeenCalledWith('Added server `my-server`')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sai com código 2 sem TTY quando só há <nome> posicional', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const errorMock = vi.fn()
+    vi.spyOn(process, 'exit').mockImplementation(
+      (() => {}) as NodeJS.Process['exit'],
+    )
+    try {
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx,
+        ui: {
+          error: errorMock,
+          warn: vi.fn(),
+          note: vi.fn(),
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: false,
+          global: false,
+          'no-sync': true,
+          force: false,
+          'extract-secrets': false,
+          command: undefined,
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: undefined,
+          _: ['my-server'],
+        },
+        rawArgs: [],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(process.exit).toHaveBeenCalledWith(2)
+      const message = errorMock.mock.calls[0]?.[0] as string
+      expect(message).toContain('--command')
+      expect(message).not.toContain('--stdio')
+      expect(existsSync(getConfigPath('project', ctx))).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sai com código 2 com --yes mesmo em TTY', async () => {
+    const { ctx, cleanup } = createSandbox()
+    vi.spyOn(process, 'exit').mockImplementation(
+      (() => {}) as NodeJS.Process['exit'],
+    )
+    try {
+      const ttyCtx = {
+        ...ctx,
+        isTTY: true,
+        env: { ...ctx.env, CI: undefined },
+      }
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx: ttyCtx,
+        ui: {
+          error: vi.fn(),
+          warn: vi.fn(),
+          note: vi.fn(),
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: true,
+          global: false,
+          'no-sync': true,
+          force: false,
+          'extract-secrets': false,
+          command: undefined,
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: undefined,
+          _: ['my-server'],
+        },
+        rawArgs: [],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(process.exit).toHaveBeenCalledWith(2)
+      expect(existsSync(getConfigPath('project', ttyCtx))).toBe(false)
+    } finally {
+      cleanup()
+    }
   })
 })

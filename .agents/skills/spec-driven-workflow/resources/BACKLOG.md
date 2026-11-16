@@ -1,25 +1,25 @@
-# Upstream Backlog & Demand: <Project or Initiative>
+# Product Backlog & Demand: <Project or Initiative>
 
 - **Product Owner**: <author or agent>
 - **Product Goal**: <Overarching outcome or product objective>
 - **Last Updated**: <YYYY-MM-DD>
 
-## Upstream Backlog
+## Product Backlog
 
 Prioritized list of product evolutions, features, bug reports, and improvements before entering downstream engineering (`SPEC.md`).
 
 | Order | ID | Title | Type | Class of Service | Status | Value / Impact |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | U1 | <Short item title> | Feature \| Bug \| Improvement | Expedite \| Fixed Date \| Standard \| Intangible | Ready \| Refining \| Idea \| In Downstream \| Done | <Why this matters to users/business> |
-| 2 | U2 | <Short item title> | Feature \| Bug \| Improvement | Standard | Idea | <Why this matters to users/business> |
+| 1 | B1 | <Short item title> | Feature \| Bug \| Improvement | Expedite \| Fixed Date \| Standard \| Intangible | Ready \| Refining \| Idea \| In Downstream \| Done | <Why this matters to users/business> |
+| 2 | B2 | <Short item title> | Feature \| Bug \| Improvement | Standard | Idea | <Why this matters to users/business> |
 
 ---
 
 ## Active Demand Brief: <ID - Short Title>
 
-> Complete this section when an item is refined to `Ready` for handoff to the Architect (`SPEC.md`).
+> Complete this section when an item is refined to `Ready` for handoff to the Architect (`workflow/<change-slug>/SPEC.md`).
 
-- **Backlog ID**: `<U1>`
+- **Backlog ID**: `<B1>`
 - **Type**: Feature | Bug Fix | Enhancement
 - **Class of Service**: Expedite | Fixed Date | Standard | Intangible
 - **Target Release / Urgency**: <e.g., Immediate hotfix, Next sprint, Q4 milestone>
