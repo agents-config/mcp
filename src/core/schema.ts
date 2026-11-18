@@ -8,6 +8,7 @@ export const AgentIdSchema = z.enum([
   'opencode',
   'windsurf',
   'zed',
+  'antigravity',
 ])
 
 /** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */

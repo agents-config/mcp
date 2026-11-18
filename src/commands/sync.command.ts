@@ -21,6 +21,16 @@ export const syncCommand = defineCommand({
     const flag = args.agents ? String(args.agents).split(',') : undefined
     const dryRun = args['dry-run'] === true
 
-    await runSync({ scope, ctx, flag, dryRun, yes: args.yes === true })
+    const summary = await runSync({
+      scope,
+      ctx,
+      flag,
+      dryRun,
+      yes: args.yes === true,
+    })
+
+    if (summary.errors.length > 0 && !dryRun) {
+      process.exit(1)
+    }
   },
 })

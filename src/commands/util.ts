@@ -131,4 +131,50 @@ export function isDryRun(args: Record<string, unknown>): boolean {
   return args['dry-run'] === true
 }
 
+/** Normaliza uma lista de agentes separada por vírgulas. */
+function splitAgentList(value: string): string[] | undefined {
+  const ids = value
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+  return ids.length > 0 ? ids : undefined
+}
+
+/**
+ * Extrai `--agents` tanto de `args` (quando o citty já parseou a flag) quanto
+ * de `rawArgs` (formas `--agents=<lista>` e `--agents <lista>`).
+ *
+ * O fallback por `rawArgs` cobre subcomandos que não declaram `agents` e o
+ * caso em que o citty transforma `--agents <lista>` em `true` + posicional.
+ */
+export function parseAgentsFlag(
+  args: Record<string, unknown>,
+  rawArgs: readonly string[],
+): string[] | undefined {
+  const fromArgs = args.agents
+  if (typeof fromArgs === 'string') {
+    const parsed = splitAgentList(fromArgs)
+    if (parsed) {
+      return parsed
+    }
+  }
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+    if (token === '--') break
+    if (token.startsWith('--agents=')) {
+      return splitAgentList(token.slice('--agents='.length))
+    }
+    if (token === '--agents') {
+      const next = rawArgs[i + 1]
+      if (next !== undefined && !next.startsWith('-')) {
+        return splitAgentList(next)
+      }
+    }
+  }
+
+  return undefined
+}
+
 export { AGENTS_DIR, CONFIG_FILE, STATE_FILE, type CanonicalServer }

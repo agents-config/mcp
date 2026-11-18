@@ -48,6 +48,7 @@ describe('state', () => {
             updatedAt: '2026-01-01T00:00:00.000Z',
           },
         },
+        managedPlugins: [],
       }
       writeState('project', ctx, state)
 
@@ -71,6 +72,7 @@ describe('state', () => {
         scope: 'project',
         targets: ['claude-code'],
         agents: {},
+        managedPlugins: [],
       }
       writeState('project', ctx, state)
       const first = readFileSync(

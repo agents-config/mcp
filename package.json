@@ -48,7 +48,8 @@
     "dist:build": "npm run verify",
     "dist:package": "tsx scripts/dist-package.ts",
     "dist:publish": "npm publish ./dist",
-    "dist": "run-s dist:*"
+    "dist": "run-s dist:*",
+    "mcp": "node dist/index.js"
   },
   "dependencies": {
     "@clack/prompts": "^1.9.0",

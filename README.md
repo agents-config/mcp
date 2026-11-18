@@ -2,7 +2,7 @@
 
 **One `.agents/mcp.json` to rule them all.**
 
-A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across Claude Code, Cursor, VS Code, OpenCode, Windsurf, and Zed.
+A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, and Antigravity.
 
 [![npm version](https://img.shields.io/npm/v/agents-mcp.svg)](https://www.npmjs.com/package/agents-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -120,18 +120,51 @@ Example:
 
 ## Supported Agents
 
-| Agent           | Project Config       | Global Config                         | Env Syntax Translated |
-| :-------------- | :------------------- | :------------------------------------ | :-------------------- |
-| **Claude Code** | `.mcp.json`          | `~/.claude.json`                      | `${VAR}`              |
-| **Cursor**      | `.cursor/mcp.json`   | `~/.cursor/mcp.json`                  | `${env:VAR}`          |
-| **VS Code**     | `.vscode/mcp.json`   | User Profile `mcp.json`               | `${env:VAR}`          |
-| **OpenCode**    | `opencode.json`      | `~/.config/opencode/opencode.json`    | `{env:VAR}`           |
-| **Windsurf**    | _(Global only)_      | `~/.codeium/windsurf/mcp_config.json` | `${env:VAR}`          |
-| **Zed**         | `.zed/settings.json` | `~/.config/zed/settings.json`         | `${VAR}`              |
+| Agent           | Project Config       | Global Config                            | Env Syntax Translated  |
+| :-------------- | :------------------- | :--------------------------------------- | :--------------------- |
+| **Claude Code** | `.mcp.json`          | `~/.claude.json`                         | `${VAR}`               |
+| **Cursor**      | `.cursor/mcp.json`   | `~/.cursor/mcp.json`                     | `${env:VAR}`           |
+| **VS Code**     | `.vscode/mcp.json`   | User Profile `mcp.json`                  | `${env:VAR}`           |
+| **OpenCode**    | `opencode.json`      | `~/.config/opencode/opencode.json`       | `{env:VAR}`            |
+| **Windsurf**    | _(Global only)_      | `~/.codeium/windsurf/mcp_config.json`    | `${env:VAR}`           |
+| **Zed**         | `.zed/settings.json` | `~/.config/zed/settings.json`            | `${VAR}`               |
+| **Antigravity** | _(per-plugin)_       | `.agents/plugins/<name>/mcp_config.json` | `serverUrl` (HTTP/SSE) |
 
 See the full field-by-field translation rules in [`spec/MATRIX.md`](./spec/MATRIX.md).
 
 Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy **SSE** (`type: "sse"`).
+
+## Agent Plugins & Antigravity (`.agents/plugins/`)
+
+`.agents/mcp.json` permanece como a **unica fonte da verdade** (canonical source of truth) para todas as definicoes de servidores MCP. A partir do `agents-mcp add` e `agents-mcp sync`, a CLI gera automaticamente um layout padrao de **Agent Plugins** em:
+
+```
+<scope>/.agents/plugins/<nome>/
+  plugin.json        # manifest do plugin (name, version, description)
+  mcp.json           # documento Agent Plugins MCP 1.0.0 ($schema + mcpServers)
+  mcp_config.json    # apenas quando `antigravity` esta nos targets
+```
+
+- **`plugin.json` + `mcp.json`**: gerados para **qualquer** servidor adicionado ou sincronizado, independentemente dos agentes alvo.
+- **`mcp_config.json`**: gerado apenas quando `antigravity` esta entre os targets (`--agents antigravity`, `init` ou `sync`). Servidores `stdio` mapeiam para `{ command, args?, env? }`; servidores `streamable-http` e `sse` mapeiam para `{ serverUrl, headers? }` (formato nativo do Antigravity).
+
+### Propriedade e colisao
+
+A CLI rastreia quais plugins ela gerencia no estado de sincronizacao (`.agents/.mcp-sync-state.json`, campo `managedPlugins`). Se um diretório `.agents/plugins/<nome>/` ja existir em disco **e** o nome **nao** estiver registrado como gerenciado:
+
+- **Modo interativo (`add`)**: avisa o usuario e solicita um nome diferente (sem auto-renomear nem sobrescrever).
+- **Modo nao-interativo (`add`)**: falha com erro claro, orientando o usuario a passar um `--name` diferente (codigo de saida `1`).
+- **`sync`**: pula a sobrescricao do diretorio nao-gerenciado, registra um aviso por plugin e inclui no relatorio de falha parcial.
+
+### Falha parcial
+
+Se `.agents/mcp.json` (e/ou arquivos nativos dos agentes) for gravado com sucesso, mas a criacao/atualizacao de um arquivo de plugin falhar, a CLI **nao** imprime confirmacao falsa de sucesso total. Reporta explicitamente o que foi concluido e o que falhou, com proximos passos acionaveis (ex. `reexecute agents-mcp sync`), e sai com codigo `1`.
+
+### Boas praticas
+
+- Edicoes manuais devem ser feitas em `.agents/mcp.json` e propagadas via `agents-mcp sync`.
+- Arquivos em `.agents/plugins/<name>/` sao gerados a partir de `.agents/mcp.json`; edicoes diretas neles serao sobrescritas na proxima `sync`.
+- Quando `antigravity` for sincronizado, os arquivos do plugin ficam prontos em `.agents/plugins/<name>/` (a CLI **nao** ativa a interface do IDE Antigravity automaticamente).
 
 ## CLI Reference
 

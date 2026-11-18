@@ -107,8 +107,14 @@ export interface CollectInteractiveAddOptionsParams {
   ui: PromptUi
   /** Candidate name from `--name` or the positional argument. */
   initialName?: string
-  /** Fail fast when the server already exists (called before field prompts). */
-  checkConflict: (name: string) => void
+  /**
+   * Fail fast when the server already exists (called before field prompts).
+   * Returns `true` when the name is blocked by an unmanaged plugin collision
+   * and the caller should re-prompt for a different name; `undefined`/`false`
+   * when the name is acceptable. Canonical-config conflicts still call
+   * `process.exit` directly.
+   */
+  checkConflict: (name: string) => boolean | undefined
 }
 
 export interface InteractiveAddResult {
@@ -208,8 +214,39 @@ export async function collectInteractiveAddOptions({
 }: CollectInteractiveAddOptionsParams): Promise<InteractiveAddResult> {
   ui.intro('Add MCP server')
 
-  const name = await resolveServerName({ ui, initialName })
-  checkConflict(name)
+  // Resolve o nome do servidor, fazendo loop em caso de colisao com plugin
+  // nao gerenciado (pede um novo nome sem auto-renomear).
+  let candidate = initialName?.trim() ?? ''
+  let name = ''
+  for (;;) {
+    if (candidate) {
+      if (SERVER_NAME_PATTERN.test(candidate)) {
+        name = candidate
+      } else {
+        ui.warn(
+          `Invalid server name \`${candidate}\`. Use lowercase letters, digits, dots, dashes or underscores.`,
+        )
+        candidate = ''
+      }
+    }
+    if (!name) {
+      name = await ui.text({
+        message: 'Server name',
+        placeholder: 'e.g. github',
+        validate: validateServerName,
+      })
+    }
+    const conflict = checkConflict(name)
+    if (conflict) {
+      ui.warn(
+        `O nome \`${name}\` esta em uso por um plugin nao gerenciado pela CLI. Informe outro nome.`,
+      )
+      candidate = ''
+      name = ''
+      continue
+    }
+    break
+  }
 
   const type = await ui.select<'command' | 'http'>({
     message: 'How does this MCP server connect?',

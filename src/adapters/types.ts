@@ -7,12 +7,11 @@
  * layer. Warnings and managed names are carried in the result.
  */
 
+import { z } from 'zod'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import type { CanonicalServer } from '$/src/core/schema'
+import type { CanonicalServer, AgentIdSchema } from '$/src/core/schema'
 
-export type AgentId = CanonicalServer extends never
-  ? never
-  : 'claude-code' | 'cursor' | 'vscode' | 'opencode' | 'windsurf' | 'zed'
+export type AgentId = z.infer<typeof AgentIdSchema>
 
 export type EnvSyntax = 'posix' | 'env-colon' | 'brace-env'
 

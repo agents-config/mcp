@@ -87,11 +87,13 @@ export interface WriteConfigOptions {
 export function writeConfig({ scope, ctx, config }: WriteConfigOptions): void {
   const path = getConfigPath(scope, ctx)
   const serialized = serializeMinimal(config)
+  // Never persist an invalid canonical document: validate before writing.
+  CanonicalMcpConfigSchema.parse(JSON.parse(serialized))
   writeFileAtomic(path, serialized)
 }
 
 function serializeMinimal(config: Record<string, unknown>): string {
-  const mcpServers = config['mcpServers']
+  const mcpServers = config['mcpServers'] ?? {}
   const document: Record<string, unknown> = {
     $schema: DEFAULT_SCHEMA_URL,
     mcpServers,

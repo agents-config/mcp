@@ -131,7 +131,7 @@ describe('canonical schema', () => {
     expect(result.success).toBe(false)
   })
 
-  it('AgentIdSchema enumerates the six agents', () => {
+  it('AgentIdSchema enumerates the seven agents', () => {
     expect(AgentIdSchema.options).toEqual([
       'claude-code',
       'cursor',
@@ -139,6 +139,7 @@ describe('canonical schema', () => {
       'opencode',
       'windsurf',
       'zed',
+      'antigravity',
     ])
   })
 

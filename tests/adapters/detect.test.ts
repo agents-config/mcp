@@ -37,6 +37,7 @@ describe('adapters index', () => {
       scope: 'project' as const,
       targets: [],
       agents: {},
+      managedPlugins: [],
     }
     expect(resolveTargets({ flag: ['cursor'], state, ctx })).toEqual(['cursor'])
   })
@@ -47,6 +48,7 @@ describe('adapters index', () => {
       scope: 'project' as const,
       targets: ['vscode'] as AgentId[],
       agents: {},
+      managedPlugins: [],
     }
     expect(resolveTargets({ flag: undefined, state, ctx })).toEqual(['vscode'])
   })
@@ -57,6 +59,7 @@ describe('adapters index', () => {
       scope: 'project' as const,
       targets: [],
       agents: {},
+      managedPlugins: [],
     }
     expect(resolveTargets({ flag: undefined, state, ctx })).toEqual([])
   })
@@ -67,6 +70,7 @@ describe('adapters index', () => {
       scope: 'project' as const,
       targets: [],
       agents: {},
+      managedPlugins: [],
     }
     const result = await resolveTargetsAsync({
       flag: undefined,
@@ -76,8 +80,8 @@ describe('adapters index', () => {
     expect(Array.isArray(result)).toBe(true)
   })
 
-  it('adapters has all six agents', () => {
-    expect(adapters).toHaveLength(6)
+  it('adapters has all seven agents', () => {
+    expect(adapters).toHaveLength(7)
     expect(adapters.map((a) => a.id)).toEqual([
       'claude-code',
       'cursor',
@@ -85,6 +89,7 @@ describe('adapters index', () => {
       'opencode',
       'zed',
       'windsurf',
+      'antigravity',
     ])
   })
 })

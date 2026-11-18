@@ -17,6 +17,8 @@ export interface SyncState {
   scope: ConfigScope
   targets: AgentId[]
   agents: Partial<Record<AgentId, SyncStateAgent>>
+  /** Nomes de plugins gerenciados pela CLI em `.agents/plugins/<name>/`. */
+  managedPlugins: string[]
 }
 
 export interface LoadStateResult {
@@ -35,6 +37,8 @@ const SyncStateSchema = z.object({
   scope: z.enum(['project', 'global']),
   targets: z.array(AgentIdSchema),
   agents: z.partialRecord(AgentIdSchema, SyncStateAgentSchema).default({}),
+  /** Nomes de plugins gerenciados pela CLI (retrocompatível: default []). */
+  managedPlugins: z.array(z.string()).default([]),
 })
 
 /**
@@ -47,6 +51,7 @@ export function emptyState(scope: ConfigScope): SyncState {
     scope,
     targets: [],
     agents: {},
+    managedPlugins: [],
   }
 }
 

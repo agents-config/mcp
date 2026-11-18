@@ -145,6 +145,45 @@ describe('store', () => {
     }
   })
 
+  it('writeConfig defaults mcpServers to {} when undefined and never writes invalid document', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeConfig({
+        scope: 'project',
+        ctx,
+        config: {
+          $schema: DEFAULT_SCHEMA_URL,
+        },
+      })
+
+      const result = readConfig('project', ctx)
+      expect(result).not.toBeNull()
+      expect(result!.config.mcpServers).toEqual({})
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfig rejects invalid mcpServers before writing', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(() =>
+        writeConfig({
+          scope: 'project',
+          ctx,
+          config: {
+            $schema: DEFAULT_SCHEMA_URL,
+            mcpServers: { broken: { type: 'unknown' } },
+          },
+        }),
+      ).toThrow()
+      // Não deve ter gravado nada de inválido.
+      expect(readConfig('project', ctx)).toBeNull()
+    } finally {
+      cleanup()
+    }
+  })
+
   it('loadValidatedConfig returns null for missing file', () => {
     const { ctx, cleanup } = createSandbox()
     try {

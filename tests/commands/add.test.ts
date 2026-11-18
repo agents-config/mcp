@@ -1,8 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { addCommand } from '$/src/commands/add.command'
 import { createUiAndCtx } from '$/src/commands/util'
 import { getConfigPath } from '$/src/core/store'
+import { loadState } from '$/src/core/state'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import type { RuntimeContext } from '$/src/core/context'
 import type { PromptUi } from '$/src/ui/prompts'
 import { createSandbox } from '$/tests/helpers/sandbox'
 
@@ -354,6 +358,206 @@ describe('commands add (B2: interactive flow)', () => {
       expect(existsSync(getConfigPath('project', ttyCtx))).toBe(false)
     } finally {
       cleanup()
+    }
+  })
+})
+
+describe('commands add (B3/T5: --agents, --no-sync and plugin generation)', () => {
+  function setupUi(ctx: RuntimeContext) {
+    const ui = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      note: vi.fn(),
+      intro: vi.fn(),
+      outro: vi.fn(),
+    }
+    vi.mocked(createUiAndCtx).mockImplementation(() => ({
+      ctx,
+      ui: ui as unknown as PromptUi,
+    }))
+    return ui
+  }
+
+  /** Args equivalentes ao parse real do citty para `--no-sync`. */
+  function baseArgs(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      yes: true,
+      global: false,
+      force: false,
+      'extract-secrets': false,
+      command: 'npx',
+      http: undefined,
+      sse: undefined,
+      cwd: undefined,
+      name: 'my-tool',
+      _: [],
+      ...overrides,
+    }
+  }
+
+  it('gera plugin com --no-sync em projeto sem targets e não executa runSync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      await addCommand.run!({
+        args: baseArgs({ sync: false }),
+        rawArgs: ['--command=npx', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/my-tool')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual([])
+      expect(state.managedPlugins).toEqual(['my-tool'])
+      expect(ui.error).not.toHaveBeenCalled()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('honra --no-sync vindo de rawArgs mesmo sem args.sync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      await addCommand.run!({
+        args: baseArgs(),
+        rawArgs: ['--command=npx', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/my-tool/plugin.json')),
+      ).toBe(true)
+      expect(loadState('project', ctx).state.targets).toEqual([])
+      expect(ui.error).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('honra --agents=<lista> no add e persiste o target selecionado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      await addCommand.run!({
+        args: baseArgs({ name: 'remote-mcp', agents: 'antigravity' }),
+        rawArgs: ['--command=npx', '--agents=antigravity'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/remote-mcp/mcp_config.json')),
+      ).toBe(true)
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/remote-mcp/mcp.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['antigravity'])
+      expect(state.managedPlugins).toEqual(['remote-mcp'])
+      expect(ui.error).not.toHaveBeenCalled()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('honra --agents <lista> separado por espaço no add', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      await addCommand.run!({
+        args: baseArgs({ name: 'remote-mcp' }),
+        rawArgs: ['--command=npx', '--agents', 'antigravity'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/remote-mcp/mcp_config.json')),
+      ).toBe(true)
+      expect(loadState('project', ctx).state.targets).toEqual(['antigravity'])
+      expect(ui.error).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('gera mcp_config.json com --agents antigravity --no-sync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      await addCommand.run!({
+        args: baseArgs({ sync: false }),
+        rawArgs: ['--command=npx', '--agents', 'antigravity', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/my-tool/mcp_config.json')),
+      ).toBe(true)
+      // runSync não roda: targets persistidos permanecem vazios.
+      expect(loadState('project', ctx).state.targets).toEqual([])
+      expect(ui.error).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('commands add (T6: integridade do índice canônico)', () => {
+  it('reporta mensagem clara quando .agents/mcp.json está inválido (sem mcpServers)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const errorMock = vi.fn()
+    const exitMock = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+
+    // Escreve um .agents/mcp.json inválido diretamente (bypassa writeConfig).
+    const { mkdirSync, writeFileSync } = await import('node:fs')
+    mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+    writeFileSync(
+      `${ctx.cwd}/.agents/mcp.json`,
+      JSON.stringify({ $schema: DEFAULT_SCHEMA_URL }),
+      'utf8',
+    )
+
+    try {
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx,
+        ui: {
+          error: errorMock,
+          warn: vi.fn(),
+          note: vi.fn(),
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: true,
+          global: false,
+          'no-sync': true,
+          force: false,
+          'extract-secrets': false,
+          command: 'npx',
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: 'my-tool',
+          _: [],
+        },
+        rawArgs: ['--command=npx', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(errorMock).toHaveBeenCalled()
+      const message = errorMock.mock.calls[0]?.[0] as string
+      expect(message).toContain('inválida')
+      expect(message).toContain('agents-mcp init --force')
+      expect(exitMock).toHaveBeenCalledWith(1)
+    } finally {
+      cleanup()
+      exitMock.mockRestore()
     }
   })
 })

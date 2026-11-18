@@ -18,13 +18,14 @@ import {
   persistCanonicalConfig,
   persistSyncState,
   isDryRun,
+  parseAgentsFlag,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
 import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
 import { resolveDirect } from '$/src/sources/direct'
-import { loadValidatedConfig } from '$/src/core/store'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import { loadState, writeState } from '$/src/core/state'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
 import {
   appendToDotenv,
   planSecretExtraction,
@@ -33,6 +34,7 @@ import {
 import type { CanonicalServer } from '$/src/core/schema'
 import { isStdioServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+import { syncPluginFiles, isUnmanagedPluginCollision } from '$/src/core/plugins'
 
 function diffValues(a: unknown, b: unknown): string {
   const aStr = JSON.stringify(a, null, 2)
@@ -104,7 +106,13 @@ export const addCommand = defineCommand({
     const scope = (args.global ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
-    const noSync = args['no-sync'] === true
+    // `citty`/`mri` converte `--no-sync` em `args.sync === false`; a checagem
+    // direta em `rawArgs` cobre subcomandos que não declaram `sync`.
+    const noSync =
+      args['no-sync'] === true ||
+      (args as Record<string, unknown>).sync === false ||
+      rawArgs.includes('--no-sync')
+    const agentsFlag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
     const force = args.force === true
     const extractSecrets = args['extract-secrets'] === true
 
@@ -133,7 +141,23 @@ export const addCommand = defineCommand({
     const isInteractive =
       ctx.isTTY && ctx.env.CI !== 'true' && args.yes !== true
 
-    const validated = loadValidatedConfig(scope, ctx)
+    let validated: ReturnType<typeof loadValidatedConfig> | null = null
+    try {
+      validated = loadValidatedConfig(scope, ctx)
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        ui.error(
+          `Configuração inválida em ${err.path}: ${err.issues
+            .map((i) => `${i.path || 'raiz'} — ${i.message}`)
+            .join(
+              '; ',
+            )}. Execute \`agents-mcp init --force\` ou garanta que \`mcpServers\` esteja definido em .agents/mcp.json.`,
+        )
+        process.exit(1)
+        return
+      }
+      throw err
+    }
     let canonical: Record<string, CanonicalServer> = {}
     let schemaUrl = DEFAULT_SCHEMA_URL
     if (validated) {
@@ -142,6 +166,11 @@ export const addCommand = defineCommand({
         ...(validated.config.mcpServers as Record<string, CanonicalServer>),
       }
     }
+
+    // Carrega o estado de sincronizacao antecipadamente para verificacao de
+    // colisao de plugin (gera ou nao o fluxo interativo).
+    const stateResult = loadState(scope, ctx)
+    const state = stateResult.state
 
     let resolved: ReturnType<typeof resolveDirect>
     let name: string
@@ -167,6 +196,18 @@ export const addCommand = defineCommand({
             process.exit(1)
             return
           }
+          // Colisao com plugin nao gerenciado: solicita outro nome (re-prompt).
+          if (
+            isUnmanagedPluginCollision(
+              scope,
+              ctx,
+              candidate,
+              state.managedPlugins,
+            )
+          ) {
+            return true
+          }
+          return undefined
         },
       })
       interactiveAdd = true
@@ -189,6 +230,18 @@ export const addCommand = defineCommand({
           canonical[name],
           resolved.definition,
         )}Use --force to overwrite.`,
+      )
+      process.exit(1)
+    }
+
+    // Nao-interativo: falha em colisao com plugin nao gerenciado (sem
+    // auto-renomear nem sobrescrever).
+    if (
+      !interactiveAdd &&
+      isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)
+    ) {
+      ui.error(
+        `O nome \`${name}\` ja esta em uso por um plugin nao gerenciado em .agents/plugins/${name}/. Passe um --name diferente.`,
       )
       process.exit(1)
     }
@@ -250,8 +303,6 @@ export const addCommand = defineCommand({
         mcpServers: canonical,
       })
 
-      const stateResult = loadState(scope, ctx)
-      const state = stateResult.state
       const nextState = {
         ...state,
         scope,
@@ -261,16 +312,68 @@ export const addCommand = defineCommand({
       writeState(scope, ctx, nextState)
     }
 
-    ui.note(`Added server \`${name}\``)
-
-    if (!noSync && !dryRun) {
-      await runSync({
+    // Gera arquivos de plugin quando --no-sync (runSync nao e chamado).
+    let pluginErrors: string[] = []
+    if (!dryRun && noSync) {
+      const includeAntigravity = Boolean(
+        agentsFlag?.includes('antigravity') ||
+        state.targets.includes('antigravity'),
+      )
+      const result = syncPluginFiles({
+        name,
+        server: definition,
         scope,
         ctx,
-        flag: undefined,
+        includeAntigravity,
+        dryRun: false,
+      })
+      if (result.ok) {
+        const stateAfter = loadState(scope, ctx)
+        const updatedState = {
+          ...stateAfter.state,
+          scope,
+          targets: stateAfter.state.targets,
+          agents: { ...stateAfter.state.agents },
+          managedPlugins: [
+            ...new Set([...stateAfter.state.managedPlugins, name]),
+          ],
+        }
+        writeState(scope, ctx, updatedState)
+      } else {
+        pluginErrors = result.errors
+      }
+    }
+
+    // runSync tambem gera plugins (incluindo mcp_config.json quando
+    // antigravity esta nos targets) e reporta suas proprias falhas.
+    let syncErrors: string[] = []
+    if (!noSync && !dryRun) {
+      const syncResult = await runSync({
+        scope,
+        ctx,
+        flag: agentsFlag,
         dryRun: false,
         yes: args.yes === true,
+        quietErrors: true,
       })
+      syncErrors = syncResult.errors
+    }
+
+    const allErrors = [...pluginErrors, ...syncErrors]
+
+    if (allErrors.length > 0) {
+      ui.error(
+        `Servidor \`${name}\` adicionado ao .agents/mcp.json, mas falha ao gerar ${allErrors.length} plugin(es).`,
+      )
+      for (const e of allErrors) {
+        ui.error(e)
+      }
+      ui.note(
+        '.agents/mcp.json foi mantido. Reexecute `agents-mcp sync` apos resolver os problemas acima.',
+      )
+      process.exit(1)
+    } else {
+      ui.note(`Added server \`${name}\``)
     }
 
     if (interactiveAdd && !dryRun) {

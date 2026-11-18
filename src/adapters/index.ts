@@ -28,6 +28,7 @@ import * as vscode from '$/src/adapters/vscode'
 import * as opencode from '$/src/adapters/opencode'
 import * as zed from '$/src/adapters/zed'
 import * as windsurf from '$/src/adapters/windsurf'
+import * as antigravity from '$/src/adapters/antigravity'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
 
@@ -142,6 +143,16 @@ export const adapters: readonly AgentAdapter[] = [
     windsurf.compile,
     windsurf.extractServers,
     windsurf.applyServers,
+  ),
+  buildAdapter(
+    antigravity.id,
+    antigravity.displayName,
+    antigravity.capabilities,
+    antigravity.getConfigPath,
+    antigravity.detect,
+    antigravity.compile,
+    antigravity.extractServers,
+    antigravity.applyServers,
   ),
 ] as const
 

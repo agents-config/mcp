@@ -22,4 +22,5 @@ export const AGENT_ORDER = [
   'opencode',
   'zed',
   'windsurf',
+  'antigravity',
 ] as const

@@ -19,6 +19,7 @@ import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import { loadValidatedConfig } from '$/src/core/store'
 import { readTextFile } from '$/src/core/fs-atomic'
+import { syncPluginFiles, isUnmanagedPluginCollision } from '$/src/core/plugins'
 
 export interface SyncOptions {
   scope: ConfigScope
@@ -26,6 +27,11 @@ export interface SyncOptions {
   flag: readonly string[] | undefined
   dryRun: boolean
   yes: boolean
+  /**
+   * Quando `true`, não imprime o bloco de erro de plugins. Usado pelo `add`,
+   * que reporta as mesmas falhas uma única vez no seu próprio resumo.
+   */
+  quietErrors?: boolean
 }
 
 export interface SyncSummary {
@@ -33,10 +39,11 @@ export interface SyncSummary {
   targets: AgentId[]
   written: string[]
   warnings: string[]
+  errors: string[]
 }
 
 export async function runSync(options: SyncOptions): Promise<SyncSummary> {
-  const { scope, ctx, flag, dryRun, yes } = options
+  const { scope, ctx, flag, dryRun, yes, quietErrors = false } = options
   const { ui } = createUiAndCtx({ yes })
 
   // 1. Load + validate canonical config.
@@ -45,7 +52,7 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     ui.note(
       `No canonical config at ${configPath(scope, ctx)}. Nothing to sync.`,
     )
-    return { scope, targets: [], written: [], warnings: [] }
+    return { scope, targets: [], written: [], warnings: [], errors: [] }
   }
   const { config, warnings: configWarnings } = validated
 
@@ -82,11 +89,15 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     const adapter = getAdapter(agentId)
     const nativePath = adapter.getConfigPath(scope, ctx)
     if (nativePath === null) {
-      allWarnings.push({
-        code: 'SCOPE_UNSUPPORTED',
-        agent: agentId,
-        message: `${agentId} does not support ${scope} scope`,
-      })
+      // antigravity writes per-plugin files (no single native config path);
+      // it is handled by the plugin sync phase below, not here.
+      if (agentId !== 'antigravity') {
+        allWarnings.push({
+          code: 'SCOPE_UNSUPPORTED',
+          agent: agentId,
+          message: `${agentId} does not support ${scope} scope`,
+        })
+      }
       continue
     }
 
@@ -129,27 +140,92 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     }
   }
 
-  // 4. Update sync state (persist targets + per-agent managed names).
+  // 3b. Plugin sync: generate .agents/plugins/<name>/ for every canonical
+  // server (plugin.json + mcp.json always; mcp_config.json when antigravity
+  // is targeted). Skip unmanaged pre-existing plugin dirs.
+  const includeAntigravity = targets.includes('antigravity')
+  const nextManagedPlugins = new Set<string>(state.managedPlugins)
+  for (const [name, server] of Object.entries(config.mcpServers)) {
+    if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
+      allWarnings.push({
+        code: 'PLUGIN_UNMANAGED',
+        agent: undefined,
+        message: `.agents/plugins/${name}/ pre-existe e nao e gerenciado pela CLI; ignorado em sync. Use um nome diferente.`,
+      })
+      continue
+    }
+
+    const result = syncPluginFiles({
+      name,
+      server,
+      scope,
+      ctx,
+      includeAntigravity,
+      dryRun,
+    })
+
+    if (result.ok) {
+      nextManagedPlugins.add(name)
+      if (!dryRun) {
+        written.push(...result.written)
+      }
+    } else {
+      allWarnings.push({
+        code: 'PLUGIN_WRITE_ERROR',
+        agent: undefined,
+        message: `Falha ao gerar plugin \`${name}\`: ${result.errors.join('; ')}`,
+      })
+    }
+  }
+
+  // 4. Update sync state (persist targets + per-agent managed names + plugins).
   const nextState = {
     ...state,
     scope,
     targets,
     agents: nextAgents,
+    managedPlugins: [...nextManagedPlugins],
   }
   if (!dryRun) {
     persistSyncState(scope, ctx, nextState)
   }
 
   // 5. Print summary.
-  ui.note(`Synced ${targets.length} target(s) across ${written.length} file(s)`)
-  for (const w of allWarnings) {
-    ui.warn(`[${w.code}] ${w.message}`)
+  const isPluginError = (code: string): boolean =>
+    code === 'PLUGIN_WRITE_ERROR' || code === 'PLUGIN_UNMANAGED'
+  const pluginErrors = allWarnings
+    .filter((w) => isPluginError(w.code))
+    .map((w) => w.message)
+  const summaryWarnings = allWarnings
+    .filter((w) => !isPluginError(w.code))
+    .map((w) => w.message)
+
+  if (pluginErrors.length > 0) {
+    if (!quietErrors) {
+      ui.error(
+        `Sincronizacao parcial concluida com falhas: ${pluginErrors.length} plugin(es) nao puderam ser sincronizados.`,
+      )
+      for (const e of pluginErrors) {
+        ui.error(e)
+      }
+      ui.note(
+        'Reexecute `agents-mcp sync` apos resolver os problemas acima. .agents/mcp.json foi mantido.',
+      )
+    }
+  } else {
+    ui.note(
+      `Synced ${targets.length} target(s) across ${written.length} file(s)`,
+    )
+  }
+  for (const w of summaryWarnings) {
+    ui.warn(w)
   }
 
   return {
     scope,
     targets,
     written,
-    warnings: allWarnings.map((w) => w.message),
+    warnings: summaryWarnings,
+    errors: pluginErrors,
   }
 }

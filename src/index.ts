@@ -8,6 +8,7 @@
  */
 
 import { defineCommand, runCommand, showUsage } from 'citty'
+import { realpathSync } from 'node:fs'
 import pkg from '$/package.json' with { type: 'json' }
 import { createRuntimeContext, type RuntimeContext } from '$/src/core/context'
 import { createClackUi, type PromptUi } from '$/src/ui/prompts'
@@ -72,11 +73,51 @@ const SUBCOMMANDS = [
 ]
 
 /**
+ * Normaliza flags globais com valor separado por espaço para a forma
+ * `--flag=<valor>`.
+ *
+ * O `citty` não repassa `args` globais para os subcomandos: sem isso,
+ * `--agents antigravity` vira `agents: true` + posicional `antigravity`,
+ * quebrando `sync`/`init`/`add`. A forma com `=` é parseada como string por
+ * qualquer subcomando (mesmo os que não declaram `agents`).
+ *
+ * Tokens após `--` são preservados literalmente.
+ */
+export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
+  const normalized: string[] = []
+  let literal = false
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+
+    if (token === '--') {
+      literal = true
+      normalized.push(token)
+      continue
+    }
+
+    if (!literal && token === '--agents') {
+      const next = rawArgs[i + 1]
+      if (next !== undefined && !next.startsWith('-')) {
+        normalized.push(`--agents=${next}`)
+        i++
+        continue
+      }
+    }
+
+    normalized.push(token)
+  }
+
+  return normalized
+}
+
+/**
  * CLI entry point. Runs the citty app with `process.argv`.
  * Only executes when this module is run directly (not when imported by tests).
  */
 export async function main(): Promise<void> {
-  const rawArgs = process.argv.slice(2)
+  const rawArgs = normalizeGlobalArgs(process.argv.slice(2))
 
   // Handle --version / -v at root level → exit 0.
   if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
@@ -107,6 +148,9 @@ export async function main(): Promise<void> {
   try {
     await runCommand(app, { rawArgs })
   } catch (err) {
+    // Never swallow errors silently: surface them on stderr before exiting.
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(message)
     // citty throws CLIError (E_UNKNOWN_COMMAND / E_INVALID_ARG / E_NO_COMMAND)
     // for usage problems → exit 2. Runtime errors from commands → exit 1.
     if ((err as Error)?.name === 'CLIError') {
@@ -122,8 +166,26 @@ export async function main(): Promise<void> {
  * when imported as a module by tests. Uses argv[1] basename instead of
  * import.meta.url comparison, which breaks with symlinks (e.g. `npx`).
  */
-if (process.argv[1] && process.argv[1].endsWith('index.js')) {
-  void main()
+/**
+ * True when this file is executed directly (e.g. `node dist/index.js`), not
+ * when imported as a module by tests. Resolves symlinks via `realpathSync`
+ * so invoking `agents-mcp` through an installed bin symlink executes
+ * `main()` instead of exiting silently. Guarded against `VITEST` and
+ * invalid/unreadable paths.
+ */
+if (process.argv[1] && !process.env.VITEST) {
+  try {
+    const resolved = realpathSync(process.argv[1])
+    if (resolved.endsWith('index.js')) {
+      void main()
+    }
+  } catch {
+    // Unreadable/missing argv[1] (e.g. under some test runners): fall back
+    // to the literal basename check.
+    if (process.argv[1].endsWith('index.js')) {
+      void main()
+    }
+  }
 }
 
 /**
