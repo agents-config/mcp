@@ -7,16 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-19
+
 ### Added
 
-- Initial `agents-mcp` CLI implementation: single-source `.agents/mcp.json` compiler for 6 AI coding agents (Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed)
+- Initial `agents-mcp` CLI implementation: single-source `.agents/mcp.json` compiler for AI coding agents (Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, Antigravity)
 - Canonical `.agents/mcp.json` format aligned with the Agent Plugins MCP 1.0.0 JSON Schema (`https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`): `mcpServers` root key, `type` discriminator, and `stdio`, `streamable-http`, and `sse` transports
 - `init` command: scaffold canonical config and select target agents
 - `import` command: consolidate existing agent MCP configs into canonical
 - `sync` command: compile canonical config into all targeted agent config files (byte-idempotent)
 - `remove` command: remove a server and clean from managed agent configs
 - `list` command: inspect configured servers, targets, and sync status
-- `add` command: install an MCP server from direct flags (`--command`, `--arg`, `--http`, `--sse`, `--env`, `--header`, `--cwd`, `--name`)
+- `add` command: install an MCP server via interactive wizard (`agents-mcp add <name>`) or direct flags (`--command`, `--arg`, `--http`, `--sse`, `--env`, `--header`, `--cwd`, `--name`)
+- Automatic Agent Plugins directory generation (`.agents/plugins/<name>/plugin.json` and `mcp.json`) on `add` and `sync`, plus `mcp_config.json` when `antigravity` is targeted
 - `doctor` command: audit schema validity, env vars, runtime binaries, semantic drift, state, hygiene
 - Non-destructive JSONC AST edits (jsonc-parser) preserving comments, unrelated keys, and manual MCP entries
 - Secret hygiene: symbolic `${VAR}` placeholders in versioned files, real values only in `.env` (mode 0600)
@@ -27,10 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`
 - Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0
-
-### Deprecated
-
-- None
 
 ### Removed
 
