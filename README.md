@@ -145,8 +145,11 @@ Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy
   mcp_config.json    # apenas quando `antigravity` esta nos targets
 ```
 
-- **`plugin.json` + `mcp.json`**: gerados para **qualquer** servidor adicionado ou sincronizado, independentemente dos agentes alvo.
+- **`plugin.json` + `mcp.json`**: gerados para **qualquer** servidor adicionado ou sincronizado, independentemente dos agentes alvo. O `agents-mcp add` **sempre** cria/atualiza esses arquivos base do plugin, inclusive com `--no-sync` e quando nenhum agente esta configurado ou detectado no projeto.
 - **`mcp_config.json`**: gerado apenas quando `antigravity` esta entre os targets (`--agents antigravity`, `init` ou `sync`). Servidores `stdio` mapeiam para `{ command, args?, env? }`; servidores `streamable-http` e `sse` mapeiam para `{ serverUrl, headers? }` (formato nativo do Antigravity).
+- Quando `agents-mcp add` nao resolve nenhum target agente, a CLI conclui o indice e o plugin base e informa que nenhum agente foi sincronizado, orientando `agents-mcp sync --agents <lista>` (ex.: `--agents cursor,vscode`).
+- `agents-mcp sync` sem targets continua sendo um erro (`No resolvable target agents`, codigo de saida `1`); informe `--agents <lista>` para sincronizar.
+- `--no-sync` no `add` suprime **apenas** a sincronizacao de agentes: os arquivos de plugin continuam sendo gerados em `.agents/plugins/` e o estado alvo (`state.targets`) e os agentes ja registrados sao preservados.
 
 ### Propriedade e colisao
 

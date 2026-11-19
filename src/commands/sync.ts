@@ -32,6 +32,16 @@ export interface SyncOptions {
    * que reporta as mesmas falhas uma única vez no seu próprio resumo.
    */
   quietErrors?: boolean
+  /**
+   * `add --no-sync`: gera apenas plugin; não resolve nem grava agentes.
+   * `state.targets` e `state.agents` são preservados.
+   */
+  skipAgentSync?: boolean
+  /**
+   * `add`: permite zero targets resolvidos; segue gerando plugins.
+   * Sem ele, zero targets mantém o comportamento atual (erro + exit 1).
+   */
+  allowEmptyTargets?: boolean
 }
 
 export interface SyncSummary {
@@ -43,7 +53,16 @@ export interface SyncSummary {
 }
 
 export async function runSync(options: SyncOptions): Promise<SyncSummary> {
-  const { scope, ctx, flag, dryRun, yes, quietErrors = false } = options
+  const {
+    scope,
+    ctx,
+    flag,
+    dryRun,
+    yes,
+    quietErrors = false,
+    skipAgentSync = false,
+    allowEmptyTargets = false,
+  } = options
   const { ui } = createUiAndCtx({ yes })
 
   // 1. Load + validate canonical config.
@@ -57,10 +76,17 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   const { config, warnings: configWarnings } = validated
 
   // 2. Resolve targets: flag → state → detection.
+  // Em `skipAgentSync` (`add --no-sync`) não há resolução de agentes: a
+  // fase de plugins ainda roda, mas sem arquivos nativos e sem mexer no
+  // estado de agentes.
   const stateResult = loadSyncState(scope, ctx)
   const state = stateResult.state
-  const targets = await resolveTargetsAsync({ flag, state, ctx })
-  if (targets.length === 0) {
+  const targets = skipAgentSync
+    ? []
+    : await resolveTargetsAsync({ flag, state, ctx })
+
+  if (!skipAgentSync && targets.length === 0 && !allowEmptyTargets) {
+    // Comportamento atual inalterado para `sync`/`remove`/`import`.
     ui.error(
       'No resolvable target agents. Pass --agents <list> (e.g. --agents cursor,vscode).',
     )
@@ -143,7 +169,11 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   // 3b. Plugin sync: generate .agents/plugins/<name>/ for every canonical
   // server (plugin.json + mcp.json always; mcp_config.json when antigravity
   // is targeted). Skip unmanaged pre-existing plugin dirs.
-  const includeAntigravity = targets.includes('antigravity')
+  const includeAntigravity = skipAgentSync
+    ? Boolean(
+        flag?.includes('antigravity') || state.targets.includes('antigravity'),
+      )
+    : targets.includes('antigravity')
   const nextManagedPlugins = new Set<string>(state.managedPlugins)
   for (const [name, server] of Object.entries(config.mcpServers)) {
     if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
@@ -182,7 +212,7 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   const nextState = {
     ...state,
     scope,
-    targets,
+    targets: skipAgentSync ? state.targets : targets,
     agents: nextAgents,
     managedPlugins: [...nextManagedPlugins],
   }
@@ -212,6 +242,16 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
         'Reexecute `agents-mcp sync` apos resolver os problemas acima. .agents/mcp.json foi mantido.',
       )
     }
+  } else if (skipAgentSync) {
+    // `add --no-sync`: agentes não foram sincronizados, apenas plugins.
+    ui.note(
+      'Sincronizacao de agentes ignorada (--no-sync): os arquivos de plugin foram atualizados em .agents/plugins/ e nenhum agente foi sincronizado.',
+    )
+  } else if (targets.length === 0 && allowEmptyTargets) {
+    // `add` sem targets: concluído com plugin padrão, sem agentes alvo.
+    ui.note(
+      'Nenhum agente alvo configurado ou detectado: o plugin padrao Agent Plugins foi gerado em .agents/plugins/, mas nenhum agente foi sincronizado. Para sincronizar depois, execute `agents-mcp sync --agents <lista>` (ex.: `--agents cursor,vscode`).',
+    )
   } else {
     ui.note(
       `Synced ${targets.length} target(s) across ${written.length} file(s)`,

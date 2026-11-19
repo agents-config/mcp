@@ -1,10 +1,16 @@
 import { describe, expect, it, vi, beforeEach, afterAll } from 'vitest'
-import { readFileSync, existsSync } from 'node:fs'
+import {
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+} from 'node:fs'
 import { join } from 'node:path'
 import { addCommand } from '$/src/commands/add.command'
-import { createUiAndCtx } from '$/src/commands/util'
+import { createUiAndCtx, persistCanonicalConfig } from '$/src/commands/util'
 import { getConfigPath } from '$/src/core/store'
-import { loadState } from '$/src/core/state'
+import { loadState, writeState, emptyState } from '$/src/core/state'
 import { DEFAULT_SCHEMA_URL } from '$/src/config'
 import type { RuntimeContext } from '$/src/core/context'
 import type { PromptUi } from '$/src/ui/prompts'
@@ -555,6 +561,299 @@ describe('commands add (T6: integridade do índice canônico)', () => {
       expect(message).toContain('inválida')
       expect(message).toContain('agents-mcp init --force')
       expect(exitMock).toHaveBeenCalledWith(1)
+    } finally {
+      cleanup()
+      exitMock.mockRestore()
+    }
+  })
+})
+
+describe('commands add (B5: plugin criado independentemente de sync/targets)', () => {
+  function baseUi(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    const note = vi.fn()
+    const errorMock = vi.fn()
+    vi.mocked(createUiAndCtx).mockImplementation(() => ({
+      ctx,
+      ui: {
+        error: errorMock,
+        warn: vi.fn(),
+        note,
+        intro: vi.fn(),
+        outro: vi.fn(),
+      } as unknown as PromptUi,
+    }))
+    return { note, errorMock }
+  }
+
+  function addArgs(name: string, noSync: boolean, yes = true) {
+    return {
+      yes,
+      global: false,
+      force: false,
+      'extract-secrets': false,
+      'no-sync': noSync,
+      command: 'npx',
+      http: undefined,
+      sse: undefined,
+      cwd: undefined,
+      name,
+      _: [],
+    }
+  }
+
+  it('regressao B5: add sem --no-sync e sem targets nao chama exit, cria plugin', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const { note, errorMock } = baseUi(ctx)
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      await addCommand.run!({
+        args: addArgs('web', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(errorMock).not.toHaveBeenCalled()
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual([])
+      expect(state.managedPlugins).toEqual(['web'])
+
+      const outputs = [
+        ...note.mock.calls.map((call) => String(call[0])),
+        ...logSpy.mock.calls.map((call) => String(call[0])),
+      ]
+      expect(outputs.some((o) => o.includes('Nenhum agente alvo'))).toBe(true)
+      expect(outputs.some((o) => o.includes('agents-mcp sync --agents'))).toBe(
+        true,
+      )
+    } finally {
+      logSpy.mockRestore()
+      cleanup()
+    }
+  })
+
+  it('fluxo interativo com sincronizacao habilitada cria plugin, chama outro e nao sai com exit', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const intro = vi.fn()
+    const outro = vi.fn()
+    const note = vi.fn()
+    const select = vi.fn(async () => 'command')
+    const text = vi.fn().mockResolvedValueOnce('npx').mockResolvedValueOnce('')
+    const confirm = vi.fn(async () => false)
+    const interactiveCtx = {
+      ...ctx,
+      isTTY: true,
+      env: { ...ctx.env, CI: undefined },
+    }
+    try {
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx: interactiveCtx,
+        ui: {
+          intro,
+          outro,
+          note,
+          warn: vi.fn(),
+          error: vi.fn(),
+          select,
+          text,
+          confirm,
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: {
+          yes: false,
+          global: false,
+          force: false,
+          'extract-secrets': false,
+          'no-sync': false,
+          command: undefined,
+          http: undefined,
+          sse: undefined,
+          cwd: undefined,
+          name: undefined,
+          _: ['my-server'],
+        },
+        rawArgs: [],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(outro).toHaveBeenCalled()
+      expect(intro).toHaveBeenCalledWith('Add MCP server')
+
+      const pluginDir = join(interactiveCtx.cwd, '.agents/plugins/my-server')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('--no-sync preserva targets semeados no estado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    baseUi(ctx)
+    try {
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['cursor'],
+        managedPlugins: [],
+      })
+
+      await addCommand.run!({
+        args: addArgs('my-tool', true),
+        rawArgs: ['--command=npx', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(loadState('project', ctx).state.targets).toEqual(['cursor'])
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/my-tool')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('antigravity via state.targets cria mcp_config.json sem --agents', async () => {
+    const { ctx, cleanup } = createSandbox()
+    baseUi(ctx)
+    try {
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['antigravity'],
+      })
+
+      await addCommand.run!({
+        args: addArgs('my-tool', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/my-tool')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['antigravity'])
+      expect(state.managedPlugins).toEqual(['my-tool'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('definicao identica recria plugin ausente sem process.exit', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const { note, errorMock } = baseUi(ctx)
+    try {
+      await addCommand.run!({
+        args: addArgs('srv', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/srv')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      // Simula o plugin sumindo do disco (usuario afetado pelo B5 repete o add).
+      rmSync(pluginDir, { recursive: true, force: true })
+      expect(existsSync(pluginDir)).toBe(false)
+      note.mockClear()
+
+      await addCommand.run!({
+        args: addArgs('srv', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(errorMock).not.toHaveBeenCalled()
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      const notes = note.mock.calls.map((call) => String(call[0]))
+      expect(
+        notes.some((n) =>
+          n.includes('already present with identical definition'),
+        ),
+      ).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falha parcial de plugin (arquivo no lugar do diretorio) sai com 1 e mantem o indice', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const errorMock = vi.fn()
+    const note = vi.fn()
+    // `process.exit` é restaurado pelo vitest antes de cada teste, entao
+    // re-mockamos para nao deixar o ambiente de node encerrar o worker.
+    const exitMock = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: DEFAULT_SCHEMA_URL,
+        mcpServers: {
+          srv: { type: 'stdio', command: 'npx', args: [] },
+        },
+      })
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: [],
+        agents: {},
+        managedPlugins: ['srv'],
+      })
+      const pluginsDir = join(ctx.cwd, '.agents/plugins')
+      mkdirSync(pluginsDir, { recursive: true })
+      // Arquivo onde deveria haver um diretorio de plugin -> grava falha com ENOTDIR/EEXIST.
+      const srvPluginPath = join(pluginsDir, 'srv')
+      writeFileSync(srvPluginPath, 'not a directory')
+
+      vi.mocked(createUiAndCtx).mockImplementation(() => ({
+        ctx,
+        ui: {
+          error: errorMock,
+          warn: vi.fn(),
+          note,
+          intro: vi.fn(),
+          outro: vi.fn(),
+        } as unknown as PromptUi,
+      }))
+
+      await addCommand.run!({
+        args: addArgs('my-tool', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitMock).toHaveBeenCalledWith(1)
+      const errors = errorMock.mock.calls.map((c) => String(c[0]))
+      expect(errors.some((e) => e.includes('falha ao gerar'))).toBe(true)
+
+      // Indice mantido com os dois servidores.
+      const config = JSON.parse(
+        readFileSync(getConfigPath('project', ctx), 'utf8'),
+      )
+      expect(config.mcpServers.srv).toBeDefined()
+      expect(config.mcpServers['my-tool']).toBeDefined()
+
+      // Plugin do servidor novo foi criado; o do collidente nao foi sobrescrito.
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/my-tool/plugin.json')),
+      ).toBe(true)
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/my-tool/mcp.json')),
+      ).toBe(true)
+      expect(existsSync(join(srvPluginPath, 'plugin.json'))).toBe(false)
     } finally {
       cleanup()
       exitMock.mockRestore()

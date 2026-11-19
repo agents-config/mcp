@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- None
+- `agents-mcp add` now always creates/updates the standard Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected; `sync` remains responsible for agent files and, when `antigravity` is targeted, `mcp_config.json`.
 
 ### Security
 

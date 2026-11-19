@@ -34,7 +34,7 @@ import {
 import type { CanonicalServer } from '$/src/core/schema'
 import { isStdioServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import { syncPluginFiles, isUnmanagedPluginCollision } from '$/src/core/plugins'
+import { isUnmanagedPluginCollision } from '$/src/core/plugins'
 
 function diffValues(a: unknown, b: unknown): string {
   const aStr = JSON.stringify(a, null, 2)
@@ -94,7 +94,10 @@ export const addCommand = defineCommand({
     header: { type: 'string', description: '"Name: Value" (repeatable)' },
     cwd: { type: 'string' },
     name: { type: 'string', description: 'Server name override' },
-    'no-sync': { type: 'boolean' },
+    'no-sync': {
+      type: 'boolean',
+      description: 'Skip agent sync; Agent Plugins files are still generated',
+    },
     force: { type: 'boolean', alias: 'f' },
     'extract-secrets': {
       type: 'boolean',
@@ -218,10 +221,51 @@ export const addCommand = defineCommand({
       name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
     }
 
+    /**
+     * Fase de plugins (+ agentes, quando aplicável) — única fonte via `runSync`.
+     * `skipAgentSync: noSync` (`--no-sync` gera só plugin, sem mexer em agentes);
+     * `allowEmptyTargets: true` permite `add` sem targets resolvidos.
+     */
+    const runPluginAndAgentSync = (skipAgentSync: boolean) =>
+      runSync({
+        scope,
+        ctx,
+        flag: agentsFlag,
+        dryRun: false,
+        yes: args.yes === true,
+        quietErrors: true,
+        skipAgentSync,
+        allowEmptyTargets: true,
+      })
+
+    /** Reporta falha parcial de plugin e encerra com código 1. */
+    const reportSyncFailures = (errors: string[]): void => {
+      ui.error(
+        `Servidor \`${name}\` adicionado ao .agents/mcp.json, mas falha ao gerar ${errors.length} plugin(es).`,
+      )
+      for (const e of errors) {
+        ui.error(e)
+      }
+      ui.note(
+        '.agents/mcp.json foi mantido. Reexecute `agents-mcp sync` apos resolver os problemas acima.',
+      )
+      process.exit(1)
+    }
+
     if (name in canonical && !force) {
       const same =
         JSON.stringify(canonical[name]) === JSON.stringify(resolved.definition)
       if (same) {
+        // Definicao identica: nao grava nada de agente, mas garante os
+        // arquivos base do plugin (e o registro em managedPlugins) mesmo
+        // sem targets e sem sincronizacao de agentes.
+        if (!dryRun) {
+          const result = await runPluginAndAgentSync(true)
+          if (result.errors.length > 0) {
+            reportSyncFailures(result.errors)
+            return
+          }
+        }
         ui.note(`Server \`${name}\` already present with identical definition.`)
         return
       }
@@ -312,69 +356,14 @@ export const addCommand = defineCommand({
       writeState(scope, ctx, nextState)
     }
 
-    // Gera arquivos de plugin quando --no-sync (runSync nao e chamado).
-    let pluginErrors: string[] = []
-    if (!dryRun && noSync) {
-      const includeAntigravity = Boolean(
-        agentsFlag?.includes('antigravity') ||
-        state.targets.includes('antigravity'),
-      )
-      const result = syncPluginFiles({
-        name,
-        server: definition,
-        scope,
-        ctx,
-        includeAntigravity,
-        dryRun: false,
-      })
-      if (result.ok) {
-        const stateAfter = loadState(scope, ctx)
-        const updatedState = {
-          ...stateAfter.state,
-          scope,
-          targets: stateAfter.state.targets,
-          agents: { ...stateAfter.state.agents },
-          managedPlugins: [
-            ...new Set([...stateAfter.state.managedPlugins, name]),
-          ],
-        }
-        writeState(scope, ctx, updatedState)
-      } else {
-        pluginErrors = result.errors
+    if (!dryRun) {
+      const syncResult = await runPluginAndAgentSync(noSync)
+      if (syncResult.errors.length > 0) {
+        reportSyncFailures(syncResult.errors)
+        return
       }
     }
-
-    // runSync tambem gera plugins (incluindo mcp_config.json quando
-    // antigravity esta nos targets) e reporta suas proprias falhas.
-    let syncErrors: string[] = []
-    if (!noSync && !dryRun) {
-      const syncResult = await runSync({
-        scope,
-        ctx,
-        flag: agentsFlag,
-        dryRun: false,
-        yes: args.yes === true,
-        quietErrors: true,
-      })
-      syncErrors = syncResult.errors
-    }
-
-    const allErrors = [...pluginErrors, ...syncErrors]
-
-    if (allErrors.length > 0) {
-      ui.error(
-        `Servidor \`${name}\` adicionado ao .agents/mcp.json, mas falha ao gerar ${allErrors.length} plugin(es).`,
-      )
-      for (const e of allErrors) {
-        ui.error(e)
-      }
-      ui.note(
-        '.agents/mcp.json foi mantido. Reexecute `agents-mcp sync` apos resolver os problemas acima.',
-      )
-      process.exit(1)
-    } else {
-      ui.note(`Added server \`${name}\``)
-    }
+    ui.note(`Added server \`${name}\``)
 
     if (interactiveAdd && !dryRun) {
       ui.outro(`Server \`${name}\` added.`)
