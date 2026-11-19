@@ -46,7 +46,7 @@ writeFileSync(
 )
 
 // 3. Copy metadata files
-const metadataFiles = ['LICENSE', 'README.md']
+const metadataFiles = ['LICENSE', 'README.md', 'CHANGELOG.md']
 for (const file of metadataFiles) {
   const src = resolve(root, file)
   const dest = resolve(distDir, file)
@@ -55,15 +55,6 @@ for (const file of metadataFiles) {
   } else {
     console.warn(`⚠️  Warning: ${file} not found, skipping copy to dist/`)
   }
-}
-
-// 4. Copy CHANGELOG.md when present, warn instead of failing when absent
-const changelogSrc = resolve(root, 'CHANGELOG.md')
-const changelogDest = resolve(distDir, 'CHANGELOG.md')
-if (existsSync(changelogSrc)) {
-  copyFileSync(changelogSrc, changelogDest)
-} else {
-  console.warn('⚠️  Warning: CHANGELOG.md not found, skipping copy to dist/')
 }
 
 console.log('✅ dist/package.json and metadata prepared in dist/ folder')
