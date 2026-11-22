@@ -892,3 +892,4 @@ lines/functions and 75% branches over `src/core` and `src/adapters`.
 | [0008](../docs/decisions/0008-packaging-and-runtime-floor.md) | Node `>=22`, publish from `dist/` only, single binary. |
 | [0009](../docs/decisions/0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`. |
 | [0010](../docs/decisions/0010-adopt-agent-plugins-mcp-schema.md) | Adopt Agent Plugins MCP 1.0.0 as the normative basis. |
+| [0011](../docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md) | Plugin ownership via `managedPlugins` and safe, non-recursive cleanup. |

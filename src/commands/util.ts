@@ -131,6 +131,24 @@ export function isDryRun(args: Record<string, unknown>): boolean {
   return args['dry-run'] === true
 }
 
+/**
+ * Detecta a flag `--no-sync` independente de como o citty a parseou.
+ *
+ * O citty consome `--no-sync` antes do parse e entrega `args.sync === false`
+ * (sem a chave `no-sync`). Esta helper cobre todas as formas:
+ * `args['no-sync'] === true`, `args.sync === false` e `rawArgs.includes('--no-sync')`.
+ */
+export function isNoSyncFlag(
+  args: Record<string, unknown>,
+  rawArgs: readonly string[],
+): boolean {
+  return (
+    args['no-sync'] === true ||
+    args.sync === false ||
+    rawArgs.includes('--no-sync')
+  )
+}
+
 /** Normaliza uma lista de agentes separada por vírgulas. */
 function splitAgentList(value: string): string[] | undefined {
   const ids = value

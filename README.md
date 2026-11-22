@@ -163,6 +163,14 @@ A CLI rastreia quais plugins ela gerencia no estado de sincronizacao (`.agents/.
 
 Se `.agents/mcp.json` (e/ou arquivos nativos dos agentes) for gravado com sucesso, mas a criacao/atualizacao de um arquivo de plugin falhar, a CLI **nao** imprime confirmacao falsa de sucesso total. Reporta explicitamente o que foi concluido e o que falhou, com proximos passos acionaveis (ex. `reexecute agents-mcp sync`), e sai com codigo `1`.
 
+### Remocao e limpeza de plugins
+
+- `remove <nome>` remove **apenas** `plugin.json`, `mcp.json` e `mcp_config.json` do plugin gerenciado em `.agents/plugins/<nome>/`. O diretorio e apagado somente se ficar vazio apos a limpeza; arquivos manuais (ex. `sentinel.txt`) e subdiretorios sao preservados.
+- Diretorios em `.agents/plugins/<nome>/` cujo nome nao esta registrado em `managedPlugins` (estado de sincronizacao) nunca sao modificados nem apagados por `remove` ou `sync`.
+- `sync` sem `antigravity` nos targets remove o `mcp_config.json` dos plugins gerenciados, mantendo `plugin.json` e `mcp.json` intactos.
+- `remove --no-sync` remove o servidor do canônico e limpa os arquivos do plugin gerenciado localmente, sem sincronizar configuracoes nos agentes nem alterar `state.targets`/`state.agents`.
+- `--dry-run` em `remove` e `sync` nao grava nem apaga nada: canônico, plugins, estado e configuracoes nativas dos agentes ficam intocados.
+
 ### Boas praticas
 
 - Edicoes manuais devem ser feitas em `.agents/mcp.json` e propagadas via `agents-mcp sync`.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   getPluginDir,
   compilePluginManifest,
@@ -8,8 +9,12 @@ import {
   isUnmanagedPluginCollision,
   syncPluginFiles,
   readPluginManifest,
+  MANAGED_PLUGIN_FILES,
+  removeManagedPlugin,
+  removeAntigravityPluginConfig,
 } from '$/src/core/plugins'
 import { createRuntimeContext } from '$/src/core/context'
+import { createSandbox } from '$/tests/helpers/sandbox'
 import type { CanonicalServer } from '$/src/core/schema'
 
 const ctx = createRuntimeContext({
@@ -217,5 +222,234 @@ describe('plugins.syncPluginFiles', () => {
       'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
     )
     expect(parsed.mcpServers['schema-check']).toEqual(stdioServer)
+  })
+})
+
+describe('plugins.removeManagedPlugin', () => {
+  it('remove os 3 arquivos gerenciados e apaga o diretorio vazio', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'alpha')
+      mkdirSync(pluginDir, { recursive: true })
+      for (const file of MANAGED_PLUGIN_FILES) {
+        writeFileSync(join(pluginDir, file), '{}')
+      }
+
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'alpha',
+        managedPlugins: ['alpha'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toHaveLength(3)
+      expect(result.errors).toEqual([])
+      for (const file of MANAGED_PLUGIN_FILES) {
+        expect(existsSync(join(pluginDir, file))).toBe(false)
+      }
+      expect(existsSync(pluginDir)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('preserva arquivo extra e mantem o diretorio', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'beta')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'plugin.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+      writeFileSync(join(pluginDir, 'sentinel.txt'), 'manual')
+
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'beta',
+        managedPlugins: ['beta'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toHaveLength(3)
+      expect(result.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'sentinel.txt'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('no-op para nome nao gerenciado (arquivos intactos)', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'outsider')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'plugin.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'outsider',
+        managedPlugins: ['outro'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toEqual([])
+      expect(result.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dry-run nao altera o disco e lista so arquivos existentes', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'gamma')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'plugin.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'gamma',
+        managedPlugins: ['gamma'],
+        dryRun: true,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toHaveLength(2)
+      expect(result.removed).toContain(join(pluginDir, 'plugin.json'))
+      expect(result.removed).toContain(join(pluginDir, 'mcp.json'))
+      expect(result.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('arquivos ausentes retorna ok sem erros (idempotencia)', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'desaparecido',
+        managedPlugins: ['desaparecido'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toEqual([])
+      expect(result.errors).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('falha de I/O em um arquivo nao bloqueia os demais', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'delta')
+      mkdirSync(pluginDir, { recursive: true })
+      // plugin.json como diretorio -> unlinkSync falha com EISDIR no Linux
+      mkdirSync(join(pluginDir, 'plugin.json'), { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+
+      const result = removeManagedPlugin({
+        scope: 'project',
+        ctx,
+        name: 'delta',
+        managedPlugins: ['delta'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(false)
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]).toContain('Falha ao remover')
+      expect(result.errors[0]).toContain(join(pluginDir, 'plugin.json'))
+      expect(result.removed).toHaveLength(2)
+      expect(result.removed).toContain(join(pluginDir, 'mcp.json'))
+      expect(result.removed).toContain(join(pluginDir, 'mcp_config.json'))
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      // diretorio nao vazio (contem plugin.json/), portanto preservado
+      expect(existsSync(pluginDir)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('plugins.removeAntigravityPluginConfig', () => {
+  it('remove somente mcp_config.json e preserva plugin.json e mcp.json', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'epsilon')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'plugin.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+
+      const result = removeAntigravityPluginConfig({
+        scope: 'project',
+        ctx,
+        name: 'epsilon',
+        managedPlugins: ['epsilon'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toEqual([join(pluginDir, 'mcp_config.json')])
+      expect(result.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('no-op quando nome nao esta gerenciado', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const pluginDir = getPluginDir('project', ctx, 'zeta')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+
+      const result = removeAntigravityPluginConfig({
+        scope: 'project',
+        ctx,
+        name: 'zeta',
+        managedPlugins: ['outro'],
+        dryRun: false,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(result.removed).toEqual([])
+      expect(result.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+    } finally {
+      cleanup()
+    }
   })
 })

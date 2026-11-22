@@ -13,7 +13,7 @@
  */
 
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs'
 import { writeFileAtomic, readTextFile } from '$/src/core/fs-atomic'
 import type { CanonicalServer } from '$/src/core/schema'
 import { isStdioServer, isHttpServer } from '$/src/core/schema'
@@ -173,6 +173,152 @@ export function syncPluginFiles({
         }`,
       )
     }
+  }
+
+  return result
+}
+
+/**
+ * Resultado de remocao de arquivos de plugin gerenciados.
+ */
+export interface PluginRemovalResult {
+  ok: boolean
+  /** Caminhos de arquivos removidos (ou que seriam removidos em dry-run). */
+  removed: string[]
+  /** Mensagens de erro (um por falha de I/O). */
+  errors: string[]
+}
+
+/** Arquivos de plugin gerenciados pela CLI, os unicos passiveis de remocao. */
+export const MANAGED_PLUGIN_FILES = [
+  'plugin.json',
+  'mcp.json',
+  'mcp_config.json',
+] as const
+
+/**
+ * Remove apenas os arquivos de plugin gerenciados (`plugin.json`, `mcp.json`,
+ * `mcp_config.json`) existentes no diretorio do plugin, protegendo nomes que
+ * nao estao registrados em `managedPlugins` (no-op absoluto sem tocar no disco).
+ *
+ * Depois de remover os arquivos alvo, remove o diretorio somente se ficar vazio
+ * (`rmdirSync` nao recursivo). Arquivos extras ou subdiretorios preservam o
+ * diretorio. Arquivos ausentes sao ignorados (idempotencia).
+ *
+ * Respeita `--dry-run`: nenhum I/O de escrita/remocao; `removed` lista apenas
+ * caminhos existentes que seriam removidos.
+ *
+ * Erros de I/O sao capturados por arquivo, acumulados em `errors` no formato
+ * `Falha ao remover <caminho>: <mensagem>` e sinalizados com `ok: false`;
+ * nunca lança excecao.
+ */
+export function removeManagedPlugin({
+  scope,
+  ctx,
+  name,
+  managedPlugins,
+  dryRun,
+}: {
+  scope: ConfigScope
+  ctx: RuntimeContext
+  name: string
+  managedPlugins: readonly string[]
+  dryRun: boolean
+}): PluginRemovalResult {
+  const result: PluginRemovalResult = { ok: true, removed: [], errors: [] }
+
+  // Protecao absoluta: plugins nao gerenciados nunca sao tocados.
+  if (!managedPlugins.includes(name)) {
+    return result
+  }
+
+  const dir = getPluginDir(scope, ctx, name)
+
+  for (const file of MANAGED_PLUGIN_FILES) {
+    const path = join(dir, file)
+    if (!existsSync(path)) {
+      continue
+    }
+    if (dryRun) {
+      result.removed.push(path)
+      continue
+    }
+    try {
+      unlinkSync(path)
+      result.removed.push(path)
+    } catch (err) {
+      result.ok = false
+      result.errors.push(
+        `Falha ao remover ${path}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+  }
+
+  if (!dryRun && existsSync(dir)) {
+    try {
+      if (readdirSync(dir).length === 0) {
+        rmdirSync(dir)
+      }
+    } catch (err) {
+      result.ok = false
+      result.errors.push(
+        `Falha ao remover ${dir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+  }
+
+  return result
+}
+
+/**
+ * Remove apenas o `mcp_config.json` (Antigravity) de um plugin gerenciado,
+ * sem nunca remover `plugin.json`/`mcp.json` nem o diretorio. Mesma semântica
+ * de propriedade e erro de `removeManagedPlugin`.
+ */
+export function removeAntigravityPluginConfig({
+  scope,
+  ctx,
+  name,
+  managedPlugins,
+  dryRun,
+}: {
+  scope: ConfigScope
+  ctx: RuntimeContext
+  name: string
+  managedPlugins: readonly string[]
+  dryRun: boolean
+}): PluginRemovalResult {
+  const result: PluginRemovalResult = { ok: true, removed: [], errors: [] }
+
+  // Protecao absoluta: plugins nao gerenciados nunca sao tocados.
+  if (!managedPlugins.includes(name)) {
+    return result
+  }
+
+  const path = join(getPluginDir(scope, ctx, name), 'mcp_config.json')
+  if (!existsSync(path)) {
+    return result
+  }
+
+  if (dryRun) {
+    result.removed.push(path)
+    return result
+  }
+
+  try {
+    unlinkSync(path)
+    result.removed.push(path)
+  } catch (err) {
+    result.ok = false
+    result.errors.push(
+      `Falha ao remover ${path}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
   }
 
   return result

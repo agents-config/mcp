@@ -19,7 +19,12 @@ import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import { loadValidatedConfig } from '$/src/core/store'
 import { readTextFile } from '$/src/core/fs-atomic'
-import { syncPluginFiles, isUnmanagedPluginCollision } from '$/src/core/plugins'
+import {
+  syncPluginFiles,
+  isUnmanagedPluginCollision,
+  removeManagedPlugin,
+  removeAntigravityPluginConfig,
+} from '$/src/core/plugins'
 
 export interface SyncOptions {
   scope: ConfigScope
@@ -174,7 +179,10 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
         flag?.includes('antigravity') || state.targets.includes('antigravity'),
       )
     : targets.includes('antigravity')
-  const nextManagedPlugins = new Set<string>(state.managedPlugins)
+  const canonicalNames = Object.keys(config.mcpServers)
+  const nextManagedPlugins = new Set<string>(
+    state.managedPlugins.filter((n) => canonicalNames.includes(n)),
+  )
   for (const [name, server] of Object.entries(config.mcpServers)) {
     if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
       allWarnings.push({
@@ -208,6 +216,58 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     }
   }
 
+  // Poda de plugins obsoletos: servidores que sairam do canônico (removidos
+  // pelo `remove` ou manualmente) limpam seus arquivos gerenciados e saem do
+  // estado de plugins gerenciados. Arquivos manuais e diretorios nao vazios
+  // sao preservados por `removeManagedPlugin`.
+  const stalePlugins = state.managedPlugins.filter(
+    (n) => !canonicalNames.includes(n),
+  )
+  for (const name of stalePlugins) {
+    const result = removeManagedPlugin({
+      scope,
+      ctx,
+      name,
+      managedPlugins: state.managedPlugins,
+      dryRun,
+    })
+    if (!result.ok) {
+      // Falha de limpeza (ex.: plugin.json virou diretorio -> EISDIR): mantem o
+      // nome em nextManagedPlugins para que o proximo `sync` tente novamente,
+      // em vez de descartar o plugin do estado e deixar o diretorio orfao sem
+      // reprocessamento. O erro ja esta em allWarnings e sera reportado em
+      // summary.errors (e exit 1 via sync.command).
+      nextManagedPlugins.add(name)
+      allWarnings.push({
+        code: 'PLUGIN_CLEANUP_ERROR',
+        agent: undefined,
+        message: `Falha ao remover plugin \`${name}\`: ${result.errors.join('; ')}`,
+      })
+    }
+  }
+
+  // Quando antigravity nao eh mais alvo, remova mcp_config.json dos plugins
+  // gerenciados (preservando plugin.json e mcp.json). Em skipAgentSync
+  // (`add --no-sync`) nao se toca em mcp_config.json existente.
+  if (!skipAgentSync && !includeAntigravity) {
+    for (const name of nextManagedPlugins) {
+      const result = removeAntigravityPluginConfig({
+        scope,
+        ctx,
+        name,
+        managedPlugins: [...nextManagedPlugins],
+        dryRun,
+      })
+      if (!result.ok) {
+        allWarnings.push({
+          code: 'PLUGIN_CLEANUP_ERROR',
+          agent: undefined,
+          message: `Falha ao remover mcp_config.json de \`${name}\`: ${result.errors.join('; ')}`,
+        })
+      }
+    }
+  }
+
   // 4. Update sync state (persist targets + per-agent managed names + plugins).
   const nextState = {
     ...state,
@@ -222,7 +282,9 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
 
   // 5. Print summary.
   const isPluginError = (code: string): boolean =>
-    code === 'PLUGIN_WRITE_ERROR' || code === 'PLUGIN_UNMANAGED'
+    code === 'PLUGIN_WRITE_ERROR' ||
+    code === 'PLUGIN_UNMANAGED' ||
+    code === 'PLUGIN_CLEANUP_ERROR'
   const pluginErrors = allWarnings
     .filter((w) => isPluginError(w.code))
     .map((w) => w.message)

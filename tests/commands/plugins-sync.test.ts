@@ -374,3 +374,353 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
     }
   })
 })
+
+describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', () => {
+  const SCHEMA_URL = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+
+  function seedPluginFiles(
+    ctx: ReturnType<typeof createSandbox>['ctx'],
+    name: string,
+    extra: Record<string, string> = {},
+  ): string {
+    const pluginDir = join(ctx.cwd, '.agents/plugins', name)
+    mkdirSync(pluginDir, { recursive: true })
+    for (const file of ['plugin.json', 'mcp.json', 'mcp_config.json']) {
+      writeFileSync(join(pluginDir, file), '{}')
+    }
+    for (const [file, content] of Object.entries(extra)) {
+      writeFileSync(join(pluginDir, file), content)
+    }
+    return pluginDir
+  }
+
+  function seedManagedState(
+    ctx: ReturnType<typeof createSandbox>['ctx'],
+    managedPlugins: string[],
+  ) {
+    writeState('project', ctx, {
+      ...emptyState('project'),
+      managedPlugins,
+    })
+  }
+
+  function canonicalEmpty(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    persistCanonicalConfig('project', ctx, {
+      $schema: SCHEMA_URL,
+      mcpServers: {},
+    })
+  }
+
+  function canonicalWithWeb(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    persistCanonicalConfig('project', ctx, {
+      $schema: SCHEMA_URL,
+      mcpServers: {
+        web: { type: 'streamable-http', url: 'https://example.com/mcp' },
+      },
+    })
+  }
+
+  it('remove plugin obsoleto quando servidor sai do canônico (managedPlugins esvazia)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(pluginDir)).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('preserva arquivo manual e diretorio de plugin obsoleto nao vazio', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha', {
+        'sentinel.txt': 'KEEP-ME',
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'sentinel.txt'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('remove mcp_config.json ao desselecionar antigravity (flag sem antigravity)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      const pluginDir = seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('mantem mcp_config.json quando antigravity esta no alvo', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/plugin.json'))).toBe(
+        true,
+      )
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/mcp.json'))).toBe(
+        true,
+      )
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dryRun nao remove nada no disco e nao persiste estado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: true,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['alpha'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync repetido e idempotente: estado igual e segundo run sem erros', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      seedPluginFiles(ctx, 'web')
+
+      const summary1 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary1.errors).toEqual([])
+      const stateAfterFirst = loadState('project', ctx).state
+
+      const summary2 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary2.errors).toEqual([])
+      const stateAfterSecond = loadState('project', ctx).state
+
+      expect(stateAfterSecond).toEqual(stateAfterFirst)
+      expect(stateAfterSecond.managedPlugins).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('skipAgentSync nao poda mcp_config.json preexistente de plugin gerenciado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      const pluginDir = seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+        skipAgentSync: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+      expect(state.targets).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('erro de limpeza de plugin obsoleto: erro reportado, nome mantido em managedPlugins e retry no proximo sync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
+      mkdirSync(join(pluginDir, 'plugin.json'))
+
+      // Primeiro run: falha na limpeza, erro reportado e nome preservado.
+      const summary1 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary1.errors).toHaveLength(1)
+      expect(summary1.errors[0]).toContain('Falha ao remover plugin `alpha`')
+      expect(ui.error).toHaveBeenCalledWith(
+        expect.stringContaining('Sincronizacao parcial concluida com falhas'),
+      )
+
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+
+      // Nome preservado para ser reprocessado no proximo sync.
+      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
+
+      // Segundo run: nome ainda gerenciado, o mesmo erro se repete (retry).
+      const summary2 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary2.errors).toHaveLength(1)
+      expect(summary2.errors[0]).toContain('Falha ao remover plugin `alpha`')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('erro de limpeza de plugin obsoleto faz o comando sync sair com codigo 1', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    const localExit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+    const originalCwd = process.cwd()
+    const originalArgv = process.argv
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
+      mkdirSync(join(pluginDir, 'plugin.json'))
+
+      process.chdir(ctx.cwd)
+      process.argv = ['node', 'index.js', 'sync', '--agents', 'cursor']
+
+      await main()
+
+      expect(localExit).toHaveBeenCalledWith(1)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
+    } finally {
+      process.chdir(originalCwd)
+      process.argv = originalArgv
+      localExit.mockRestore()
+      cleanup()
+    }
+  })
+})

@@ -2,6 +2,7 @@ import { describe, expect, it, vi, afterEach, afterAll } from 'vitest'
 import { runCommand } from 'citty'
 import { main, normalizeGlobalArgs } from '$/src/index'
 import { ConfigValidationError } from '$/src/core/store'
+import pkg from '$/package.json' with { type: 'json' }
 
 vi.mock('citty', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
@@ -167,7 +168,7 @@ describe('CLI entrypoint', () => {
     try {
       await main()
       expect(exitCode).toBeUndefined()
-      expect(logged.some((m) => /0\.1\.0/.test(m))).toBe(true)
+      expect(logged.some((m) => m.includes(pkg.version))).toBe(true)
     } finally {
       process.env.VITEST = origVitest
       process.argv = origArgv

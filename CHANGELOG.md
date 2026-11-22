@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `remove` agora preserva os demais servidores do canônico ao excluir um (correcao de perda silenciosa de dados: antes, todos os outros servidores eram apagados).
+- `remove --no-sync` respeita a flag e nao sincroniza agentes: grava apenas o canônico, limpa o plugin gerenciado localmente e preserva `state.targets`/`state.agents`.
+- Limpeza de arquivos de plugin gerenciados ao remover um servidor (`plugin.json`, `mcp.json` e `mcp_config.json`, apagando o diretorio somente se ficar vazio) e de `mcp_config.json` ao desselecionar `antigravity` no `sync`.
+- Falhas de limpeza de plugin no `sync` sao reportadas com exit code `1`, e o plugin permanece registrado para nova tentativa no proximo `sync`.
+
 ## [0.1.1] - 2026-11-19
 
 ### Added
