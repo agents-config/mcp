@@ -27,7 +27,6 @@ import {
   syncPluginFiles,
   isUnmanagedPluginCollision,
   removeManagedPlugin,
-  removeAntigravityPluginConfig,
 } from '$/src/core/plugins'
 
 export interface SyncOptions {
@@ -285,62 +284,41 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     }
   }
 
-  // When antigravity is no longer targeted, remove mcp_config.json from managed
-  // plugins (preserving plugin.json and mcp.json). In skipAgentSync
-  // (`add --no-sync`) existing mcp_config.json is not touched.
-  if (!skipAgentSync && !includeAntigravity) {
-    for (const name of nextManagedPlugins) {
-      const result = removeAntigravityPluginConfig({
-        scope,
-        ctx,
-        name,
-        managedPlugins: [...nextManagedPlugins],
-        dryRun,
-      })
-      if (!result.ok) {
-        allWarnings.push({
-          code: 'PLUGIN_CLEANUP_ERROR',
-          agent: undefined,
-          message: `Failed to remove mcp_config.json of \`${name}\`: ${result.errors.join('; ')}`,
-        })
-      } else {
-        for (const p of result.removed) {
-          planned.push({ type: 'remove', path: p })
-        }
-      }
-    }
-  }
-
   // 4a. Antigravity agent-state lifecycle: record `state.agents.antigravity`
   // when antigravity is targeted (path = .agents/plugins dir, names = plugins
-  // whose sync succeeded this run); delete it when antigravity is deselected
-  // (its mcp_config.json files were cleaned up in the block above).
-  if (!skipAgentSync) {
+  // whose sync succeeded this run). When antigravity is not targeted, its
+  // state is preserved non-destructively (ADR-0013), symmetrically with all
+  // other adapters. `mcp_config.json` files are only removed when their owning
+  // server leaves the canonical config (stale plugin cleanup above).
+  if (!skipAgentSync && targets.includes('antigravity')) {
     const base = scope === 'project' ? ctx.cwd : ctx.homeDir
     const antigravityPath = join(base, AGENTS_DIR, 'plugins')
-    if (targets.includes('antigravity')) {
-      const existing = state.agents['antigravity']
-      const names = [...syncedPluginNames]
-      const namesChanged =
-        !existing ||
-        existing.path !== antigravityPath ||
-        existing.names.length !== names.length ||
-        names.some((n) => !existing.names.includes(n))
-      nextAgents['antigravity'] = {
-        path: antigravityPath,
-        names,
-        updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
-      }
-    } else {
-      delete nextAgents['antigravity']
+    const existing = state.agents['antigravity']
+    const names = [...syncedPluginNames]
+    const namesChanged =
+      !existing ||
+      existing.path !== antigravityPath ||
+      existing.names.length !== names.length ||
+      names.some((n) => !existing.names.includes(n))
+    nextAgents['antigravity'] = {
+      path: antigravityPath,
+      names,
+      updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
     }
   }
 
   // 4. Update sync state (persist targets + per-agent managed names + plugins).
+  // `--agents <list>` is additive: append newly requested valid targets to the
+  // persisted list (deduplicated, preserving order) instead of overwriting it
+  // (ADR-0013). Plain `sync` keeps the resolved targets (state.targets, or the
+  // auto-detected ones when state.targets was empty).
+  const nextTargets = skipAgentSync
+    ? state.targets
+    : [...state.targets, ...targets.filter((id) => !state.targets.includes(id))]
   const nextState = {
     ...state,
     scope,
-    targets: skipAgentSync ? state.targets : targets,
+    targets: nextTargets,
     agents: nextAgents,
     managedPlugins: [...nextManagedPlugins],
   }

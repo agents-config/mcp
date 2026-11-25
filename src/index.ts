@@ -72,18 +72,30 @@ const SUBCOMMANDS = [
   'doctor',
 ]
 
+/** Boolean global flags accepted before or after the subcommand token. */
+const GLOBAL_BOOLEAN_FLAGS = new Set([
+  '-g',
+  '--global',
+  '-y',
+  '--yes',
+  '--dry-run',
+])
+
+/** Index of the first subcommand token, ignoring tokens after `--`. */
+function findSubcommandIndex(rawArgs: readonly string[]): number {
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === '--') return -1
+    if (token !== undefined && SUBCOMMANDS.includes(token)) return i
+  }
+  return -1
+}
+
 /**
- * Normaliza flags globais com valor separado por espaço para a forma
- * `--flag=<valor>`.
- *
- * O `citty` não repassa `args` globais para os subcomandos: sem isso,
- * `--agents antigravity` vira `agents: true` + posicional `antigravity`,
- * quebrando `sync`/`init`/`add`. A forma com `=` é parseada como string por
- * qualquer subcomando (mesmo os que não declaram `agents`).
- *
- * Tokens após `--` são preservados literalmente.
+ * Converte `--agents <valor>` em `--agents=<valor>`, preservando tokens após
+ * `--` literalmente.
  */
-export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
+function normalizeAgentsFlag(rawArgs: readonly string[]): string[] {
   const normalized: string[] = []
   let literal = false
 
@@ -110,6 +122,65 @@ export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
   }
 
   return normalized
+}
+
+/**
+ * Normaliza `rawArgs` para o `citty`.
+ *
+ * Além de converter `--agents <valor>` em `--agents=<valor>`, move flags
+ * globais posicionadas **antes** do subcomando para logo depois dele: o
+ * `citty` corta `rawArgs` no índice do subcomando e descarta tudo o que vem
+ * antes. Sem isso, `agents-mcp --agents opencode sync` e `agents-mcp -g sync`
+ * perderiam as flags silenciosamente.
+ *
+ * Exemplo: `['--agents', 'opencode,antigravity', 'sync']` →
+ * `['sync', '--agents=opencode,antigravity']`.
+ *
+ * Tokens após `--` são preservados literalmente.
+ */
+export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
+  const subcommandIndex = findSubcommandIndex(rawArgs)
+  if (subcommandIndex === -1) {
+    return normalizeAgentsFlag(rawArgs)
+  }
+
+  const prefix = rawArgs.slice(0, subcommandIndex)
+  const rest = normalizeAgentsFlag(rawArgs.slice(subcommandIndex))
+  const subcommand = rest[0] as string
+
+  // Tokens que não são flags globais conhecidas permanecem antes do
+  // subcomando, na ordem original.
+  const leading: string[] = []
+  const movedGlobals: string[] = []
+
+  for (let i = 0; i < prefix.length; i++) {
+    const token = prefix[i] as string
+
+    if (GLOBAL_BOOLEAN_FLAGS.has(token)) {
+      movedGlobals.push(token)
+      continue
+    }
+
+    if (token === '--agents') {
+      const next = prefix[i + 1]
+      if (next !== undefined && !next.startsWith('-')) {
+        movedGlobals.push(`--agents=${next}`)
+        i++
+      } else {
+        movedGlobals.push(token)
+      }
+      continue
+    }
+
+    if (token.startsWith('--agents=')) {
+      movedGlobals.push(token)
+      continue
+    }
+
+    leading.push(token)
+  }
+
+  return [...leading, subcommand, ...movedGlobals, ...rest.slice(1)]
 }
 
 /**

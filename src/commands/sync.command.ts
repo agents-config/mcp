@@ -21,6 +21,17 @@ export const syncCommand = defineCommand({
     const flag = parseAgentsFlag(args, rawArgs)
     const dryRun = args['dry-run'] === true
 
+    // Fail fast on positional arguments instead of silently falling back to
+    // stale state.targets (e.g. `npm run cli sync --agents cursor` without
+    // `--` makes npm consume the flag and pass a bare positional value).
+    if (Array.isArray(args._) && args._.length > 0) {
+      ui.error(
+        `Unexpected positional argument(s) for \`sync\`: ${args._.join(' ')}. To select agents, pass \`--agents <list>\` (when using \`npm run\`, add \`--\` before flags).`,
+      )
+      process.exit(2)
+      return
+    }
+
     const summary = await runSync({
       scope,
       ctx,

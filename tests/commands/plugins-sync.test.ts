@@ -481,12 +481,23 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
     }
   })
 
-  it('remove mcp_config.json ao desselecionar antigravity (flag sem antigravity)', async () => {
+  it('preserva mcp_config.json e state.agents.antigravity ao desselecionar antigravity (ADR-0013)', async () => {
     const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
+    setupUi(ctx)
     try {
       canonicalWithWeb(ctx)
-      seedManagedState(ctx, ['web'])
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['antigravity'],
+        managedPlugins: ['web'],
+        agents: {
+          antigravity: {
+            path: join(ctx.cwd, '.agents/plugins'),
+            names: ['web'],
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      })
       const pluginDir = seedPluginFiles(ctx, 'web')
 
       const summary = await runSync({
@@ -500,10 +511,83 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
       expect(summary.errors).toEqual([])
       expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
       expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      // Nao-destrutivo: mcp_config.json permanece mesmo sem antigravity nos alvos.
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
 
       const state = loadState('project', ctx).state
       expect(state.managedPlugins).toEqual(['web'])
+      // `--agents` e aditivo: cursor e anexado preservando a ordem existente.
+      expect(state.targets).toEqual(['antigravity', 'cursor'])
+      expect(state.agents.antigravity).toEqual({
+        path: join(ctx.cwd, '.agents/plugins'),
+        names: ['web'],
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync --agents antigravity e aditivo a state.targets existente', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['opencode'],
+        managedPlugins: [],
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['opencode', 'antigravity'])
+      expect(state.agents.antigravity?.names).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync sem argumentos sincroniza todos os state.targets (opencode + antigravity)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['opencode', 'antigravity'],
+        managedPlugins: [],
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(summary.targets).toEqual(['opencode', 'antigravity'])
+      expect(existsSync(join(ctx.cwd, 'opencode.json'))).toBe(true)
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['opencode', 'antigravity'])
     } finally {
       cleanup()
     }

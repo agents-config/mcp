@@ -39,6 +39,38 @@ describe('normalizeGlobalArgs', () => {
       normalizeGlobalArgs(['sync', '--', '--agents', 'antigravity']),
     ).toEqual(['sync', '--', '--agents', 'antigravity'])
   })
+
+  it('move --agents <lista> de antes do subcomando para depois dele', () => {
+    expect(
+      normalizeGlobalArgs(['--agents', 'opencode,antigravity', 'sync']),
+    ).toEqual(['sync', '--agents=opencode,antigravity'])
+  })
+
+  it('move --agents=<lista> de antes do subcomando para depois dele', () => {
+    expect(normalizeGlobalArgs(['--agents=opencode', 'sync'])).toEqual([
+      'sync',
+      '--agents=opencode',
+    ])
+  })
+
+  it('move flags globais booleanas de antes do subcomando para depois dele', () => {
+    expect(normalizeGlobalArgs(['-g', '--dry-run', 'sync'])).toEqual([
+      'sync',
+      '-g',
+      '--dry-run',
+    ])
+    expect(normalizeGlobalArgs(['--yes', '-y', 'sync'])).toEqual([
+      'sync',
+      '--yes',
+      '-y',
+    ])
+  })
+
+  it('não reposiciona nada quando o separador -- vem antes do subcomando', () => {
+    expect(normalizeGlobalArgs(['--agents', 'opencode', '--', 'sync'])).toEqual(
+      ['--agents=opencode', '--', 'sync'],
+    )
+  })
 })
 
 describe('CLI entrypoint', () => {
@@ -179,6 +211,36 @@ describe('CLI entrypoint', () => {
       } catch {
         // ignore
       }
+    }
+  })
+
+  it('sync com argumento posicional imprime erro e sai com código 2 sem tocar o disco', async () => {
+    const origArgv = process.argv
+    const origExit = process.exit
+    const origError = console.error
+    let exitCode: number | undefined
+    const errors: string[] = []
+    process.exit = ((code: number) => {
+      exitCode = code
+    }) as unknown as NodeJS.Process['exit']
+    console.error = ((msg: unknown) => {
+      errors.push(String(msg))
+    }) as unknown as typeof console.error
+
+    process.argv = ['node', 'index.js', 'sync', 'opencode,antigravity']
+
+    try {
+      await main()
+      expect(exitCode).toBe(2)
+      expect(
+        errors.some((m) =>
+          m.includes('Unexpected positional argument(s) for `sync`'),
+        ),
+      ).toBe(true)
+    } finally {
+      process.argv = origArgv
+      process.exit = origExit
+      console.error = origError
     }
   })
 

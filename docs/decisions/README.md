@@ -17,6 +17,7 @@ context, the decision, the alternatives rejected, and the accepted trade-offs.
 | [0010](./0010-adopt-agent-plugins-mcp-schema.md) | Adotar o padrão Agent Plugins MCP 1.0.0 | Accepted |
 | [0011](./0011-plugin-lifecycle-and-safe-cleanup.md) | Ciclo de vida de plugins e limpeza segura | Accepted |
 | [0012](./0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`) | Accepted |
+| [0013](./0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets` | Accepted |
 
 ## Conventions
 
