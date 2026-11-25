@@ -383,7 +383,7 @@ describe('plugins.removeManagedPlugin', () => {
 
       expect(result.ok).toBe(false)
       expect(result.errors).toHaveLength(1)
-      expect(result.errors[0]).toContain('Falha ao remover')
+      expect(result.errors[0]).toContain('Failed to remove')
       expect(result.errors[0]).toContain(join(pluginDir, 'plugin.json'))
       expect(result.removed).toHaveLength(2)
       expect(result.removed).toContain(join(pluginDir, 'mcp.json'))

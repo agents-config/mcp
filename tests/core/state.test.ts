@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   loadState,
   writeState,
@@ -278,5 +278,59 @@ describe('state', () => {
     const state: SyncState = emptyState('project')
     const pruned = pruneAgentNames(state, 'zed', ['github'])
     expect(pruned).toEqual(state)
+  })
+
+  it("writeState('project') ensures state file is ignored in <cwd>/.gitignore", () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('project', ctx, state)
+
+      const gitignore = readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')
+      expect(gitignore).toContain('# agents-mcp local (managed)')
+      expect(gitignore).toContain('.agents/.mcp-sync-state.json')
+      expect(gitignore).toContain('# end agents-mcp local (managed)')
+
+      const header = '# agents-mcp local (managed)'
+      const footer = '# end agents-mcp local (managed)'
+      const headerIdx = gitignore.indexOf(header)
+      const footerIdx = gitignore.indexOf(footer)
+      expect(headerIdx).toBeGreaterThanOrEqual(0)
+      expect(footerIdx).toBeGreaterThan(headerIdx)
+      expect(gitignore.slice(headerIdx, footerIdx)).toContain(
+        '.agents/.mcp-sync-state.json',
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it("writeState('global') does not touch <cwd>/.gitignore", async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const state: SyncState = {
+        version: 1,
+        scope: 'global',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('global', ctx, state)
+
+      expect(
+        readFileSync(`${ctx.homeDir}/.agents/.mcp-sync-state.json`, 'utf8'),
+      ).toContain('"scope": "global"')
+
+      // global scope must not create or modify <cwd>/.gitignore
+      expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
+    } finally {
+      cleanup()
+    }
   })
 })

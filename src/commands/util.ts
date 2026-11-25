@@ -10,6 +10,7 @@ import {
   getConfigPath,
   loadValidatedConfig,
   writeConfig,
+  ConfigValidationError,
 } from '$/src/core/store'
 import {
   getStatePath,
@@ -22,7 +23,7 @@ import { createUi } from '$/src/index'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import type { AgentId, AgentAdapter } from '$/src/adapters/types'
 import { getAdapter } from '$/src/adapters/index'
-import type { CanonicalServer } from '$/src/core/schema'
+import type { CanonicalServer, CanonicalMcpConfig } from '$/src/core/schema'
 import { AGENTS_DIR, CONFIG_FILE, STATE_FILE } from '$/src/config'
 
 export { writeFileAtomic } from '$/src/core/fs-atomic'
@@ -52,6 +53,44 @@ export function loadCanonicalConfig(
   ctx: RuntimeContext,
 ): Awaited<ReturnType<typeof loadValidatedConfig>> | null {
   return loadValidatedConfig(scope, ctx)
+}
+
+/** Format a `ConfigValidationError` into a clean, human-readable string. */
+export function formatConfigValidationError(
+  err: ConfigValidationError,
+): string {
+  const issues = err.issues
+    .map((issue) => `  • ${issue.path || 'root'} — ${issue.message}`)
+    .join('\n')
+  return `Invalid config at ${err.path}:\n${issues}`
+}
+
+/**
+ * Load the canonical config for a scope, exiting with a formatted error when
+ * it is missing or invalid. Shared by `add`, `sync`, `list`, `remove`, and
+ * `import` so every command reports `ConfigValidationError` consistently.
+ */
+export function loadCanonicalOrExit(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+  ui: ReturnType<typeof createUi>['ui'],
+): CanonicalMcpConfig {
+  try {
+    const validated = loadValidatedConfig(scope, ctx)
+    if (!validated) {
+      ui.error(
+        `No canonical config at ${configPath(scope, ctx)}. Run 'agents-mcp init' first.`,
+      )
+      process.exit(1)
+    }
+    return validated.config
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      ui.error(formatConfigValidationError(err))
+      process.exit(1)
+    }
+    throw err
+  }
 }
 
 /** Load the sync state (empty state when absent/corrupt). */
@@ -131,12 +170,19 @@ export function isDryRun(args: Record<string, unknown>): boolean {
   return args['dry-run'] === true
 }
 
+/** Format planned file operations for a `--dry-run` preview. */
+export function formatDryRunActions(
+  actions: { type: 'write' | 'remove'; path: string }[],
+): string {
+  return actions.map((a) => `[dry-run] ${a.type} ${a.path}`).join('\n')
+}
+
 /**
- * Detecta a flag `--no-sync` independente de como o citty a parseou.
+ * Detects the `--no-sync` flag regardless of how citty parsed it.
  *
- * O citty consome `--no-sync` antes do parse e entrega `args.sync === false`
- * (sem a chave `no-sync`). Esta helper cobre todas as formas:
- * `args['no-sync'] === true`, `args.sync === false` e `rawArgs.includes('--no-sync')`.
+ * Citty consumes `--no-sync` before parsing and delivers `args.sync === false`
+ * (without the `no-sync` key). This helper covers all forms:
+ * `args['no-sync'] === true`, `args.sync === false` and `rawArgs.includes('--no-sync')`.
  */
 export function isNoSyncFlag(
   args: Record<string, unknown>,
@@ -149,7 +195,7 @@ export function isNoSyncFlag(
   )
 }
 
-/** Normaliza uma lista de agentes separada por vírgulas. */
+/** Normalizes a comma-separated list of agents. */
 function splitAgentList(value: string): string[] | undefined {
   const ids = value
     .split(',')
@@ -159,11 +205,11 @@ function splitAgentList(value: string): string[] | undefined {
 }
 
 /**
- * Extrai `--agents` tanto de `args` (quando o citty já parseou a flag) quanto
- * de `rawArgs` (formas `--agents=<lista>` e `--agents <lista>`).
+ * Extracts `--agents` from `args` (when citty already parsed the flag) and
+ * from `rawArgs` (forms `--agents=<list>` and `--agents <list>`).
  *
- * O fallback por `rawArgs` cobre subcomandos que não declaram `agents` e o
- * caso em que o citty transforma `--agents <lista>` em `true` + posicional.
+ * The `rawArgs` fallback covers subcommands that do not declare `agents` and
+ * the case where citty transforms `--agents <list>` into `true` + positional.
  */
 export function parseAgentsFlag(
   args: Record<string, unknown>,

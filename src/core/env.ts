@@ -12,7 +12,7 @@ import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import { AGENTS_DIR, ENV_FILE, STATE_FILE } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
-import { isStdioServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { SECRET_KEY_RE, derivedKey } from '$/src/core/placeholder'
 import { ensureIgnored } from '$/src/core/gitignore'
 
@@ -39,8 +39,18 @@ export interface SecretWrite {
   description?: string
 }
 
+export interface SecretReplacement {
+  location: 'env' | 'headers' | 'args' | 'url'
+  fieldKey?: string
+  argIndex?: number
+  match: string
+  envKey: string
+  secretValue: string
+}
+
 export interface PlanSecretExtractionResult {
   writes: SecretWrite[]
+  replacements: SecretReplacement[]
   warnings: string[]
 }
 
@@ -154,24 +164,82 @@ const SECRET_VALUE_PREFIXES = [
   'xoxp-',
   'xoxr-',
   'xoxs-',
+  'AIza',
+  'AKIA',
 ]
 
-export function isSecretValue(value: string): boolean {
-  for (const prefix of SECRET_VALUE_PREFIXES) {
-    if (value.startsWith(prefix)) {
-      return true
+const SECRET_PREFIX_RE = new RegExp(
+  `^(?:${SECRET_VALUE_PREFIXES.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`,
+)
+
+/** Authorization schemes whose prefix is preserved during replacement. */
+const AUTH_SCHEMES = ['Bearer ', 'Basic ', 'Token ']
+
+/**
+ * Extract the replaceable secret substring from `value`, if any.
+ *
+ * Returns the `match` substring (what gets replaced with `${ENV_KEY}`) and the
+ * `secretValue` (what gets written to `.env`). For `Bearer <token>` the match is
+ * just `<token>`, so the `Bearer ` prefix is preserved by the replacement.
+ */
+function extractSecretParts(
+  value: string,
+): { match: string; secretValue: string } | null {
+  // Known prefix at start of string (or after an auth scheme prefix).
+  for (const scheme of AUTH_SCHEMES) {
+    if (value.startsWith(scheme)) {
+      const rest = value.slice(scheme.length)
+      if (SECRET_PREFIX_RE.test(rest) || isHighEntropy(rest)) {
+        return { match: rest, secretValue: rest }
+      }
     }
   }
-  // URL credentials: scheme://user:pass@
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:@]+:[^@]+@/.test(value)) {
-    return true
+  if (SECRET_PREFIX_RE.test(value)) {
+    return { match: value, secretValue: value }
   }
-  return false
+  // URL credentials: scheme://user:pass@
+  const urlCreds = value.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^:@]+:[^@]+)@/)
+  if (urlCreds) {
+    return { match: urlCreds[1]!, secretValue: urlCreds[1]! }
+  }
+  // High-entropy string.
+  if (isHighEntropy(value)) {
+    return { match: value, secretValue: value }
+  }
+  return null
+}
+
+export function isSecretValue(value: string): boolean {
+  return extractSecretParts(value) !== null
+}
+
+/**
+ * High-entropy heuristic: ≥ 20 chars, no whitespace, ≥ 3 character classes
+ * (lowercase, uppercase, digits, symbols). Excludes plain http(s) URLs without
+ * credentials and filesystem paths containing `/` or `\`.
+ */
+function isHighEntropy(value: string): boolean {
+  if (value.length < 20) return false
+  if (/\s/.test(value)) return false
+  // Exclude plain http(s) URLs without embedded credentials.
+  if (/^https?:\/\//.test(value) && !/@/.test(value)) return false
+  // Exclude filesystem paths.
+  if (value.includes('/') || value.includes('\\')) return false
+
+  let classes = 0
+  if (/[a-z]/.test(value)) classes++
+  if (/[A-Z]/.test(value)) classes++
+  if (/[0-9]/.test(value)) classes++
+  if (/[^A-Za-z0-9]/.test(value)) classes++
+  return classes >= 3
 }
 
 function isLiteral(value: string): boolean {
   return !/^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}$/.test(value)
 }
+
+/** Matches any `${...}` placeholder substring (used to skip symbolic values). */
+const PLACEHOLDER_ANY_RE = /\$\{[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}/
 
 /**
  * Plan which literal (non-placeholder) secret values in `server` should be
@@ -182,58 +250,147 @@ function isLiteral(value: string): boolean {
  *
  * A value already wrapped in `${...}` is never flagged. Non-secret values such
  * as `NODE_ENV=production` are not flagged.
+ *
+ * Env var names are derived from `serverName` (via `derivedKey`), sanitizing
+ * non-alphanumeric characters, so two servers never collide on env keys.
+ *
+ * Returns structured `replacements` metadata describing exactly where each
+ * secret lives (`env`/`headers`/`args`/`url`), the substring to replace
+ * (`match`), the derived env key, and the secret value to persist.
  */
 export function planSecretExtraction(
+  serverName: string,
   server: CanonicalServer,
   opts: { policy: 'warn' | 'extract' },
 ): PlanSecretExtractionResult {
   const writes: SecretWrite[] = []
+  const replacements: SecretReplacement[] = []
   const warnings: string[] = []
   const { policy } = opts
 
-  const consider = (key: string, value: string): void => {
-    if (!isLiteral(value)) {
+  const consider = (
+    location: 'env' | 'headers' | 'args' | 'url',
+    fieldKey: string,
+    value: string,
+    argIndex?: number,
+  ): void => {
+    if (!isLiteral(value) || PLACEHOLDER_ANY_RE.test(value)) {
       return
     }
-    const secret = SECRET_KEY_RE.test(key) || isSecretValue(value)
-    if (!secret) {
+    let parts = extractSecretParts(value)
+    if (!parts && SECRET_KEY_RE.test(fieldKey)) {
+      // Key-pattern match: the whole literal value is the secret. Strip any
+      // auth scheme prefix so `Bearer ` / `Basic ` / `Token ` is preserved.
+      let match = value
+      for (const scheme of AUTH_SCHEMES) {
+        if (value.startsWith(scheme)) {
+          match = value.slice(scheme.length)
+          break
+        }
+      }
+      parts = { match, secretValue: match }
+    }
+    if (!parts) {
       return
     }
-    const envVarKey = derivedKey(
-      isStdioServer(server) ? server.command : 'http',
-      key,
-    )
+    const envVarKey = derivedKey(serverName, fieldKey)
     if (policy === 'extract') {
-      writes.push({ key: envVarKey, value })
+      writes.push({ key: envVarKey, value: parts.secretValue })
     }
+    replacements.push({
+      location,
+      ...(argIndex === undefined ? { fieldKey } : { argIndex }),
+      match: parts.match,
+      envKey: envVarKey,
+      secretValue: parts.secretValue,
+    })
     warnings.push(
-      `Secret detected for server field \`${key}\`; extract to \`.env\` as \${${envVarKey}}`,
+      `Secret detected for server field \`${fieldKey}\`; extract to \`.env\` as \${${envVarKey}}`,
     )
   }
 
   if (isStdioServer(server)) {
     if (server.args) {
-      for (const arg of server.args) {
+      for (let i = 0; i < server.args.length; i++) {
         // Args can embed secrets (e.g. a token passed positionally).
-        consider('args', arg)
+        consider('args', 'args', server.args[i]!, i)
       }
     }
     if (server.env) {
       for (const [key, value] of Object.entries(server.env)) {
-        consider(key, value)
+        consider('env', key, value)
       }
     }
   } else {
     if (server.headers) {
       for (const [key, value] of Object.entries(server.headers)) {
-        consider(key, value)
+        consider('headers', key, value)
       }
     }
     // For URLs, only flag embedded credentials (user:pass@), not length.
-    consider('url', server.url)
+    if (server.url) {
+      consider('url', 'url', server.url)
+    }
   }
 
-  return { writes, warnings }
+  return { writes, replacements, warnings }
+}
+
+/**
+ * Pure secret extraction applier. Deep-clones `server` (never mutates input)
+ * and applies each replacement from `plan.replacements` deterministically by
+ * location, preserving auth scheme prefixes (`Bearer ` / `Basic ` / `Token `).
+ */
+export function applySecretExtraction(
+  server: CanonicalServer,
+  plan: PlanSecretExtractionResult,
+): CanonicalServer {
+  const result = deepCloneServer(server)
+
+  for (const rep of plan.replacements) {
+    const replacement = `\${${rep.envKey}}`
+    switch (rep.location) {
+      case 'env':
+        if (isStdioServer(result) && result.env && rep.fieldKey) {
+          result.env[rep.fieldKey] = result.env[rep.fieldKey]!.replace(
+            rep.match,
+            replacement,
+          )
+        }
+        break
+      case 'headers':
+        if (isHttpServer(result) && result.headers && rep.fieldKey) {
+          result.headers[rep.fieldKey] = result.headers[rep.fieldKey]!.replace(
+            rep.match,
+            replacement,
+          )
+        }
+        break
+      case 'args':
+        if (
+          isStdioServer(result) &&
+          result.args &&
+          rep.argIndex !== undefined
+        ) {
+          result.args[rep.argIndex] = result.args[rep.argIndex]!.replace(
+            rep.match,
+            replacement,
+          )
+        }
+        break
+      case 'url':
+        if (isHttpServer(result) && result.url) {
+          result.url = result.url.replace(rep.match, replacement)
+        }
+        break
+    }
+  }
+
+  return result
+}
+
+function deepCloneServer(server: CanonicalServer): CanonicalServer {
+  return JSON.parse(JSON.stringify(server)) as CanonicalServer
 }
 
 /**

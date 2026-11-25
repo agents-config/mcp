@@ -14,9 +14,12 @@ import {
   loadSyncState,
   persistSyncState,
   isNoSyncFlag,
+  parseAgentsFlag,
+  formatConfigValidationError,
+  formatDryRunActions,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
-import { loadValidatedConfig } from '$/src/core/store'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import type { ConfigScope } from '$/src/core/context'
 import { removeManagedPlugin } from '$/src/core/plugins'
 
@@ -37,6 +40,8 @@ export const removeCommand = defineCommand({
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     const noSync = isNoSyncFlag(args, rawArgs)
+    const yes = args.yes === true
+    const agentsFlag = parseAgentsFlag(args, rawArgs)
     const name = args._?.[0] as string | undefined
 
     if (!name) {
@@ -44,15 +49,21 @@ export const removeCommand = defineCommand({
       process.exit(2)
     }
 
-    const validated = loadValidatedConfig(scope, ctx)
+    // Load + validate canonical config, reporting ConfigValidationError cleanly.
+    let validated
+    try {
+      validated = loadValidatedConfig(scope, ctx)
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        ui.error(formatConfigValidationError(err))
+        process.exit(1)
+      }
+      throw err
+    }
     if (!validated) {
       ui.error(`No canonical config at ${path}. Run 'agents-mcp init' first.`)
       process.exit(1)
     }
-
-    // Carrega o estado antes de alterar o canônico.
-    const stateResult = loadSyncState(scope, ctx)
-    const state = stateResult.state
 
     const servers = {
       ...(validated.config.mcpServers as Record<string, unknown>),
@@ -62,7 +73,15 @@ export const removeCommand = defineCommand({
       process.exit(1)
     }
 
+    // Load the state before changing the canonical config.
+    const stateResult = loadSyncState(scope, ctx)
+    const state = stateResult.state
+
     delete servers[name]
+
+    // Planned file operations for the --dry-run preview (zero disk writes).
+    const planned: { type: 'write' | 'remove'; path: string }[] = []
+    planned.push({ type: 'write', path })
 
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
@@ -74,6 +93,8 @@ export const removeCommand = defineCommand({
     ui.note(`Removed server \`${name}\` from canonical config`)
 
     if (dryRun) {
+      // Dry-run preview of planned file operations (zero disk writes).
+      ui.note(formatDryRunActions(planned))
       return
     }
 
@@ -97,7 +118,7 @@ export const removeCommand = defineCommand({
         persistSyncState(scope, ctx, nextState)
         if (removal.removed.length > 0) {
           ui.note(
-            `Sincronizacao de agentes ignorada (--no-sync): o plugin gerenciado de \`${name}\` foi limpo. Execute \`agents-mcp sync\` para sincronizar os agentes depois.`,
+            `Agent sync skipped (--no-sync): the managed plugin of \`${name}\` was cleaned. Run \`agents-mcp sync\` to sync agents later.`,
           )
         }
       } else {
@@ -105,7 +126,7 @@ export const removeCommand = defineCommand({
           ui.error(err)
         }
         ui.note(
-          `O servidor \`${name}\` foi removido do canônico, mas os arquivos de plugin permanecem e serão reprocessados no próximo \`sync\`.`,
+          `Server \`${name}\` was removed from canonical, but plugin files remain and will be reprocessed on the next \`sync\`.`,
         )
         process.exit(1)
         return
@@ -114,9 +135,12 @@ export const removeCommand = defineCommand({
       const summary = await runSync({
         scope,
         ctx,
-        flag: undefined,
+        flag: agentsFlag,
         dryRun: false,
-        yes: args.yes === true,
+        yes,
+        // B7: removing a server in a project without targets succeeds and
+        // cleans up the managed plugin.
+        allowEmptyTargets: true,
       })
       if (summary.errors.length > 0) {
         process.exit(1)

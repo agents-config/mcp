@@ -190,32 +190,43 @@ export async function detectAgents(
   ctx: RuntimeContext,
 ): Promise<AgentId[]> {
   const detected: AgentId[] = []
-  const { existsSync, statSync } = await import('node:fs')
+  const { statSync } = await import('node:fs')
   const { dirname } = await import('node:path')
 
   for (const adapter of adapters) {
-    const path = adapter.getConfigPath(scope, ctx)
-    if (path === null) {
+    // Gate on declared scope support, not on getConfigPath() === null.
+    // antigravity returns null for getConfigPath (per-plugin storage) but still
+    // supports project/global scope and must be detectable via detect().
+    if (!adapter.capabilities.scopes.includes(scope)) {
       continue
     }
+
     let found = false
     try {
       found = await adapter.detect(scope, ctx)
     } catch {
       found = false
     }
+
     if (!found && scope === 'project') {
-      // Only fall back to directory-existence when the config's parent dir is
-      // not cwd itself (otherwise every project "has" claude-code/opencode).
-      const parent = dirname(path)
-      if (parent !== ctx.cwd) {
-        try {
-          found = statSync(parent).isDirectory()
-        } catch {
-          found = false
+      const path = adapter.getConfigPath(scope, ctx)
+      // Only fall back to directory-existence when the adapter has a single
+      // native config path; per-plugin adapters (antigravity) are handled by
+      // detect() itself.
+      if (path !== null) {
+        // Only fall back to directory-existence when the config's parent dir is
+        // not cwd itself (otherwise every project "has" claude-code/opencode).
+        const parent = dirname(path)
+        if (parent !== ctx.cwd) {
+          try {
+            found = statSync(parent).isDirectory()
+          } catch {
+            found = false
+          }
         }
       }
     }
+
     if (found) {
       detected.push(adapter.id)
     }

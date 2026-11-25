@@ -19,9 +19,10 @@ Every rule below is normative for `agents-mcp` adapters and is covered by
 | **`opencode`** | project, global | `opencode.json` | `~/.config/opencode/opencode.json` | `mcp` | JSONC | `{env:VAR}` | No | **Yes** (`enabled`) | No |
 | **`windsurf`** | global only | — | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` | JSON | `${env:VAR}` | No | No | No |
 | **`zed`** | project, global | `.zed/settings.json` | `~/.config/zed/settings.json` | `context_servers` | JSONC | `${VAR}` | No | No | No |
+| **`antigravity`** | project, global | `.agents/plugins/<name>/` (per-plugin) | `.agents/plugins/<name>/` (per-plugin) | `mcpServers` | JSON | `${VAR}` | No | No | No |
 
 > **Transport inference:** native entries that expose only a URL, or whose
-> native format does not distinguish transports, are imported as `"http"`
+> native format does not distinguish transports, are imported as `"streamable-http"`
 > (see §4 and §5).
 
 ### 1.1 Global path resolution
@@ -43,13 +44,13 @@ directory that exists. All paths are resolved from the injected
 
 ---
 
-## 2. Compiled Output (`stdio` and `http`)
+## 2. Compiled Output (`stdio` and `streamable-http`)
 
-| Agent | `stdio` entry | `http` entry |
+| Agent | `stdio` entry | `streamable-http` entry |
 | :--- | :--- | :--- |
-| `claude-code` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
+| `claude-code` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "streamable-http", "url", "headers" }` |
 | `cursor` | `{ "command", "args", "env" }` | `{ "url", "headers" }` |
-| `vscode` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "http", "url", "headers" }` |
+| `vscode` | `{ "type": "stdio", "command", "args", "env" }` | `{ "type": "streamable-http", "url", "headers" }` |
 | `opencode` | `{ "type": "local", "command": [command, ...args], "environment": env }` | `{ "type": "remote", "url", "headers" }` |
 | `windsurf` | `{ "command", "args", "env" }` | `{ "serverUrl": url, "headers" }` |
 | `zed` | `{ "command": { "path": command, "args", "env" } }` | `{ "url", "headers" }` |
@@ -85,11 +86,11 @@ Unknown placeholder syntax inside a native value (for example an unexpected
 `extractServers()` converts native entries back into canonical servers. Inference
 rules:
 
-| Agent | `stdio` inference | `http` inference | Transformations |
+| Agent | `stdio` inference | `streamable-http` inference | Transformations |
 | :--- | :--- | :--- | :--- |
-| `claude-code` | `type === "stdio"`, or `command` present without `url` | `type === "http"` or `url` present | `${VAR}` unchanged; omitted servers are unrecoverable |
+| `claude-code` | `type === "stdio"`, or `command` present without `url` | `type === "streamable-http"` or `url` present | `${VAR}` unchanged; omitted servers are unrecoverable |
 | `cursor` | `command` present | `url` present | `${env:VAR}` → `${VAR}` |
-| `vscode` | `type === "stdio"` | `type === "http"` or `url` present | `${env:VAR}` → `${VAR}`; `inputs` ignored; any other transport with `url` → `http` + warning |
+| `vscode` | `type === "stdio"` | `type === "streamable-http"` or `url` present | `${env:VAR}` → `${VAR}`; `inputs` ignored; any other transport with `url` → `streamable-http` + warning |
 | `opencode` | `type === "local"` | `type === "remote"` | `command[0]` → command, rest → args, `environment` → env, `{env:VAR}` → `${VAR}` |
 | `windsurf` | `command` present | `serverUrl` present | `serverUrl` → `url`, `${env:VAR}` → `${VAR}` |
 | `zed` | `command.path` present | `url` present | nested command unpacked; `source` ignored; `${VAR}` unchanged |
@@ -110,7 +111,7 @@ servers have no such fields.
 | `DEFAULT_DROPPED` | cursor, vscode, opencode, windsurf, zed | `:-fallback` has no native equivalent and was discarded. |
 | `CWD_UNSUPPORTED` | all (v0.1.0) | `cwd` cannot be represented natively. |
 | `SCOPE_UNSUPPORTED` | windsurf (project) | Agent only supports global scope; operation skipped. |
-| `TRANSPORT_INFERRED` | vscode, cursor, windsurf, zed | An entry without a canonical transport (for example, URL-only) was imported as `http`. |
+| `TRANSPORT_INFERRED` | vscode, cursor, windsurf, zed | An entry without a canonical transport (for example, URL-only) was imported as `streamable-http`. |
 | `UNKNOWN_FIELD_DROPPED` | all | A native field had no canonical equivalent. |
 | `AMBIGUOUS_ENTRY` | all | Both `command` and `url` were present. |
 | `UNKNOWN_PLACEHOLDER` | all | A placeholder did not match the supported grammar. |
@@ -175,7 +176,7 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
       }
     },
     "linear": {
-      "type": "http",
+      "type": "streamable-http",
       "url": "https://mcp.linear.app/mcp",
       "headers": {
         "Authorization": "Bearer ${LINEAR_API_KEY}"
@@ -229,7 +230,7 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
       }
     },
     "linear": {
-      "type": "http",
+      "type": "streamable-http",
       "url": "https://mcp.linear.app/mcp",
       "headers": {
         "Authorization": "Bearer ${env:LINEAR_API_KEY}"
@@ -259,8 +260,7 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
     },
     "postgres": {
       "type": "local",
-      "command": ["uvx", "mcp-server-postgres", "{env:DATABASE_URL}"],
-      "enabled": false
+      "command": ["uvx", "mcp-server-postgres", "{env:DATABASE_URL}"]
     },
     "linear": {
       "type": "remote",

@@ -70,6 +70,12 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
    `npx agents-mcp init`
 2. Add an MCP server from GitHub, npm, MCP Registry, or direct flags
    `npx agents-mcp add modelcontextprotocol/server-github`
+
+   - **External sources:** pass a GitHub URL, `owner/repo`, npm package, or MCP Registry entry as the positional `<source>` argument (`agents-mcp add <source>`).
+   - **Direct flags:** use `--command`, `--arg` (repeatable), `--http`, `--sse`, `--env` (`KEY=VALUE`, repeatable), `--header` (`Name: Value`, repeatable), `--cwd`, `--name`.
+   - **Interactive wizard:** run `agents-mcp add` with no source in a TTY; the wizard prompts for server name, connection type (local command or HTTP URL), args, env vars, and headers.
+   - **`--extract-secrets` (opt-in):** pass `--extract-secrets` to write detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replace them with `${VAR}` placeholders in `.agents/mcp.json`. Without it, secrets are only warned about, not extracted. Real secret values never reach canonical/native files, logs, errors, or `--dry-run` output.
+
 3. Sync changes across all targeted agents
    `npx agents-mcp sync`
 
@@ -115,7 +121,6 @@ Example:
 - **Non-Destructive by Design:** AST-level edits (`jsonc-parser`) keep comments, VS Code `inputs`, and non-MCP settings intact — and native agent files are never deleted or moved.
 - **Secret Hygiene by Default:** Enforces `${VAR}` placeholders in versioned configs while syncing required keys to `.env` and `.env.example`.
 - **Environment Diagnostics (`doctor`):** Validates schema compliance, checks missing `.env` variables, verifies local binaries (`npx`, `uvx`, `docker`), and detects configuration drift semantically.
-- **Deterministic Schema:** A single Zod source generates the published Draft 2020-12 JSON Schema, so types, runtime validation, and editor autocomplete never drift.
 - **Project & Global Scopes:** Works seamlessly at the repository level (`.agents/mcp.json`) or user level (`~/.agents/mcp.json` via `-g`).
 
 ## Supported Agents
@@ -136,46 +141,46 @@ Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy
 
 ## Agent Plugins & Antigravity (`.agents/plugins/`)
 
-`.agents/mcp.json` permanece como a **unica fonte da verdade** (canonical source of truth) para todas as definicoes de servidores MCP. A partir do `agents-mcp add` e `agents-mcp sync`, a CLI gera automaticamente um layout padrao de **Agent Plugins** em:
+`.agents/mcp.json` remains the **canonical source of truth** for all MCP server definitions. From `agents-mcp add` and `agents-mcp sync`, the CLI automatically generates a standard **Agent Plugins** layout under:
 
 ```
-<scope>/.agents/plugins/<nome>/
-  plugin.json        # manifest do plugin (name, version, description)
-  mcp.json           # documento Agent Plugins MCP 1.0.0 ($schema + mcpServers)
-  mcp_config.json    # apenas quando `antigravity` esta nos targets
+<scope>/.agents/plugins/<name>/
+  plugin.json        # plugin manifest (name, version, description)
+  mcp.json           # Agent Plugins MCP 1.0.0 document ($schema + mcpServers)
+  mcp_config.json    # only when `antigravity` is among the targets
 ```
 
-- **`plugin.json` + `mcp.json`**: gerados para **qualquer** servidor adicionado ou sincronizado, independentemente dos agentes alvo. O `agents-mcp add` **sempre** cria/atualiza esses arquivos base do plugin, inclusive com `--no-sync` e quando nenhum agente esta configurado ou detectado no projeto.
-- **`mcp_config.json`**: gerado apenas quando `antigravity` esta entre os targets (`--agents antigravity`, `init` ou `sync`). Servidores `stdio` mapeiam para `{ command, args?, env? }`; servidores `streamable-http` e `sse` mapeiam para `{ serverUrl, headers? }` (formato nativo do Antigravity).
-- Quando `agents-mcp add` nao resolve nenhum target agente, a CLI conclui o indice e o plugin base e informa que nenhum agente foi sincronizado, orientando `agents-mcp sync --agents <lista>` (ex.: `--agents cursor,vscode`).
-- `agents-mcp sync` sem targets continua sendo um erro (`No resolvable target agents`, codigo de saida `1`); informe `--agents <lista>` para sincronizar.
-- `--no-sync` no `add` suprime **apenas** a sincronizacao de agentes: os arquivos de plugin continuam sendo gerados em `.agents/plugins/` e o estado alvo (`state.targets`) e os agentes ja registrados sao preservados.
+- **`plugin.json` + `mcp.json`**: generated for **any** server added or synced, regardless of target agents. `agents-mcp add` **always** creates/updates these base plugin files, including with `--no-sync` and when no agent is configured or detected in the project.
+- **`mcp_config.json`**: generated only when `antigravity` is among the targets (`--agents antigravity`, `init`, or `sync`). `stdio` servers map to `{ command, args?, env? }`; `streamable-http` and `sse` servers map to `{ serverUrl, headers? }` (Antigravity's native format).
+- When `agents-mcp add` does not resolve any target agent, the CLI completes the index and base plugin and informs that no agent was synced, directing to `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).
+- `agents-mcp sync` without targets remains an error (`No resolvable target agents`, exit code `1`); pass `--agents <list>` to sync.
+- `--no-sync` on `add` suppresses **only** agent sync: plugin files continue to be generated in `.agents/plugins/` and the target state (`state.targets`) and already-registered agents are preserved.
 
-### Propriedade e colisao
+### Ownership and collision
 
-A CLI rastreia quais plugins ela gerencia no estado de sincronizacao (`.agents/.mcp-sync-state.json`, campo `managedPlugins`). Se um diretório `.agents/plugins/<nome>/` ja existir em disco **e** o nome **nao** estiver registrado como gerenciado:
+The CLI tracks which plugins it manages in the sync state (`.agents/.mcp-sync-state.json`, field `managedPlugins`). If a directory `.agents/plugins/<name>/` already exists on disk **and** the name is **not** registered as managed:
 
-- **Modo interativo (`add`)**: avisa o usuario e solicita um nome diferente (sem auto-renomear nem sobrescrever).
-- **Modo nao-interativo (`add`)**: falha com erro claro, orientando o usuario a passar um `--name` diferente (codigo de saida `1`).
-- **`sync`**: pula a sobrescricao do diretorio nao-gerenciado, registra um aviso por plugin e inclui no relatorio de falha parcial.
+- **Interactive mode (`add`)**: warns the user and requests a different name (no auto-rename, no overwrite).
+- **Non-interactive mode (`add`)**: fails with a clear error, directing the user to pass a different `--name` (exit code `1`).
+- **`sync`**: skips overwriting the unmanaged directory, logs a warning per plugin, and includes it in the partial failure report.
 
-### Falha parcial
+### Partial failure
 
-Se `.agents/mcp.json` (e/ou arquivos nativos dos agentes) for gravado com sucesso, mas a criacao/atualizacao de um arquivo de plugin falhar, a CLI **nao** imprime confirmacao falsa de sucesso total. Reporta explicitamente o que foi concluido e o que falhou, com proximos passos acionaveis (ex. `reexecute agents-mcp sync`), e sai com codigo `1`.
+If `.agents/mcp.json` (and/or agent native files) is written successfully, but creation/update of a plugin file fails, the CLI **does not** print a false full-success message. It reports explicitly what was completed and what failed, with actionable next steps (e.g. re-run `agents-mcp sync`), and exits with code `1`.
 
-### Remocao e limpeza de plugins
+### Removal and plugin cleanup
 
-- `remove <nome>` remove **apenas** `plugin.json`, `mcp.json` e `mcp_config.json` do plugin gerenciado em `.agents/plugins/<nome>/`. O diretorio e apagado somente se ficar vazio apos a limpeza; arquivos manuais (ex. `sentinel.txt`) e subdiretorios sao preservados.
-- Diretorios em `.agents/plugins/<nome>/` cujo nome nao esta registrado em `managedPlugins` (estado de sincronizacao) nunca sao modificados nem apagados por `remove` ou `sync`.
-- `sync` sem `antigravity` nos targets remove o `mcp_config.json` dos plugins gerenciados, mantendo `plugin.json` e `mcp.json` intactos.
-- `remove --no-sync` remove o servidor do canônico e limpa os arquivos do plugin gerenciado localmente, sem sincronizar configuracoes nos agentes nem alterar `state.targets`/`state.agents`.
-- `--dry-run` em `remove` e `sync` nao grava nem apaga nada: canônico, plugins, estado e configuracoes nativas dos agentes ficam intocados.
+- `remove <name>` removes **only** `plugin.json`, `mcp.json`, and `mcp_config.json` from the managed plugin in `.agents/plugins/<name>/`. The directory is deleted only if empty after cleanup; manual files (e.g. `sentinel.txt`) and subdirectories are preserved.
+- Directories in `.agents/plugins/<name>/` whose name is not registered in `managedPlugins` (sync state) are never modified or deleted by `remove` or `sync`.
+- `sync` without `antigravity` among the targets removes `mcp_config.json` from managed plugins, keeping `plugin.json` and `mcp.json` intact.
+- `remove --no-sync` removes the server from the canonical config and cleans the managed plugin files locally, without syncing agent configs nor changing `state.targets`/`state.agents`.
+- `--dry-run` on `remove` and `sync` writes or deletes nothing: canonical, plugins, state, and agent native configs remain untouched.
 
-### Boas praticas
+### Best practices
 
-- Edicoes manuais devem ser feitas em `.agents/mcp.json` e propagadas via `agents-mcp sync`.
-- Arquivos em `.agents/plugins/<name>/` sao gerados a partir de `.agents/mcp.json`; edicoes diretas neles serao sobrescritas na proxima `sync`.
-- Quando `antigravity` for sincronizado, os arquivos do plugin ficam prontos em `.agents/plugins/<name>/` (a CLI **nao** ativa a interface do IDE Antigravity automaticamente).
+- Manual edits should be made in `.agents/mcp.json` and propagated via `agents-mcp sync`.
+- Files in `.agents/plugins/<name>/` are generated from `.agents/mcp.json`; direct edits to them will be overwritten on the next `sync`.
+- When `antigravity` is synced, plugin files are ready in `.agents/plugins/<name>/` (the CLI does **not** automatically activate the Antigravity IDE interface).
 
 ## CLI Reference
 
@@ -202,9 +207,9 @@ This CLI adopts **Agent Plugins MCP 1.0.0** as its normative basis for MCP serve
 - **Official schema:** `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`
 - **Implementation reference:** `https://agent-plugins.org/plugin-authors/mcp-servers`
 
-### Delimitação de valor
+### Scope delimitation
 
-A CLI `agents-mcp` gerencia e sincroniza MCPs de forma padronizada dentro do contexto de um projeto (e no escopo global do usuário). O padrão Agent Plugins MCP 1.0.0 continua sendo a referência normativa para a configuração de servidores MCP em plugins individuais. A proposta não cria nem propõe uma variante concorrente do schema Agent Plugins, e não transforma o projeto em um gerenciador geral de plugins além do gerenciamento de MCPs por projeto.
+The `agents-mcp` CLI manages and synchronizes MCPs in a standardized way within the context of a project (and in the user's global scope). The Agent Plugins MCP 1.0.0 standard remains the normative reference for MCP server configuration in individual plugins. The proposal does not create or propose a competing variant of the Agent Plugins schema, and does not transform the project into a general plugin manager beyond per-project MCP management.
 
 - **Formal Specification:** [`spec/SPEC.md`](./spec/SPEC.md)
 - **Agent Translation Matrix:** [`spec/MATRIX.md`](./spec/MATRIX.md)

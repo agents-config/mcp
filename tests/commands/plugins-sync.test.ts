@@ -68,14 +68,14 @@ describe('commands sync (B3/T5: unmanaged plugin collision)', () => {
       })
 
       expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('nao e gerenciado')
+      expect(summary.errors[0]).toContain('not managed by the CLI')
       expect(summary.warnings).toEqual([])
       expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
       expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
       expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
 
       expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Sincronizacao parcial concluida com falhas'),
+        expect.stringContaining('Partial sync completed with failures'),
       )
       const notes = ui.note.mock.calls.map((call) => String(call[0]))
       expect(notes.some((note) => note.includes('Synced'))).toBe(false)
@@ -200,7 +200,7 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
       expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
 
       const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.includes('Nenhum agente alvo'))).toBe(true)
+      expect(notes.some((n) => n.includes('No target agents'))).toBe(true)
       expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
       expect(notes.some((n) => n.includes('agents-mcp sync --agents'))).toBe(
         true,
@@ -359,7 +359,7 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
 
       expect(exitSpy).not.toHaveBeenCalled()
       expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('nao e gerenciado')
+      expect(summary.errors[0]).toContain('not managed by the CLI')
       expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
       expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
       expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
@@ -367,7 +367,7 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
       const notes = ui.note.mock.calls.map((call) => String(call[0]))
       expect(notes.some((n) => n.startsWith('Synced'))).toBe(false)
       expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Sincronizacao parcial concluida com falhas'),
+        expect.stringContaining('Partial sync completed with failures'),
       )
     } finally {
       cleanup()
@@ -659,9 +659,9 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
       })
 
       expect(summary1.errors).toHaveLength(1)
-      expect(summary1.errors[0]).toContain('Falha ao remover plugin `alpha`')
+      expect(summary1.errors[0]).toContain('Failed to remove plugin `alpha`')
       expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Sincronizacao parcial concluida com falhas'),
+        expect.stringContaining('Partial sync completed with failures'),
       )
 
       expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
@@ -681,7 +681,7 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
         yes: true,
       })
       expect(summary2.errors).toHaveLength(1)
-      expect(summary2.errors[0]).toContain('Falha ao remover plugin `alpha`')
+      expect(summary2.errors[0]).toContain('Failed to remove plugin `alpha`')
     } finally {
       cleanup()
     }

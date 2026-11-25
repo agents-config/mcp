@@ -6,7 +6,7 @@
  * touching agent configuration files, never duplicating entries.
  */
 
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import { ENV_FILE } from '$/src/config'
@@ -62,20 +62,36 @@ export function ensureIgnored(
     return { added, warnings }
   }
 
-  const blockLines: string[] = []
-  // Only insert a header if we aren't already inside a managed block.
-  const alreadyManaged = existingLines.some(
-    (l) => l.trim() === MANAGED_BLOCK_HEADER,
-  )
-  if (!alreadyManaged) {
-    blockLines.push('', MANAGED_BLOCK_HEADER)
-  }
-  blockLines.push(...uncovered)
-  if (!alreadyManaged) {
-    blockLines.push(MANAGED_BLOCK_FOOTER)
+  // A trailing newline leaves a final empty element; drop it so rejoining
+  // never accumulates blank lines across repeated calls.
+  if (
+    existingLines.length > 0 &&
+    existingLines[existingLines.length - 1] === ''
+  ) {
+    existingLines.pop()
   }
 
-  const next = [...existingLines, ...blockLines].join('\n') + '\n'
+  const headerIdx = existingLines.findIndex(
+    (l) => l.trim() === MANAGED_BLOCK_HEADER,
+  )
+  const footerIdx = existingLines.findIndex(
+    (l) => l.trim() === MANAGED_BLOCK_FOOTER,
+  )
+
+  const nextLines = [...existingLines]
+
+  if (headerIdx !== -1 && footerIdx !== -1) {
+    // Block complete: insert uncovered entries right before the footer.
+    nextLines.splice(footerIdx, 0, ...uncovered)
+  } else if (headerIdx !== -1) {
+    // Header only (corrupted/partial block): append entries and close it.
+    nextLines.push(...uncovered, MANAGED_BLOCK_FOOTER)
+  } else {
+    // No managed block yet: create header -> entries -> footer.
+    nextLines.push('', MANAGED_BLOCK_HEADER, ...uncovered, MANAGED_BLOCK_FOOTER)
+  }
+
+  const next = nextLines.join('\n') + '\n'
   writeFileAtomic(gitignorePath, next)
   added.push(...uncovered)
 
@@ -93,9 +109,9 @@ export function ensureIgnored(
  * git repo, git unavailable, entry not tracked) yields `false` so the caller
  * can proceed without git.
  */
-function isGitTracked(rootDir: string, entry: string): boolean {
+export function isGitTracked(rootDir: string, entry: string): boolean {
   try {
-    execSync(['git', 'ls-files', '--error-unmatch', '--', entry].join(' '), {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', entry], {
       cwd: rootDir,
       stdio: 'ignore',
     })

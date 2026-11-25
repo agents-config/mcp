@@ -10,6 +10,8 @@ import {
 } from '$/src/adapters/vscode'
 import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 
 const ctx = createRuntimeContext({
   cwd: '/tmp/proj',
@@ -27,12 +29,139 @@ describe('vscode adapter identity', () => {
       nativeDefault: false,
       nativeDisabled: false,
       cwd: false,
+      layout: 'single-file',
+      rootKey: 'servers',
     })
   })
 
   it('getConfigPath project and global', () => {
     expect(getConfigPath('project', ctx)).toBe('/tmp/proj/.vscode/mcp.json')
-    expect(getConfigPath('global', ctx)).toBe('/tmp/home/.vscode/mcp.json')
+    // linux (default platform in CI), no XDG_CONFIG_HOME → ~/.config/Code/User/mcp.json
+    expect(getConfigPath('global', ctx)).toBe(
+      '/tmp/home/.config/Code/User/mcp.json',
+    )
+  })
+
+  describe('getConfigPath global (OS-aware)', () => {
+    it('linux with XDG_CONFIG_HOME', () => {
+      const linuxCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/home/alex',
+        platform: 'linux',
+        env: { XDG_CONFIG_HOME: '/home/alex/.config' },
+        isTTY: false,
+      })
+      expect(getConfigPath('global', linuxCtx)).toBe(
+        '/home/alex/.config/Code/User/mcp.json',
+      )
+    })
+
+    it('linux without XDG_CONFIG_HOME falls back to ~/.config', () => {
+      const linuxCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/home/alex',
+        platform: 'linux',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', linuxCtx)).toBe(
+        '/home/alex/.config/Code/User/mcp.json',
+      )
+    })
+
+    it('darwin uses Library/Application Support', () => {
+      const darwinCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/Users/alex',
+        platform: 'darwin',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', darwinCtx)).toBe(
+        '/Users/alex/Library/Application Support/Code/User/mcp.json',
+      )
+    })
+
+    it('win32 with APPDATA', () => {
+      const winCtx = createRuntimeContext({
+        cwd: 'C:\\proj',
+        homeDir: 'C:\\Users\\alex',
+        platform: 'win32',
+        env: { APPDATA: 'C:\\Users\\alex\\AppData\\Roaming' },
+        isTTY: false,
+      })
+      expect(getConfigPath('global', winCtx)).toBe(
+        'C:\\Users\\alex\\AppData\\Roaming\\Code\\User\\mcp.json',
+      )
+    })
+
+    it('win32 without APPDATA falls back to ~/AppData/Roaming', () => {
+      const winCtx = createRuntimeContext({
+        cwd: 'C:\\proj',
+        homeDir: 'C:\\Users\\alex',
+        platform: 'win32',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', winCtx)).toBe(
+        'C:\\Users\\alex\\AppData\\Roaming\\Code\\User\\mcp.json',
+      )
+    })
+
+    it('probes Code - Insiders when its User dir exists', () => {
+      const { ctx: sctx, cleanup, dir } = createSandbox()
+      try {
+        // sctx.platform is linux, sctx.homeDir is sandbox home,
+        // sctx.env.XDG_CONFIG_HOME is <home>/.config
+        const base = sctx.env.XDG_CONFIG_HOME!
+        mkdirSync(join(base, 'Code - Insiders', 'User'), {
+          recursive: true,
+        })
+        expect(getConfigPath('global', sctx)).toBe(
+          join(base, 'Code - Insiders', 'User', 'mcp.json'),
+        )
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('probes VSCodium when Insiders missing but VSCodium present', () => {
+      const { ctx: sctx, cleanup, dir } = createSandbox()
+      try {
+        const base = sctx.env.XDG_CONFIG_HOME!
+        mkdirSync(join(base, 'VSCodium', 'User'), { recursive: true })
+        expect(getConfigPath('global', sctx)).toBe(
+          join(base, 'VSCodium', 'User', 'mcp.json'),
+        )
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('defaults to Code when no channel User dir exists', () => {
+      const { ctx: sctx, cleanup } = createSandbox()
+      try {
+        expect(getConfigPath('global', sctx)).toBe(
+          join(sctx.env.XDG_CONFIG_HOME!, 'Code', 'User', 'mcp.json'),
+        )
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('respects channel order: Code wins over Insiders when both exist', () => {
+      const { ctx: sctx, cleanup } = createSandbox()
+      try {
+        const base = sctx.env.XDG_CONFIG_HOME!
+        mkdirSync(join(base, 'Code', 'User'), { recursive: true })
+        mkdirSync(join(base, 'Code - Insiders', 'User'), { recursive: true })
+        expect(getConfigPath('global', sctx)).toBe(
+          join(base, 'Code', 'User', 'mcp.json'),
+        )
+      } finally {
+        cleanup()
+      }
+    })
   })
 })
 

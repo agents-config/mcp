@@ -1,13 +1,17 @@
 /**
  * `list` command (§11).
  *
- * Read-only table: name, type, command/URL, per-agent sync status. `--all` includes the global scope and marks shadowed
- * entries (project wins).
+ * Read-only table: name, type, command/URL, per-agent sync status. `--all`
+ * includes the global scope and marks shadowed entries (project wins).
  */
 
 import { defineCommand } from 'citty'
-import { createUiAndCtx, configPath, isDryRun } from '$/src/commands/util'
-import { loadValidatedConfig } from '$/src/core/store'
+import {
+  createUiAndCtx,
+  configPath,
+  isDryRun,
+  loadCanonicalOrExit,
+} from '$/src/commands/util'
 import { loadState } from '$/src/core/state'
 import type { ConfigScope } from '$/src/core/context'
 import type { AgentId } from '$/src/adapters/types'
@@ -23,14 +27,21 @@ export const listCommand = defineCommand({
       alias: 'a',
       description: 'Include global scope and mark shadowed entries',
     },
+    global: {
+      type: 'boolean',
+      alias: 'g',
+      description: 'Operate on the global scope only',
+    },
   },
   run: async ({ args }) => {
     const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
     const includeAll = args.all === true
-
     const scopes: ConfigScope[] = includeAll
       ? ['project', 'global']
-      : ['project']
+      : args.global === true
+        ? ['global']
+        : ['project']
+
     // Collect all server names from project scope first (for shadow detection).
     const projectNames = new Set<string>()
     const scopeData: Array<{
@@ -40,10 +51,10 @@ export const listCommand = defineCommand({
     }> = []
 
     for (const scope of scopes) {
-      const validated = loadValidatedConfig(scope, ctx)
+      const config = loadCanonicalOrExit(scope, ctx, ui)
       const stateResult = loadState(scope, ctx)
       const state = stateResult.state
-      const servers = validated?.config.mcpServers ?? {}
+      const servers = config.mcpServers ?? {}
       scopeData.push({ scope, servers, state })
       if (scope === 'project') {
         for (const name of Object.keys(servers)) {
@@ -68,20 +79,21 @@ export const listCommand = defineCommand({
             : type === 'streamable-http'
               ? 'http'
               : type
-        const target =
-          type === 'streamable-http'
-            ? (server.url ?? '')
-            : (server.command ?? '')
+        const isHttp = type === 'streamable-http' || type === 'sse'
+        const target = isHttp ? (server.url ?? '') : (server.command ?? '')
 
-        // Sync status: is this server managed by any agent in this scope?
-        let synced = false
+        // Per-agent sync status: list which agents have this server synced.
+        const syncedAgents: string[] = []
         for (const agentId of Object.keys(state.agents)) {
           const agent = state.agents[agentId as AgentId]
           if (agent?.names.includes(name)) {
-            synced = true
-            break
+            syncedAgents.push(agentId)
           }
         }
+        const syncStatus =
+          syncedAgents.length > 0
+            ? `synced (${syncedAgents.join(', ')})`
+            : 'not-synced'
 
         const shadowed =
           includeAll && scope === 'global' && projectNames.has(name)
@@ -89,9 +101,7 @@ export const listCommand = defineCommand({
             : ''
 
         ui.note(
-          `${name.padEnd(14)} ${displayType.padEnd(8)} ${target.padEnd(24)} ${
-            synced ? 'synced' : 'not-synced'
-          }${shadowed}`,
+          `${name.padEnd(14)} ${displayType.padEnd(8)} ${target.padEnd(24)} ${syncStatus}${shadowed}`,
         )
       }
     }

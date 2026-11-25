@@ -9,7 +9,8 @@
  * Implements MATRIX.md §1, §2, §3, §7.3.
  */
 
-import { join } from 'node:path'
+import { posix, win32 } from 'node:path'
+import { existsSync } from 'node:fs'
 import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
@@ -42,15 +43,54 @@ export const capabilities: AdapterCapabilities = {
   nativeDefault: false,
   nativeDisabled: false,
   cwd: false,
+  layout: 'single-file' as const,
+  rootKey: 'servers',
+}
+
+/**
+ * VS Code channel probing order per `spec/MATRIX.md` §1.1. The first channel
+ * whose `<base>/<channel>/User` profile directory exists wins; falls back to
+ * the stable `Code` channel when none exist.
+ */
+export const VSCODE_CHANNELS = ['Code', 'Code - Insiders', 'VSCodium'] as const
+
+function pjoin(ctx: RuntimeContext, ...paths: string[]): string {
+  return ctx.platform === 'win32' ? win32.join(...paths) : posix.join(...paths)
+}
+
+function vscodeGlobalBase(ctx: RuntimeContext): string {
+  if (ctx.platform === 'win32') {
+    return pjoin(
+      ctx,
+      ctx.env.APPDATA || pjoin(ctx, ctx.homeDir, 'AppData', 'Roaming'),
+    )
+  }
+  if (ctx.platform === 'darwin') {
+    return pjoin(ctx, ctx.homeDir, 'Library', 'Application Support')
+  }
+  // linux
+  return pjoin(
+    ctx,
+    ctx.env.XDG_CONFIG_HOME || pjoin(ctx, ctx.homeDir, '.config'),
+  )
 }
 
 export function getConfigPath(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): string | null {
-  return scope === 'project'
-    ? join(ctx.cwd, '.vscode', 'mcp.json')
-    : join(ctx.homeDir, '.vscode', 'mcp.json')
+  if (scope === 'project') {
+    return pjoin(ctx, ctx.cwd, '.vscode', 'mcp.json')
+  }
+  const base = vscodeGlobalBase(ctx)
+  let channel = 'Code'
+  for (const candidate of VSCODE_CHANNELS) {
+    if (existsSync(pjoin(ctx, base, candidate, 'User'))) {
+      channel = candidate
+      break
+    }
+  }
+  return pjoin(ctx, base, channel, 'User', 'mcp.json')
 }
 
 export async function detect(

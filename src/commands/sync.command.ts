@@ -6,7 +6,7 @@
 
 import { defineCommand } from 'citty'
 import { runSync, type SyncOptions } from './sync'
-import { createUiAndCtx } from '$/src/commands/util'
+import { createUiAndCtx, parseAgentsFlag } from '$/src/commands/util'
 
 export const syncCommand = defineCommand({
   meta: {
@@ -15,10 +15,10 @@ export const syncCommand = defineCommand({
       'Compile .agents/mcp.json into all targeted agent config files',
   },
   args: {},
-  run: async ({ args }) => {
+  run: async ({ args, rawArgs }) => {
     const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
     const scope = args.global ? 'global' : 'project'
-    const flag = args.agents ? String(args.agents).split(',') : undefined
+    const flag = parseAgentsFlag(args, rawArgs)
     const dryRun = args['dry-run'] === true
 
     const summary = await runSync({

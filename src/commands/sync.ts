@@ -6,18 +6,22 @@
  * run produces no byte changes. Exports `runSync` for reuse by `add`/`remove`.
  */
 
+import { join } from 'node:path'
 import {
   createUiAndCtx,
   configPath,
+  formatConfigValidationError,
+  formatDryRunActions,
   writeFileAtomic,
   persistSyncState,
   loadSyncState,
 } from '$/src/commands/util'
 import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
 import type { AgentId } from '$/src/adapters/types'
+import { AGENTS_DIR } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import { loadValidatedConfig } from '$/src/core/store'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import { readTextFile } from '$/src/core/fs-atomic'
 import {
   syncPluginFiles,
@@ -33,20 +37,26 @@ export interface SyncOptions {
   dryRun: boolean
   yes: boolean
   /**
-   * Quando `true`, não imprime o bloco de erro de plugins. Usado pelo `add`,
-   * que reporta as mesmas falhas uma única vez no seu próprio resumo.
+   * When `true`, does not print the plugin error block. Used by `add`,
+   * which reports the same failures once in its own summary.
    */
   quietErrors?: boolean
   /**
-   * `add --no-sync`: gera apenas plugin; não resolve nem grava agentes.
-   * `state.targets` e `state.agents` são preservados.
+   * `add --no-sync`: generates only the plugin; does not resolve or write agents.
+   * `state.targets` and `state.agents` are preserved.
    */
   skipAgentSync?: boolean
   /**
-   * `add`: permite zero targets resolvidos; segue gerando plugins.
-   * Sem ele, zero targets mantém o comportamento atual (erro + exit 1).
+   * `add`: allows zero resolvable targets; keeps generating plugins.
+   * Without it, zero targets keeps current behavior (error + exit 1).
    */
   allowEmptyTargets?: boolean
+  /**
+   * B8: when defined, `sync` writes/validates only plugins whose names are in
+   * this list. Used by `add` to never fail because of an unmanaged unrelated
+   * plugin.
+   */
+  onlyPluginNames?: readonly string[]
 }
 
 export interface SyncSummary {
@@ -67,11 +77,21 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     quietErrors = false,
     skipAgentSync = false,
     allowEmptyTargets = false,
+    onlyPluginNames = undefined,
   } = options
   const { ui } = createUiAndCtx({ yes })
 
   // 1. Load + validate canonical config.
-  const validated = loadValidatedConfig(scope, ctx)
+  let validated
+  try {
+    validated = loadValidatedConfig(scope, ctx)
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      ui.error(formatConfigValidationError(err))
+      process.exit(1)
+    }
+    throw err
+  }
   if (!validated) {
     ui.note(
       `No canonical config at ${configPath(scope, ctx)}. Nothing to sync.`,
@@ -81,9 +101,9 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   const { config, warnings: configWarnings } = validated
 
   // 2. Resolve targets: flag → state → detection.
-  // Em `skipAgentSync` (`add --no-sync`) não há resolução de agentes: a
-  // fase de plugins ainda roda, mas sem arquivos nativos e sem mexer no
-  // estado de agentes.
+  // In `skipAgentSync` (`add --no-sync`) there is no agent resolution: the
+  // plugin phase still runs, but without native files and without touching
+  // agent state.
   const stateResult = loadSyncState(scope, ctx)
   const state = stateResult.state
   const targets = skipAgentSync
@@ -109,6 +129,8 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
 
   // 3. Compile + write per target adapter.
   const written: string[] = []
+  // Planned file operations for the --dry-run preview (zero disk writes).
+  const planned: { type: 'write' | 'remove'; path: string }[] = []
   // Preserve existing agent records; only overwrite the agents being synced.
   const nextAgents: Record<
     string,
@@ -151,6 +173,7 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     )
     allWarnings.push(...warnings)
 
+    planned.push({ type: 'write', path: nativePath })
     if (!dryRun) {
       writeFileAtomic(nativePath, content)
       written.push(nativePath)
@@ -183,12 +206,20 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   const nextManagedPlugins = new Set<string>(
     state.managedPlugins.filter((n) => canonicalNames.includes(n)),
   )
+  /** Canonical names whose plugin (including `mcp_config.json` when antigravity
+   * is targeted) was written successfully this run. */
+  const syncedPluginNames = new Set<string>()
   for (const [name, server] of Object.entries(config.mcpServers)) {
+    // B8: when `onlyPluginNames` is set, generate only the requested plugins
+    // requested (e.g. `add` writes only the plugin for the newly added server).
+    if (onlyPluginNames && !onlyPluginNames.includes(name)) {
+      continue
+    }
     if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
       allWarnings.push({
         code: 'PLUGIN_UNMANAGED',
         agent: undefined,
-        message: `.agents/plugins/${name}/ pre-existe e nao e gerenciado pela CLI; ignorado em sync. Use um nome diferente.`,
+        message: `.agents/plugins/${name}/ pre-exists and is not managed by the CLI; skipped in sync. Use a different name.`,
       })
       continue
     }
@@ -204,22 +235,26 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
 
     if (result.ok) {
       nextManagedPlugins.add(name)
+      syncedPluginNames.add(name)
       if (!dryRun) {
         written.push(...result.written)
+      } else {
+        for (const p of result.written) {
+          planned.push({ type: 'write', path: p })
+        }
       }
     } else {
       allWarnings.push({
         code: 'PLUGIN_WRITE_ERROR',
         agent: undefined,
-        message: `Falha ao gerar plugin \`${name}\`: ${result.errors.join('; ')}`,
+        message: `Failed to generate plugin \`${name}\`: ${result.errors.join('; ')}`,
       })
     }
   }
 
-  // Poda de plugins obsoletos: servidores que sairam do canônico (removidos
-  // pelo `remove` ou manualmente) limpam seus arquivos gerenciados e saem do
-  // estado de plugins gerenciados. Arquivos manuais e diretorios nao vazios
-  // sao preservados por `removeManagedPlugin`.
+  // Prune stale plugins: servers that left the canonical (removed by `remove`
+  // or manually) clean their managed files and leave the managed-plugins state.
+  // Manual files and non-empty directories are preserved by `removeManagedPlugin`.
   const stalePlugins = state.managedPlugins.filter(
     (n) => !canonicalNames.includes(n),
   )
@@ -232,23 +267,27 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
       dryRun,
     })
     if (!result.ok) {
-      // Falha de limpeza (ex.: plugin.json virou diretorio -> EISDIR): mantem o
-      // nome em nextManagedPlugins para que o proximo `sync` tente novamente,
-      // em vez de descartar o plugin do estado e deixar o diretorio orfao sem
-      // reprocessamento. O erro ja esta em allWarnings e sera reportado em
-      // summary.errors (e exit 1 via sync.command).
+      // Cleanup failure (e.g. plugin.json became a directory -> EISDIR): keep
+      // the name in nextManagedPlugins so the next `sync` retries, instead of
+      // dropping the plugin from state and leaving the directory orphaned without
+      // reprocessing. The error is already in allWarnings and will be reported
+      // in summary.errors (and exit 1 via sync.command).
       nextManagedPlugins.add(name)
       allWarnings.push({
         code: 'PLUGIN_CLEANUP_ERROR',
         agent: undefined,
-        message: `Falha ao remover plugin \`${name}\`: ${result.errors.join('; ')}`,
+        message: `Failed to remove plugin \`${name}\`: ${result.errors.join('; ')}`,
       })
+    } else {
+      for (const p of result.removed) {
+        planned.push({ type: 'remove', path: p })
+      }
     }
   }
 
-  // Quando antigravity nao eh mais alvo, remova mcp_config.json dos plugins
-  // gerenciados (preservando plugin.json e mcp.json). Em skipAgentSync
-  // (`add --no-sync`) nao se toca em mcp_config.json existente.
+  // When antigravity is no longer targeted, remove mcp_config.json from managed
+  // plugins (preserving plugin.json and mcp.json). In skipAgentSync
+  // (`add --no-sync`) existing mcp_config.json is not touched.
   if (!skipAgentSync && !includeAntigravity) {
     for (const name of nextManagedPlugins) {
       const result = removeAntigravityPluginConfig({
@@ -262,9 +301,38 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
         allWarnings.push({
           code: 'PLUGIN_CLEANUP_ERROR',
           agent: undefined,
-          message: `Falha ao remover mcp_config.json de \`${name}\`: ${result.errors.join('; ')}`,
+          message: `Failed to remove mcp_config.json of \`${name}\`: ${result.errors.join('; ')}`,
         })
+      } else {
+        for (const p of result.removed) {
+          planned.push({ type: 'remove', path: p })
+        }
       }
+    }
+  }
+
+  // 4a. Antigravity agent-state lifecycle: record `state.agents.antigravity`
+  // when antigravity is targeted (path = .agents/plugins dir, names = plugins
+  // whose sync succeeded this run); delete it when antigravity is deselected
+  // (its mcp_config.json files were cleaned up in the block above).
+  if (!skipAgentSync) {
+    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+    const antigravityPath = join(base, AGENTS_DIR, 'plugins')
+    if (targets.includes('antigravity')) {
+      const existing = state.agents['antigravity']
+      const names = [...syncedPluginNames]
+      const namesChanged =
+        !existing ||
+        existing.path !== antigravityPath ||
+        existing.names.length !== names.length ||
+        names.some((n) => !existing.names.includes(n))
+      nextAgents['antigravity'] = {
+        path: antigravityPath,
+        names,
+        updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
+      }
+    } else {
+      delete nextAgents['antigravity']
     }
   }
 
@@ -278,6 +346,11 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   }
   if (!dryRun) {
     persistSyncState(scope, ctx, nextState)
+  }
+
+  // --dry-run preview: show planned file operations, zero disk writes.
+  if (dryRun && planned.length > 0) {
+    ui.note(formatDryRunActions(planned))
   }
 
   // 5. Print summary.
@@ -295,24 +368,24 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   if (pluginErrors.length > 0) {
     if (!quietErrors) {
       ui.error(
-        `Sincronizacao parcial concluida com falhas: ${pluginErrors.length} plugin(es) nao puderam ser sincronizados.`,
+        `Partial sync completed with failures: ${pluginErrors.length} plugin(s) could not be synced.`,
       )
       for (const e of pluginErrors) {
         ui.error(e)
       }
       ui.note(
-        'Reexecute `agents-mcp sync` apos resolver os problemas acima. .agents/mcp.json foi mantido.',
+        'Re-run `agents-mcp sync` after resolving the issues above. .agents/mcp.json was kept.',
       )
     }
   } else if (skipAgentSync) {
-    // `add --no-sync`: agentes não foram sincronizados, apenas plugins.
+    // `add --no-sync`: agents were not synced, only plugins.
     ui.note(
-      'Sincronizacao de agentes ignorada (--no-sync): os arquivos de plugin foram atualizados em .agents/plugins/ e nenhum agente foi sincronizado.',
+      'Agent sync skipped (--no-sync): plugin files were updated in .agents/plugins/ and no agent was synced.',
     )
   } else if (targets.length === 0 && allowEmptyTargets) {
-    // `add` sem targets: concluído com plugin padrão, sem agentes alvo.
+    // `add` without targets: completed with default plugin, no target agents.
     ui.note(
-      'Nenhum agente alvo configurado ou detectado: o plugin padrao Agent Plugins foi gerado em .agents/plugins/, mas nenhum agente foi sincronizado. Para sincronizar depois, execute `agents-mcp sync --agents <lista>` (ex.: `--agents cursor,vscode`).',
+      'No target agents configured or detected: the default Agent Plugins plugin was generated in .agents/plugins/, but no agent was synced. To sync later, run `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).',
     )
   } else {
     ui.note(

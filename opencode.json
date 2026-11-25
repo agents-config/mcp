@@ -7,6 +7,17 @@
         "-y",
         "@modelcontextprotocol/server-sequential-thinking"
       ]
+    },
+    "memory": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "environment": {
+        "MEMORY_FILE_PATH": "/home/alexbruno/Projetos/GitHub/agents-mcp/cli/memory.jsonl"
+      }
     }
   }
 }

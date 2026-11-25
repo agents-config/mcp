@@ -7,12 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `antigravity` agent adapter and plugin sync support: per-plugin layouts under `.agents/plugins/<name>/` (`plugin.json`, `mcp.json`, plus `mcp_config.json` when `antigravity` is targeted), with `stdio` → `{ command, args?, env? }` and `streamable-http`/`sse` → `{ serverUrl, headers? }` mapping.
+- Interactive `add` wizard (`agents-mcp add`) for server name, connection type (local command or HTTP URL), args, env vars, and headers.
+- `add` now always creates/updates the base Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected.
+- `--extract-secrets` opt-in flag on `add`: writes detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replaces them with `${VAR}` placeholders in `.agents/mcp.json`; without it, secrets are only warned about.
+- Source resolvers for `add`: direct flags (`--command`/`--http`/`--sse`/`--arg`/`--env`/`--header`), GitHub URL/`owner/repo`, npm package, MCP Registry, and remote URLs.
+- Repeatable `--arg`, `--env`, `--header` flags accumulated from `rawArgs`.
+- `import` scans existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, and generates `.agents/mcp.json`.
+
+### Changed
+
+- Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`.
+- Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0.
+- Transport discriminators are `stdio`, `streamable-http`, and `sse`; obsolete `http` transport name removed.
+
+### Removed
+
+- Project-specific JSON Schema publication and Draft-07 schema generation; the Agent Plugins MCP 1.0.0 schema is the single normative reference.
+- `disabled` and `targets` fields from the canonical server definition (per-agent targeting remains in the local sync state).
+- Obsolete `"enabled": false` from OpenCode compiled output example.
+
 ### Fixed
 
-- `remove` agora preserva os demais servidores do canônico ao excluir um (correcao de perda silenciosa de dados: antes, todos os outros servidores eram apagados).
-- `remove --no-sync` respeita a flag e nao sincroniza agentes: grava apenas o canônico, limpa o plugin gerenciado localmente e preserva `state.targets`/`state.agents`.
-- Limpeza de arquivos de plugin gerenciados ao remover um servidor (`plugin.json`, `mcp.json` e `mcp_config.json`, apagando o diretorio somente se ficar vazio) e de `mcp_config.json` ao desselecionar `antigravity` no `sync`.
-- Falhas de limpeza de plugin no `sync` sao reportadas com exit code `1`, e o plugin permanece registrado para nova tentativa no proximo `sync`.
+- `remove` now preserves the other servers in the canonical config when deleting one (fixes silent data loss: previously all other servers were wiped).
+- `remove --no-sync` respects the flag and does not sync agents: writes only canonical, cleans managed plugin files locally, and preserves `state.targets`/`state.agents`.
+- Managed plugin file cleanup on server removal (`plugin.json`, `mcp.json`, `mcp_config.json`, deleting the directory only if empty) and `mcp_config.json` removal when deselecting `antigravity` on `sync`.
+- Plugin cleanup failures on `sync` are reported with exit code `1`, and the plugin remains registered for retry on the next `sync`.
 
 ## [0.1.1] - 2026-11-19
 

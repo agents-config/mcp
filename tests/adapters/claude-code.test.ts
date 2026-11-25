@@ -33,6 +33,8 @@ describe('claude-code adapter identity', () => {
       nativeDefault: true,
       nativeDisabled: false,
       cwd: false,
+      layout: 'single-file',
+      rootKey: 'mcpServers',
     })
   })
 

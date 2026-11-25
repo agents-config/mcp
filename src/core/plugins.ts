@@ -168,7 +168,7 @@ export function syncPluginFiles({
     } catch (err) {
       result.ok = false
       result.errors.push(
-        `Falha ao gravar ${file.path}: ${
+        `Failed to write ${file.path}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       )
@@ -249,7 +249,7 @@ export function removeManagedPlugin({
     } catch (err) {
       result.ok = false
       result.errors.push(
-        `Falha ao remover ${path}: ${
+        `Failed to remove ${path}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       )
@@ -264,7 +264,7 @@ export function removeManagedPlugin({
     } catch (err) {
       result.ok = false
       result.errors.push(
-        `Falha ao remover ${dir}: ${
+        `Failed to remove ${dir}: ${
           err instanceof Error ? err.message : String(err)
         }`,
       )
@@ -315,7 +315,7 @@ export function removeAntigravityPluginConfig({
   } catch (err) {
     result.ok = false
     result.errors.push(
-      `Falha ao remover ${path}: ${
+      `Failed to remove ${path}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     )
@@ -324,7 +324,7 @@ export function removeAntigravityPluginConfig({
   return result
 }
 
-/** Lê o conteúdo existente de `plugin.json` (null quando ausente). */
+/** Reads the existing content of `plugin.json` (null when absent). */
 export function readPluginManifest(
   scope: ConfigScope,
   ctx: RuntimeContext,

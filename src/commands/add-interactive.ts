@@ -108,13 +108,13 @@ export interface CollectInteractiveAddOptionsParams {
   /** Candidate name from `--name` or the positional argument. */
   initialName?: string
   /**
-   * Fail fast when the server already exists (called before field prompts).
-   * Returns `true` when the name is blocked by an unmanaged plugin collision
-   * and the caller should re-prompt for a different name; `undefined`/`false`
-   * when the name is acceptable. Canonical-config conflicts still call
-   * `process.exit` directly.
+   * Check whether a candidate name conflicts. Returns `'canonical'` when the
+   * name already exists in the canonical config (caller should offer
+   * overwrite/rename/cancel), `'unmanaged'` when the name collides with an
+   * unmanaged plugin directory (caller should re-prompt), or `false` when the
+   * name is acceptable.
    */
-  checkConflict: (name: string) => boolean | undefined
+  checkConflict: (name: string) => 'canonical' | 'unmanaged' | false
 }
 
 export interface InteractiveAddResult {
@@ -188,13 +188,12 @@ async function collectEnv(ui: PromptUi): Promise<string[]> {
   }
   let addAnother = true
   while (addAnother) {
-    env.push(
-      await ui.text({
-        message: 'Environment variable (KEY=VALUE or KEY)',
-        placeholder: 'API_KEY=<value>',
-        validate: validateEnvEntry,
-      }),
-    )
+    const entry = await ui.text({
+      message: 'Environment variable (KEY=VALUE or KEY)',
+      placeholder: 'API_KEY=<value>',
+      validate: validateEnvEntry,
+    })
+    env.push(entry)
     addAnother = await ui.confirm({
       message: 'Add another environment variable?',
       initialValue: false,
@@ -237,13 +236,41 @@ export async function collectInteractiveAddOptions({
       })
     }
     const conflict = checkConflict(name)
-    if (conflict) {
+    if (conflict === 'unmanaged') {
       ui.warn(
-        `O nome \`${name}\` esta em uso por um plugin nao gerenciado pela CLI. Informe outro nome.`,
+        `The name \`${name}\` is in use by an unmanaged plugin not managed by the CLI. Please provide another name.`,
       )
       candidate = ''
       name = ''
       continue
+    }
+    if (conflict === 'canonical') {
+      const action = await ui.select<'overwrite' | 'rename' | 'cancel'>({
+        message: `Server \`${name}\` already exists. What would you like to do?`,
+        options: [
+          {
+            label: 'Overwrite existing server',
+            value: 'overwrite',
+            hint: 'Replace the current definition',
+          },
+          {
+            label: 'Choose a different name',
+            value: 'rename',
+            hint: 'Enter a new server name',
+          },
+          { label: 'Cancel', value: 'cancel', hint: 'Abort adding the server' },
+        ],
+      })
+      if (action === 'overwrite') {
+        break
+      }
+      if (action === 'rename') {
+        candidate = ''
+        name = ''
+        continue
+      }
+      // Cancel: abort the interactive add flow.
+      process.exit(0)
     }
     break
   }
@@ -287,7 +314,7 @@ export async function collectInteractiveAddOptions({
     placeholder: '-y @scope/pkg',
     defaultValue: '',
   })
-  const env = await collectEnv(ui)
+  const env: string[] = await collectEnv(ui)
 
   const [executable, ...inlineArgs] = parseArgvSafe(commandInput.trim())
   const extraArgs = parseArgvSafe(argsInput.trim())

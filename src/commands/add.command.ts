@@ -19,20 +19,24 @@ import {
   persistSyncState,
   isDryRun,
   parseAgentsFlag,
+  statePath,
+  formatDryRunActions,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
 import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
 import { resolveDirect } from '$/src/sources/direct'
+import { resolveSource } from '$/src/sources/index'
+import type { Candidate } from '$/src/sources/types'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import { loadState, writeState } from '$/src/core/state'
 import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
 import {
   appendToDotenv,
+  applySecretExtraction,
   planSecretExtraction,
   syncEnvExample,
 } from '$/src/core/env'
 import type { CanonicalServer } from '$/src/core/schema'
-import { isStdioServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import { isUnmanagedPluginCollision } from '$/src/core/plugins'
 
@@ -144,17 +148,35 @@ export const addCommand = defineCommand({
     const isInteractive =
       ctx.isTTY && ctx.env.CI !== 'true' && args.yes !== true
 
+    /**
+     * Determine if a positional argument looks like an external source reference
+     * (GitHub URL, owner/repo, @scope/pkg, or npm package) rather than a
+     * simple server name for the interactive wizard.
+     */
+    function isExternalSourceRef(arg: string): boolean {
+      // Remote URL
+      if (/^https?:\/\//.test(arg)) return true
+      // GitHub owner/repo[#ref] or owner/repo format
+      if (/^[\w-]+\/[\w.-]+(#.*)?$/.test(arg)) return true
+      // npm scoped package @scope/pkg or bare package name with version @pkg@version
+      if (/^@[\w-]+\/[\w.-]+(@.*)?$/.test(arg)) return true
+      // Bare npm package (contains @ for version or is a known pattern)
+      // We treat any arg with @ not at start as potentially a versioned package
+      if (/^[\w-]+@[\w.-]+$/.test(arg)) return true
+      return false
+    }
+
     let validated: ReturnType<typeof loadValidatedConfig> | null = null
     try {
       validated = loadValidatedConfig(scope, ctx)
     } catch (err) {
       if (err instanceof ConfigValidationError) {
         ui.error(
-          `Configuração inválida em ${err.path}: ${err.issues
-            .map((i) => `${i.path || 'raiz'} — ${i.message}`)
+          `Invalid config at ${err.path}: ${err.issues
+            .map((i) => `${i.path || 'root'} — ${i.message}`)
             .join(
               '; ',
-            )}. Execute \`agents-mcp init --force\` ou garanta que \`mcpServers\` esteja definido em .agents/mcp.json.`,
+            )}. Run \`agents-mcp init --force\` or ensure \`mcpServers\` is defined in .agents/mcp.json.`,
         )
         process.exit(1)
         return
@@ -179,7 +201,58 @@ export const addCommand = defineCommand({
     let name: string
     let interactiveAdd = false
 
-    if (!hasDirectSource) {
+    // Determine source resolution mode:
+    // 1. Direct flags (--command/--http/--sse/--arg) -> resolveDirect
+    // 2. Positional <source> arg that looks like external ref -> resolveSource
+    // 3. No source at all -> interactive wizard (TTY) or usage error
+    const positionalSource = positionalArgs[0]?.trim()
+    const positionalIsSource =
+      positionalSource && isExternalSourceRef(positionalSource)
+
+    if (hasDirectSource) {
+      // Explicit flags take precedence
+      resolved = resolveDirect(options)
+      name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
+    } else if (positionalIsSource) {
+      // Positional <source> argument (GitHub, npm, Registry, URL)
+      resolved = await resolveSource(
+        {
+          source: positionalSource,
+          name: options.name,
+          env: options.env,
+          header: options.header,
+          cwd: options.cwd,
+        },
+        {
+          fetch: globalThis.fetch,
+          yes: args.yes === true,
+          selectCandidate:
+            isInteractive && !args.yes
+              ? async (candidates: Candidate[]) => {
+                  if (candidates.length === 0) return null
+                  // Exact name match wins automatically
+                  const exact = candidates.find(
+                    (c: Candidate) =>
+                      c.name.toLowerCase() === positionalSource.toLowerCase(),
+                  )
+                  if (exact) return exact
+                  // Multiple candidates in TTY -> prompt user
+                  const choice = await ui.select({
+                    message: `Multiple candidates found for "${positionalSource}". Choose one:`,
+                    options: candidates.map((c: Candidate) => ({
+                      label: c.name,
+                      value: c,
+                      hint: c.ref,
+                    })),
+                  })
+                  return choice ?? null
+                }
+              : undefined,
+        },
+      )
+      name = options.name ?? resolved.suggestedName
+    } else {
+      // No source specified
       if (!isInteractive) {
         ui.error(
           'Usage: agents-mcp add <name> --command <cmd> [--arg <token>...] | --http <url>',
@@ -187,19 +260,14 @@ export const addCommand = defineCommand({
         process.exit(2)
         return
       }
-
       const result = await collectInteractiveAddOptions({
         ui,
         initialName: options.name ?? positionalArgs[0],
         checkConflict: (candidate) => {
           if (candidate in canonical && !force) {
-            ui.error(
-              `Server \`${candidate}\` already exists. Use --force to overwrite.`,
-            )
-            process.exit(1)
-            return
+            return 'canonical'
           }
-          // Colisao com plugin nao gerenciado: solicita outro nome (re-prompt).
+          // Unmanaged plugin collision: re-prompt for a different name.
           if (
             isUnmanagedPluginCollision(
               scope,
@@ -208,17 +276,14 @@ export const addCommand = defineCommand({
               state.managedPlugins,
             )
           ) {
-            return true
+            return 'unmanaged'
           }
-          return undefined
+          return false
         },
       })
       interactiveAdd = true
       name = result.name
       resolved = resolveDirect(result.options)
-    } else {
-      resolved = resolveDirect(options)
-      name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
     }
 
     /**
@@ -231,23 +296,24 @@ export const addCommand = defineCommand({
         scope,
         ctx,
         flag: agentsFlag,
-        dryRun: false,
+        dryRun,
         yes: args.yes === true,
         quietErrors: true,
         skipAgentSync,
         allowEmptyTargets: true,
+        onlyPluginNames: [name],
       })
 
-    /** Reporta falha parcial de plugin e encerra com código 1. */
+    /** Reports partial plugin failure and exits with code 1. */
     const reportSyncFailures = (errors: string[]): void => {
       ui.error(
-        `Servidor \`${name}\` adicionado ao .agents/mcp.json, mas falha ao gerar ${errors.length} plugin(es).`,
+        `Server \`${name}\` added to .agents/mcp.json, but failed to generate ${errors.length} plugin(s).`,
       )
       for (const e of errors) {
         ui.error(e)
       }
       ui.note(
-        '.agents/mcp.json foi mantido. Reexecute `agents-mcp sync` apos resolver os problemas acima.',
+        '.agents/mcp.json was kept. Re-run `agents-mcp sync` after resolving the issues above.',
       )
       process.exit(1)
     }
@@ -278,50 +344,37 @@ export const addCommand = defineCommand({
       process.exit(1)
     }
 
-    // Nao-interativo: falha em colisao com plugin nao gerenciado (sem
-    // auto-renomear nem sobrescrever).
+    // Non-interactive: fail on unmanaged plugin collision (no auto-rename,
+    // no overwrite).
     if (
       !interactiveAdd &&
       isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)
     ) {
       ui.error(
-        `O nome \`${name}\` ja esta em uso por um plugin nao gerenciado em .agents/plugins/${name}/. Passe um --name diferente.`,
+        `The name \`${name}\` is already in use by an unmanaged plugin at .agents/plugins/${name}/. Pass a different --name.`,
       )
       process.exit(1)
     }
 
     // Secret extraction plan.
-    const { writes, warnings } = planSecretExtraction(resolved.definition, {
-      policy: extractSecrets ? 'extract' : 'warn',
-    })
+    const { writes, replacements, warnings } = planSecretExtraction(
+      name,
+      resolved.definition,
+      { policy: extractSecrets ? 'extract' : 'warn' },
+    )
     for (const w of warnings) {
       ui.warn(w)
     }
 
-    // Replace literal secret values with ${KEY} placeholders in canonical.
-    const definition = { ...resolved.definition }
-    for (const w of writes) {
-      if (isStdioServer(definition)) {
-        if (definition.env) {
-          for (const [key, value] of Object.entries(definition.env)) {
-            if (value === w.value) {
-              definition.env[key] = `\${${w.key}}`
-            }
-          }
-        }
-      } else {
-        if (definition.headers) {
-          for (const [key, value] of Object.entries(definition.headers)) {
-            if (value === w.value) {
-              definition.headers[key] = `\${${w.key}}`
-            }
-          }
-        }
-        if (definition.url === w.value) {
-          definition.url = `\${${w.key}}`
-        }
-      }
-    }
+    // Apply secret extraction (pure, never mutates input). Only replaces when
+    // extracting; warn-only leaves the definition unchanged.
+    const definition = extractSecrets
+      ? applySecretExtraction(resolved.definition, {
+          writes,
+          replacements,
+          warnings,
+        })
+      : { ...resolved.definition }
 
     if (!dryRun && extractSecrets && writes.length > 0) {
       const dotenvPath =
@@ -341,12 +394,19 @@ export const addCommand = defineCommand({
 
     canonical[name] = definition
 
+    // Planned file operations for the --dry-run preview.
+    const planned: { type: 'write' | 'remove'; path: string }[] = []
+
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
         $schema: schemaUrl,
         mcpServers: canonical,
       })
+    } else {
+      planned.push({ type: 'write', path })
+    }
 
+    if (!dryRun) {
       const nextState = {
         ...state,
         scope,
@@ -354,16 +414,24 @@ export const addCommand = defineCommand({
         agents: { ...state.agents },
       }
       writeState(scope, ctx, nextState)
+    } else {
+      planned.push({ type: 'write', path: statePath(scope, ctx) })
+    }
+
+    const syncResult = await runPluginAndAgentSync(noSync)
+    if (syncResult.errors.length > 0) {
+      reportSyncFailures(syncResult.errors)
+      return
+    }
+
+    // --dry-run preview: show planned file operations, zero disk writes.
+    if (dryRun && planned.length > 0) {
+      ui.note(formatDryRunActions(planned))
     }
 
     if (!dryRun) {
-      const syncResult = await runPluginAndAgentSync(noSync)
-      if (syncResult.errors.length > 0) {
-        reportSyncFailures(syncResult.errors)
-        return
-      }
+      ui.note(`Added server \`${name}\``)
     }
-    ui.note(`Added server \`${name}\``)
 
     if (interactiveAdd && !dryRun) {
       ui.outro(`Server \`${name}\` added.`)

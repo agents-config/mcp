@@ -10,6 +10,7 @@ import {
 } from '$/src/adapters/opencode'
 import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
+import { join } from 'node:path'
 
 const ctx = createRuntimeContext({
   cwd: '/tmp/proj',
@@ -27,14 +28,84 @@ describe('opencode adapter identity', () => {
       nativeDefault: false,
       nativeDisabled: true,
       cwd: false,
+      layout: 'single-file',
+      rootKey: 'mcp',
     })
   })
 
   it('getConfigPath project and global', () => {
     expect(getConfigPath('project', ctx)).toBe('/tmp/proj/opencode.json')
+    // linux (default platform in CI), no XDG_CONFIG_HOME → ~/.config/opencode/opencode.json
     expect(getConfigPath('global', ctx)).toBe(
       '/tmp/home/.config/opencode/opencode.json',
     )
+  })
+
+  describe('getConfigPath global (OS-aware)', () => {
+    it('linux with XDG_CONFIG_HOME', () => {
+      const linuxCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/home/alex',
+        platform: 'linux',
+        env: { XDG_CONFIG_HOME: '/home/alex/.config' },
+        isTTY: false,
+      })
+      expect(getConfigPath('global', linuxCtx)).toBe(
+        '/home/alex/.config/opencode/opencode.json',
+      )
+    })
+
+    it('linux without XDG_CONFIG_HOME falls back to ~/.config', () => {
+      const linuxCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/home/alex',
+        platform: 'linux',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', linuxCtx)).toBe(
+        '/home/alex/.config/opencode/opencode.json',
+      )
+    })
+
+    it('darwin uses ~/.config/opencode (not Library)', () => {
+      const darwinCtx = createRuntimeContext({
+        cwd: '/tmp/proj',
+        homeDir: '/Users/alex',
+        platform: 'darwin',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', darwinCtx)).toBe(
+        '/Users/alex/.config/opencode/opencode.json',
+      )
+    })
+
+    it('win32 with APPDATA', () => {
+      const winCtx = createRuntimeContext({
+        cwd: 'C:\\proj',
+        homeDir: 'C:\\Users\\alex',
+        platform: 'win32',
+        env: { APPDATA: 'C:\\Users\\alex\\AppData\\Roaming' },
+        isTTY: false,
+      })
+      expect(getConfigPath('global', winCtx)).toBe(
+        'C:\\Users\\alex\\AppData\\Roaming\\opencode\\opencode.json',
+      )
+    })
+
+    it('win32 without APPDATA falls back to ~/AppData/Roaming', () => {
+      const winCtx = createRuntimeContext({
+        cwd: 'C:\\proj',
+        homeDir: 'C:\\Users\\alex',
+        platform: 'win32',
+        env: {},
+        isTTY: false,
+      })
+      expect(getConfigPath('global', winCtx)).toBe(
+        'C:\\Users\\alex\\AppData\\Roaming\\opencode\\opencode.json',
+      )
+    })
   })
 })
 

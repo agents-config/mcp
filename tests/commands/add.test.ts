@@ -558,7 +558,7 @@ describe('commands add (T6: integridade do índice canônico)', () => {
 
       expect(errorMock).toHaveBeenCalled()
       const message = errorMock.mock.calls[0]?.[0] as string
-      expect(message).toContain('inválida')
+      expect(message).toContain('Invalid')
       expect(message).toContain('agents-mcp init --force')
       expect(exitMock).toHaveBeenCalledWith(1)
     } finally {
@@ -627,7 +627,7 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
         ...note.mock.calls.map((call) => String(call[0])),
         ...logSpy.mock.calls.map((call) => String(call[0])),
       ]
-      expect(outputs.some((o) => o.includes('Nenhum agente alvo'))).toBe(true)
+      expect(outputs.some((o) => o.includes('No target agents'))).toBe(true)
       expect(outputs.some((o) => o.includes('agents-mcp sync --agents'))).toBe(
         true,
       )
@@ -791,12 +791,10 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
     }
   })
 
-  it('falha parcial de plugin (arquivo no lugar do diretorio) sai com 1 e mantem o indice', async () => {
+  it('B8: add succeeds even when an unrelated plugin path exists (file instead of directory)', async () => {
     const { ctx, cleanup } = createSandbox()
     const errorMock = vi.fn()
     const note = vi.fn()
-    // `process.exit` é restaurado pelo vitest antes de cada teste, entao
-    // re-mockamos para nao deixar o ambiente de node encerrar o worker.
     const exitMock = vi
       .spyOn(process, 'exit')
       .mockImplementation((() => {}) as NodeJS.Process['exit'])
@@ -815,7 +813,8 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
       })
       const pluginsDir = join(ctx.cwd, '.agents/plugins')
       mkdirSync(pluginsDir, { recursive: true })
-      // Arquivo onde deveria haver um diretorio de plugin -> grava falha com ENOTDIR/EEXIST.
+      // Unrelated plugin path is a file, not a directory — add must not fail
+      // because of it (B8: onlyPluginNames limits sync to the new server).
       const srvPluginPath = join(pluginsDir, 'srv')
       writeFileSync(srvPluginPath, 'not a directory')
 
@@ -835,24 +834,27 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
         rawArgs: ['--command=npx'],
       } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
 
-      expect(exitMock).toHaveBeenCalledWith(1)
-      const errors = errorMock.mock.calls.map((c) => String(c[0]))
-      expect(errors.some((e) => e.includes('falha ao gerar'))).toBe(true)
+      // add succeeds; unrelated plugin path does not cause failure.
+      expect(exitMock).not.toHaveBeenCalled()
+      expect(errorMock).not.toHaveBeenCalled()
 
-      // Indice mantido com os dois servidores.
+      // Both servers are in the canonical index.
       const config = JSON.parse(
         readFileSync(getConfigPath('project', ctx), 'utf8'),
       )
       expect(config.mcpServers.srv).toBeDefined()
       expect(config.mcpServers['my-tool']).toBeDefined()
 
-      // Plugin do servidor novo foi criado; o do collidente nao foi sobrescrito.
+      // Plugin for the newly added server was created.
       expect(
         existsSync(join(ctx.cwd, '.agents/plugins/my-tool/plugin.json')),
       ).toBe(true)
       expect(
         existsSync(join(ctx.cwd, '.agents/plugins/my-tool/mcp.json')),
       ).toBe(true)
+
+      // The unrelated srv path was not touched (still a file, not a directory).
+      expect(existsSync(srvPluginPath)).toBe(true)
       expect(existsSync(join(srvPluginPath, 'plugin.json'))).toBe(false)
     } finally {
       cleanup()

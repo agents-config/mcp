@@ -37,6 +37,8 @@ export const capabilities: AdapterCapabilities = {
   nativeDefault: false,
   nativeDisabled: false,
   cwd: false,
+  layout: 'single-file' as const,
+  rootKey: 'mcpServers',
 }
 
 export function getConfigPath(

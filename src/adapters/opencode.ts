@@ -9,7 +9,7 @@
  * Implements MATRIX.md §1, §2, §3, §7.4.
  */
 
-import { join } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
@@ -37,15 +37,38 @@ export const capabilities: AdapterCapabilities = {
   nativeDefault: false,
   nativeDisabled: true,
   cwd: false,
+  layout: 'single-file' as const,
+  rootKey: 'mcp',
+}
+
+function pjoin(ctx: RuntimeContext, ...paths: string[]): string {
+  return ctx.platform === 'win32' ? win32.join(...paths) : posix.join(...paths)
 }
 
 export function getConfigPath(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): string | null {
-  return scope === 'project'
-    ? join(ctx.cwd, 'opencode.json')
-    : join(ctx.homeDir, '.config', 'opencode', 'opencode.json')
+  if (scope === 'project') {
+    return pjoin(ctx, ctx.cwd, 'opencode.json')
+  }
+  let base: string
+  if (ctx.platform === 'win32') {
+    base = pjoin(
+      ctx,
+      ctx.env.APPDATA || pjoin(ctx, ctx.homeDir, 'AppData', 'Roaming'),
+    )
+  } else if (ctx.platform === 'darwin') {
+    // macOS uses ~/.config directly (does not honor XDG_CONFIG_HOME).
+    base = pjoin(ctx, ctx.homeDir, '.config')
+  } else {
+    // linux
+    base = pjoin(
+      ctx,
+      ctx.env.XDG_CONFIG_HOME || pjoin(ctx, ctx.homeDir, '.config'),
+    )
+  }
+  return pjoin(ctx, base, 'opencode', 'opencode.json')
 }
 
 export async function detect(

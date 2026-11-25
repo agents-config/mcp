@@ -16,9 +16,9 @@ As developers increasingly use multiple AI coding agents within the same codebas
 
 Across the ecosystem, all major AI coding agents have already converged on the `.agents/` directory (notably `.agents/skills`) as the shared standard for agent capabilities. Adopting `.agents/mcp.json` within that same namespace is the natural architectural progression—consolidating skills and MCP tool definitions under one predictable, repository-friendly convention rather than introducing another fragmented root-level configuration file. This specification establishes `.agents/mcp.json` as the single source of truth for workspace and user-level MCP server definitions.
 
-### Delimitação de valor
+### Scope delimitation
 
-A CLI `agents-mcp` gerencia e sincroniza MCPs de forma padronizada dentro do contexto de um projeto (e no escopo global do usuário). O padrão Agent Plugins MCP 1.0.0 continua sendo a referência normativa para a configuração de servidores MCP em plugins individuais. A proposta não cria nem propõe uma variante concorrente do schema Agent Plugins, e não transforma o projeto em um gerenciador geral de plugins além do gerenciamento de MCPs por projeto.
+The `agents-mcp` CLI manages and synchronizes MCPs in a standardized way within the context of a project (and in the user's global scope). The Agent Plugins MCP 1.0.0 standard remains the normative reference for MCP server configuration in individual plugins. The proposal does not create or propose a competing variant of the Agent Plugins schema, and does not transform the project into a general plugin manager beyond per-project MCP management.
 
 ---
 
@@ -135,6 +135,7 @@ To ensure interoperability across `targets` arrays and compiler adapters, the sp
 * `opencode` — OpenCode CLI / Desktop
 * `windsurf` — Windsurf IDE
 * `zed` — Zed Editor
+* `antigravity` — Antigravity agent (per-plugin MCP configs)
 
 ---
 

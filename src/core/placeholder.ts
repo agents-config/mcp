@@ -43,7 +43,7 @@ export interface TranslateResult {
 
 /** Secret key heuristic (BLUEPRINT §13). */
 export const SECRET_KEY_RE =
-  /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|CREDENTIAL|PRIVATE_KEY|AUTH|DSN)(?:_|$)/i
+  /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|CREDENTIAL|PRIVATE_KEY|AUTHORIZATION|AUTH|DSN)(?:_|$)/i
 
 export interface RequiredEnvVar {
   name: string
@@ -56,8 +56,9 @@ export interface RequiredEnvVar {
  * `derivedKey('github', 'token')` → `GITHUB_TOKEN`.
  */
 export function derivedKey(serverName: string, field: string): string {
+  const sanitizedServer = serverName.replace(/[^A-Za-z0-9_]/g, '_')
   const sanitized = field.replace(/[^A-Za-z0-9_]/g, '_')
-  return `${serverName.toUpperCase()}_${sanitized.toUpperCase()}`
+  return `${sanitizedServer.toUpperCase()}_${sanitized.toUpperCase()}`
 }
 
 /**

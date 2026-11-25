@@ -28,6 +28,8 @@ describe('windsurf adapter identity', () => {
       nativeDefault: false,
       nativeDisabled: false,
       cwd: false,
+      layout: 'single-file',
+      rootKey: 'mcpServers',
     })
   })
 

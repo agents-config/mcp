@@ -42,6 +42,13 @@ export interface AdapterCapabilities {
   readonly nativeDefault: boolean
   readonly nativeDisabled: boolean
   readonly cwd: boolean
+  /** Storage layout: `'single-file'` (one native config file) or
+   * `'per-plugin'` (antigravity: one `mcp_config.json` per plugin dir). */
+  readonly layout: 'single-file' | 'per-plugin'
+  /** Native config root key under which servers are stored (`'mcpServers'`,
+   * `'servers'`, `'mcp'`, `'context_servers'`). Omitted for per-plugin
+   * adapters that still declare a root key for extraction interop. */
+  readonly rootKey?: string
 }
 
 export interface AdapterContext extends RuntimeContext {

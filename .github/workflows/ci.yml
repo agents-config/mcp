@@ -49,5 +49,5 @@ jobs:
       - name: Run typecheck
         run: npm run typecheck
 
-      - name: Run core tests
-        run: npx vitest run tests/core
+      - name: Run core and adapter tests
+        run: npx vitest run tests/core tests/adapters

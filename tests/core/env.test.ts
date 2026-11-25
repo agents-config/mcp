@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import {
   appendToDotenv,
+  applySecretExtraction,
+  isSecretValue,
   parseDotenv,
   planSecretExtraction,
   readDotenv,
@@ -9,9 +11,12 @@ import {
   syncEnvExample,
 } from '$/src/core/env'
 import { collectRequiredVars } from '$/src/core/placeholder'
-import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
-import type { CanonicalServer } from '$/src/core/schema'
+import type {
+  CanonicalServer,
+  StdioServer,
+  StreamableHttpServer,
+} from '$/src/core/schema'
 
 describe('env.parseDotenv', () => {
   it('parses KEY=VALUE, quotes, comments, and export prefix', () => {
@@ -109,6 +114,40 @@ describe('env.resolveVar', () => {
   })
 })
 
+describe('env.isSecretValue', () => {
+  it('detects known prefixes at start of string', () => {
+    expect(isSecretValue('ghp_1234567890abcdef')).toBe(true)
+    expect(isSecretValue('sk-1234567890abcdef1234')).toBe(true)
+    expect(isSecretValue('xoxb-1234567890')).toBe(true)
+    expect(isSecretValue('AIzaSyAbcdef1234567890')).toBe(true)
+    expect(isSecretValue('AKIAIOSFODNN7EXAMPLE')).toBe(true)
+  })
+
+  it('detects known prefixes after Bearer / Basic / Token', () => {
+    expect(isSecretValue('Bearer sk-1234567890abcdef1234')).toBe(true)
+    expect(isSecretValue('Token ghp_1234567890abcdef')).toBe(true)
+    // Low-entropy token after Bearer is not a secret value by itself.
+    expect(isSecretValue('Bearer production')).toBe(false)
+  })
+
+  it('detects URL credentials', () => {
+    expect(isSecretValue('https://user:pass@api.example.com/mcp')).toBe(true)
+  })
+
+  it('detects high-entropy strings (≥ 20 chars, ≥ 3 char classes)', () => {
+    expect(isSecretValue('Abcdef1234567890!@#$')).toBe(true)
+  })
+
+  it('rejects non-secrets: plain values, URLs, paths, short strings', () => {
+    expect(isSecretValue('production')).toBe(false)
+    expect(isSecretValue('NODE_ENV')).toBe(false)
+    expect(isSecretValue('https://api.example.com/mcp')).toBe(false)
+    expect(isSecretValue('/usr/local/bin/server')).toBe(false)
+    expect(isSecretValue('C:\\Windows\\system32')).toBe(false)
+    expect(isSecretValue('short')).toBe(false)
+  })
+})
+
 describe('env.planSecretExtraction', () => {
   const stdioServer: CanonicalServer = {
     type: 'stdio',
@@ -127,17 +166,30 @@ describe('env.planSecretExtraction', () => {
     headers: { Authorization: 'sk-live_1234567890abcdef' },
   }
 
-  it('does not flag non-secret values such as NODE_ENV=production', () => {
-    const result = planSecretExtraction(stdioServer, { policy: 'extract' })
+  it('derives env var names from serverName (not command)', () => {
+    const result = planSecretExtraction('github', stdioServer, {
+      policy: 'extract',
+    })
     const keys = result.writes.map((w) => w.key)
-    expect(keys).not.toContain('NPX_NODE_ENV')
+    expect(keys).toContain('GITHUB_API_TOKEN')
+    expect(keys).not.toContain('NPX_API_TOKEN')
+  })
+
+  it('does not flag non-secret values such as NODE_ENV=production', () => {
+    const result = planSecretExtraction('github', stdioServer, {
+      policy: 'extract',
+    })
+    const keys = result.writes.map((w) => w.key)
+    expect(keys).not.toContain('GITHUB_NODE_ENV')
     expect(result.writes.length).toBeGreaterThan(0)
   })
 
   it('flags secret key patterns regardless of value', () => {
-    const result = planSecretExtraction(stdioServer, { policy: 'extract' })
+    const result = planSecretExtraction('github', stdioServer, {
+      policy: 'extract',
+    })
     const keys = result.writes.map((w) => w.key)
-    expect(keys).toContain('NPX_API_TOKEN')
+    expect(keys).toContain('GITHUB_API_TOKEN')
   })
 
   it('flags secret value prefixes and URL credentials', () => {
@@ -146,34 +198,35 @@ describe('env.planSecretExtraction', () => {
       url: 'https://user:pass@api.example.com/mcp',
       headers: { Authorization: 'sk-live_1234567890abcdef' },
     }
-    const result = planSecretExtraction(httpServerWithCreds, {
+    const result = planSecretExtraction('linear', httpServerWithCreds, {
       policy: 'extract',
     })
     const keys = result.writes.map((w) => w.key)
-    expect(keys).toContain('HTTP_AUTHORIZATION')
-    expect(keys).toContain('HTTP_URL')
+    expect(keys).toContain('LINEAR_AUTHORIZATION')
+    expect(keys).toContain('LINEAR_URL')
   })
 
   it('does not flag a plain URL without embedded credentials', () => {
-    const httpServer: CanonicalServer = {
-      type: 'streamable-http',
-      url: 'https://api.example.com/mcp',
-      headers: { Authorization: 'sk-live_1234567890abcdef' },
-    }
-    const result = planSecretExtraction(httpServer, { policy: 'extract' })
+    const result = planSecretExtraction('linear', httpServer, {
+      policy: 'extract',
+    })
     const keys = result.writes.map((w) => w.key)
-    expect(keys).toContain('HTTP_AUTHORIZATION')
-    expect(keys).not.toContain('HTTP_URL')
+    expect(keys).toContain('LINEAR_AUTHORIZATION')
+    expect(keys).not.toContain('LINEAR_URL')
   })
 
   it('warn policy produces warnings but no writes', () => {
-    const result = planSecretExtraction(stdioServer, { policy: 'warn' })
+    const result = planSecretExtraction('github', stdioServer, {
+      policy: 'warn',
+    })
     expect(result.writes).toEqual([])
     expect(result.warnings.length).toBeGreaterThan(0)
   })
 
   it('extract policy produces writes', () => {
-    const result = planSecretExtraction(stdioServer, { policy: 'extract' })
+    const result = planSecretExtraction('github', stdioServer, {
+      policy: 'extract',
+    })
     expect(result.writes.length).toBeGreaterThan(0)
     for (const w of result.writes) {
       expect(w.key).toBeDefined()
@@ -187,7 +240,9 @@ describe('env.planSecretExtraction', () => {
       url: 'https://x/mcp',
       headers: { Authorization: 'Bearer ${API_TOKEN}' },
     }
-    const result = planSecretExtraction(symbolic, { policy: 'extract' })
+    const result = planSecretExtraction('linear', symbolic, {
+      policy: 'extract',
+    })
     expect(result.writes).toEqual([])
     expect(result.warnings).toEqual([])
   })
@@ -198,10 +253,194 @@ describe('env.planSecretExtraction', () => {
       url: 'https://api.example.com/sse',
       headers: { Authorization: 'sk-live_sse1234567890abcdef' },
     }
-    const result = planSecretExtraction(sseServer, { policy: 'extract' })
+    const result = planSecretExtraction('linear', sseServer, {
+      policy: 'extract',
+    })
     const keys = result.writes.map((w) => w.key)
-    expect(keys).toContain('HTTP_AUTHORIZATION')
-    expect(keys).not.toContain('HTTP_URL')
+    expect(keys).toContain('LINEAR_AUTHORIZATION')
+    expect(keys).not.toContain('LINEAR_URL')
+  })
+
+  it('detects Authorization Bearer token with structured replacement metadata', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://api.example.com/mcp',
+      headers: { Authorization: 'Bearer sk-1234567890abcdef1234' },
+    }
+    const result = planSecretExtraction('linear', server, {
+      policy: 'extract',
+    })
+    const authWrite = result.writes.find(
+      (w) => w.key === 'LINEAR_AUTHORIZATION',
+    )
+    expect(authWrite).toBeDefined()
+    expect(authWrite!.value).toBe('sk-1234567890abcdef1234')
+
+    const rep = result.replacements.find((r) => r.location === 'headers')
+    expect(rep).toBeDefined()
+    expect(rep!.fieldKey).toBe('Authorization')
+    expect(rep!.match).toBe('sk-1234567890abcdef1234')
+    expect(rep!.envKey).toBe('LINEAR_AUTHORIZATION')
+    expect(rep!.secretValue).toBe('sk-1234567890abcdef1234')
+  })
+
+  it('detects high-entropy tokens (≥ 20 chars, 3 char classes)', () => {
+    const server: CanonicalServer = {
+      type: 'stdio',
+      command: 'mcp-server',
+      args: [],
+      env: { API_TOKEN: 'Abcdef1234567890!@#$' },
+    }
+    const result = planSecretExtraction('entropy', server, {
+      policy: 'extract',
+    })
+    const keys = result.writes.map((w) => w.key)
+    expect(keys).toContain('ENTROPY_API_TOKEN')
+  })
+
+  it('does not flag high-entropy false positives (plain URLs, paths, short values)', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://api.example.com/v1/mcp',
+      headers: { 'X-Nonce': 'nonce123' },
+    }
+    const result = planSecretExtraction('entropy', server, {
+      policy: 'extract',
+    })
+    expect(result.writes).toEqual([])
+    expect(result.warnings).toEqual([])
+  })
+
+  it('detects positional secret in args with argIndex', () => {
+    const server: CanonicalServer = {
+      type: 'stdio',
+      command: 'mcp-server',
+      args: ['--token', 'ghp_1234567890abcdef'],
+      env: {},
+    }
+    const result = planSecretExtraction('cli', server, {
+      policy: 'extract',
+    })
+    const keys = result.writes.map((w) => w.key)
+    expect(keys).toContain('CLI_ARGS')
+    const rep = result.replacements.find((r) => r.location === 'args')
+    expect(rep).toBeDefined()
+    expect(rep!.argIndex).toBe(1)
+    expect(rep!.match).toBe('ghp_1234567890abcdef')
+    expect(rep!.envKey).toBe('CLI_ARGS')
+  })
+
+  it('URL credentials replacement keeps the @ and host', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://user:pass@api.example.com/mcp',
+    }
+    const result = planSecretExtraction('db', server, {
+      policy: 'extract',
+    })
+    const rep = result.replacements.find((r) => r.location === 'url')
+    expect(rep).toBeDefined()
+    expect(rep!.fieldKey).toBe('url')
+    expect(rep!.match).toBe('user:pass')
+    expect(rep!.secretValue).toBe('user:pass')
+  })
+
+  it('avoids cross-server collisions: same field key, different server names', () => {
+    const a = planSecretExtraction('alpha', stdioServer, {
+      policy: 'extract',
+    })
+    const b = planSecretExtraction('beta', stdioServer, {
+      policy: 'extract',
+    })
+    const aKeys = a.writes.map((w) => w.key)
+    const bKeys = b.writes.map((w) => w.key)
+    expect(aKeys).toContain('ALPHA_API_TOKEN')
+    expect(bKeys).toContain('BETA_API_TOKEN')
+    expect(aKeys).not.toContain('BETA_API_TOKEN')
+    expect(bKeys).not.toContain('ALPHA_API_TOKEN')
+  })
+})
+
+describe('env.applySecretExtraction', () => {
+  it('replaces Authorization Bearer token preserving the Bearer prefix', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://api.example.com/mcp',
+      headers: { Authorization: 'Bearer sk-1234567890abcdef1234' },
+    }
+    const plan = planSecretExtraction('linear', server, {
+      policy: 'extract',
+    })
+    const result = applySecretExtraction(server, plan) as StreamableHttpServer
+    expect(result.headers).toEqual({
+      Authorization: 'Bearer ${LINEAR_AUTHORIZATION}',
+    })
+    expect(result.url).toBe('https://api.example.com/mcp')
+  })
+
+  it('replaces positional secret in args', () => {
+    const server: CanonicalServer = {
+      type: 'stdio',
+      command: 'mcp-server',
+      args: ['--token', 'ghp_1234567890abcdef'],
+      env: {},
+    }
+    const plan = planSecretExtraction('cli', server, { policy: 'extract' })
+    const result = applySecretExtraction(server, plan) as StdioServer
+    expect(result.args).toEqual(['--token', '${CLI_ARGS}'])
+  })
+
+  it('replaces URL credentials keeping scheme, @ and host', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://user:pass@api.example.com/mcp',
+    }
+    const plan = planSecretExtraction('db', server, { policy: 'extract' })
+    const result = applySecretExtraction(server, plan) as StreamableHttpServer
+    expect(result.url).toBe('https://${DB_URL}@api.example.com/mcp')
+  })
+
+  it('replaces env secrets by field key', () => {
+    const server: CanonicalServer = {
+      type: 'stdio',
+      command: 'mcp-server',
+      args: [],
+      env: { API_TOKEN: 'ghp_1234567890abcdef', NODE_ENV: 'production' },
+    }
+    const plan = planSecretExtraction('cli', server, { policy: 'extract' })
+    const result = applySecretExtraction(server, plan) as StdioServer
+    expect(result.env).toEqual({
+      API_TOKEN: '${CLI_API_TOKEN}',
+      NODE_ENV: 'production',
+    })
+  })
+
+  it('does not mutate the input server (pure)', () => {
+    const server: CanonicalServer = {
+      type: 'stdio',
+      command: 'mcp-server',
+      args: ['--token', 'ghp_1234567890abcdef'],
+      env: { API_TOKEN: 'ghp_1234567890abcdef' },
+    }
+    const plan = planSecretExtraction('cli', server, { policy: 'extract' })
+    const result = applySecretExtraction(server, plan) as StdioServer
+    // Input untouched.
+    expect(server.args).toEqual(['--token', 'ghp_1234567890abcdef'])
+    expect(server.env).toEqual({ API_TOKEN: 'ghp_1234567890abcdef' })
+    // Output replaced.
+    expect(result.args).toEqual(['--token', '${CLI_ARGS}'])
+    expect(result.env).toEqual({ API_TOKEN: '${CLI_API_TOKEN}' })
+  })
+
+  it('returns an equivalent server when there are no replacements', () => {
+    const server: CanonicalServer = {
+      type: 'streamable-http',
+      url: 'https://api.example.com/mcp',
+      headers: { 'X-Nonce': 'abc' },
+    }
+    const plan = planSecretExtraction('safe', server, { policy: 'extract' })
+    const result = applySecretExtraction(server, plan)
+    expect(result).toEqual(server)
   })
 })
 

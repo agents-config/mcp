@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { AgentIdSchema } from '$/src/core/schema'
 import { AGENTS_DIR, STATE_FILE, STATE_VERSION } from '$/src/config'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import { ensureIgnored } from '$/src/core/gitignore'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
@@ -106,6 +107,11 @@ export function writeState(
   state: SyncState,
 ): void {
   const path = getStatePath(scope, ctx)
+  // Lazily protect the project-scope sync state file inside the managed
+  // .gitignore block before writing it.
+  if (scope === 'project') {
+    ensureIgnored(ctx.cwd, [`${AGENTS_DIR}/${STATE_FILE}`])
+  }
   writeFileAtomic(path, JSON.stringify(state, null, 2) + '\n')
 }
 

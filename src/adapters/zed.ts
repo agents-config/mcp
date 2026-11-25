@@ -9,7 +9,7 @@
  * Implements MATRIX.md §1, §2, §3, §7.6.
  */
 
-import { join } from 'node:path'
+import { posix, win32 } from 'node:path'
 import { parse } from 'jsonc-parser'
 import { readTextFile } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
@@ -37,15 +37,42 @@ export const capabilities: AdapterCapabilities = {
   nativeDefault: false,
   nativeDisabled: false,
   cwd: false,
+  layout: 'single-file' as const,
+  rootKey: 'context_servers',
+}
+
+function pjoin(ctx: RuntimeContext, ...paths: string[]): string {
+  return ctx.platform === 'win32' ? win32.join(...paths) : posix.join(...paths)
 }
 
 export function getConfigPath(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): string | null {
-  return scope === 'project'
-    ? join(ctx.cwd, '.zed', 'settings.json')
-    : join(ctx.homeDir, '.config', 'zed', 'settings.json')
+  if (scope === 'project') {
+    return pjoin(ctx, ctx.cwd, '.zed', 'settings.json')
+  }
+  let base: string
+  let subdir: string
+  if (ctx.platform === 'win32') {
+    base = pjoin(
+      ctx,
+      ctx.env.APPDATA || pjoin(ctx, ctx.homeDir, 'AppData', 'Roaming'),
+    )
+    subdir = 'Zed'
+  } else if (ctx.platform === 'darwin') {
+    // macOS uses ~/.config directly (does not honor XDG_CONFIG_HOME).
+    base = pjoin(ctx, ctx.homeDir, '.config')
+    subdir = 'zed'
+  } else {
+    // linux
+    base = pjoin(
+      ctx,
+      ctx.env.XDG_CONFIG_HOME || pjoin(ctx, ctx.homeDir, '.config'),
+    )
+    subdir = 'zed'
+  }
+  return pjoin(ctx, base, subdir, 'settings.json')
 }
 
 export async function detect(
