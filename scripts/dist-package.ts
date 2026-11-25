@@ -31,6 +31,9 @@ const distPkg: Record<string, unknown> = {
   bin: {
     'agents-mcp': './index.js',
   },
+  publishConfig: {
+    access: 'public',
+  },
   files: ['index.js'],
 }
 

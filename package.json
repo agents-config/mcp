@@ -1,5 +1,5 @@
 {
-  "name": "agents-mcp",
+  "name": "@agents-config/mcp",
   "version": "0.2.0",
   "description": "One .agents/mcp.json to rule them all. A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across any AI agent.",
   "keywords": [
@@ -22,13 +22,13 @@
     "dotenv",
     "devtools"
   ],
-  "homepage": "https://github.com/agents-mcp/cli#readme",
+  "homepage": "https://github.com/agents-config/mcp#readme",
   "bugs": {
-    "url": "https://github.com/agents-mcp/cli/issues"
+    "url": "https://github.com/agents-config/mcp/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/agents-mcp/cli.git"
+    "url": "git+https://github.com/agents-config/mcp.git"
   },
   "license": "MIT",
   "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
@@ -48,7 +48,7 @@
     "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
     "dist:build": "npm run verify",
     "dist:package": "tsx scripts/dist-package.ts",
-    "dist:publish": "npm publish ./dist",
+    "dist:publish": "npm publish ./dist --access public",
     "dist": "run-s dist:*",
     "cli": "node dist/index.js"
   },

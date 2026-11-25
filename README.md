@@ -4,7 +4,7 @@
 
 A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, and Antigravity.
 
-[![npm version](https://img.shields.io/npm/v/agents-mcp.svg)](https://www.npmjs.com/package/agents-mcp)
+[![npm version](https://img.shields.io/npm/v/@agents-config/mcp.svg)](https://www.npmjs.com/package/@agents-config/mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Spec: v0.1.0](https://img.shields.io/badge/Spec-v0.1.0-emerald.svg)](./spec/SPEC.md)
 
@@ -40,7 +40,7 @@ Because the `.agents/` namespace is already the de facto industry standard for a
                     │   .agents/mcp.json   │  ◄── Single Source of Truth (Git)
                     └──────────┬───────────┘
                                │
-		              npx agents-mcp sync
+		              npx @agents-config/mcp sync
                                │
       ┌──────────────┬─────────┴─────────┬──────────────┐
       ▼              ▼                   ▼              ▼
@@ -59,7 +59,7 @@ them, and it never adds them to `.gitignore`.
 Migrate and unify everything in one command:
 
 ```bash
-npx agents-mcp import
+npx @agents-config/mcp import
 ```
 
 This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, generates `.agents/mcp.json`, and keeps your active agents synced. Your existing agent files are updated in place, never deleted.
@@ -67,9 +67,9 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
 ### Starting from scratch?
 
 1. Initialize `.agents/mcp.json` and select your agents:
-   `npx agents-mcp init`
+   `npx @agents-config/mcp init`
 2. Add an MCP server from GitHub, npm, MCP Registry, or direct flags
-   `npx agents-mcp add modelcontextprotocol/server-github`
+   `npx @agents-config/mcp add modelcontextprotocol/server-github`
 
    - **External sources:** pass a GitHub URL, `owner/repo`, npm package, or MCP Registry entry as the positional `<source>` argument (`agents-mcp add <source>`).
    - **Direct flags:** use `--command`, `--arg` (repeatable), `--http`, `--sse`, `--env` (`KEY=VALUE`, repeatable), `--header` (`Name: Value`, repeatable), `--cwd`, `--name`.
@@ -77,7 +77,7 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
    - **`--extract-secrets` (opt-in):** pass `--extract-secrets` to write detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replace them with `${VAR}` placeholders in `.agents/mcp.json`. Without it, secrets are only warned about, not extracted. Real secret values never reach canonical/native files, logs, errors, or `--dry-run` output.
 
 3. Sync changes across all targeted agents
-   `npx agents-mcp sync`
+   `npx @agents-config/mcp sync`
 
 **Requirements:** Node.js 22 or newer.
 

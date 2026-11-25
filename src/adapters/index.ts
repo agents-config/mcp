@@ -7,8 +7,8 @@
  */
 
 import { z } from 'zod'
-import type { AgentIdSchema } from '$/src/core/schema'
 import { AGENT_ORDER } from '$/src/config'
+import type { AgentIdSchema } from '$/src/core/schema'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 import type { SyncState } from '$/src/core/state'
 import type {
