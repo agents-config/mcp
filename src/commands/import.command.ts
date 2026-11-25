@@ -16,7 +16,9 @@ import {
   persistCanonicalConfig,
   persistSyncState,
   isDryRun,
+  isGlobalFlag,
   isNoSyncFlag,
+  isYesFlag,
   parseAgentsFlag,
   formatConfigValidationError,
   formatDryRunActions,
@@ -59,14 +61,14 @@ export const importCommand = defineCommand({
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     const noSync = isNoSyncFlag(args, rawArgs)
     const force = args.force === true
     const extractSecrets = args['extract-secrets'] === true
-    const yes = args.yes === true
+    const yes = isYesFlag(args)
     const agentsFlag = parseAgentsFlag(args, rawArgs)
 
     // Load + validate canonical config. A missing config is tolerated (import

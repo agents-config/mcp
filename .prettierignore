@@ -8,5 +8,6 @@ spec/
 docs/decisions/
 .agents/
 skills/
+opencode.json
 repomix-output.md
 skills-lock.json

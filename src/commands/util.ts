@@ -170,6 +170,24 @@ export function isDryRun(args: Record<string, unknown>): boolean {
   return args['dry-run'] === true
 }
 
+/**
+ * Whether the global scope was requested, accepting both the long flag
+ * (`--global`) and the short alias (`-g`). Subcommands do not inherit the
+ * root command aliases, so the raw token may arrive as `args.g`.
+ */
+export function isGlobalFlag(args: Record<string, unknown>): boolean {
+  return args.global === true || args.g === true
+}
+
+/**
+ * Whether non-interactive mode was requested, accepting both the long flag
+ * (`--yes`) and the short alias (`-y`). Subcommands do not inherit the root
+ * command aliases, so the raw token may arrive as `args.y`.
+ */
+export function isYesFlag(args: Record<string, unknown>): boolean {
+  return args.yes === true || args.y === true
+}
+
 /** Format planned file operations for a `--dry-run` preview. */
 export function formatDryRunActions(
   actions: { type: 'write' | 'remove'; path: string }[],

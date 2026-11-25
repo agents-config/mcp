@@ -10,6 +10,8 @@ import {
   createUiAndCtx,
   configPath,
   isDryRun,
+  isGlobalFlag,
+  isYesFlag,
   loadCanonicalOrExit,
 } from '$/src/commands/util'
 import { loadState } from '$/src/core/state'
@@ -34,11 +36,11 @@ export const listCommand = defineCommand({
     },
   },
   run: async ({ args }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
     const includeAll = args.all === true
     const scopes: ConfigScope[] = includeAll
       ? ['project', 'global']
-      : args.global === true
+      : isGlobalFlag(args)
         ? ['global']
         : ['project']
 

@@ -6,7 +6,12 @@
 
 import { defineCommand } from 'citty'
 import { runSync, type SyncOptions } from './sync'
-import { createUiAndCtx, parseAgentsFlag } from '$/src/commands/util'
+import {
+  createUiAndCtx,
+  isGlobalFlag,
+  isYesFlag,
+  parseAgentsFlag,
+} from '$/src/commands/util'
 
 export const syncCommand = defineCommand({
   meta: {
@@ -16,8 +21,8 @@ export const syncCommand = defineCommand({
   },
   args: {},
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = args.global ? 'global' : 'project'
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = isGlobalFlag(args) ? 'global' : 'project'
     const flag = parseAgentsFlag(args, rawArgs)
     const dryRun = args['dry-run'] === true
 
@@ -37,7 +42,7 @@ export const syncCommand = defineCommand({
       ctx,
       flag,
       dryRun,
-      yes: args.yes === true,
+      yes: isYesFlag(args),
     })
 
     if (summary.errors.length > 0 && !dryRun) {

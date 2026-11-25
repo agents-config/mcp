@@ -11,6 +11,8 @@ import {
   configPath,
   persistCanonicalConfig,
   isDryRun,
+  isGlobalFlag,
+  isYesFlag,
   loadSyncState,
   persistSyncState,
   isNoSyncFlag,
@@ -35,12 +37,12 @@ export const removeCommand = defineCommand({
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     const noSync = isNoSyncFlag(args, rawArgs)
-    const yes = args.yes === true
+    const yes = isYesFlag(args)
     const agentsFlag = parseAgentsFlag(args, rawArgs)
     const name = args._?.[0] as string | undefined
 

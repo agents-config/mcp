@@ -18,6 +18,8 @@ import {
   persistCanonicalConfig,
   persistSyncState,
   isDryRun,
+  isGlobalFlag,
+  isYesFlag,
   parseAgentsFlag,
   statePath,
   formatDryRunActions,
@@ -109,8 +111,8 @@ export const addCommand = defineCommand({
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     // `citty`/`mri` converte `--no-sync` em `args.sync === false`; a checagem
@@ -145,8 +147,7 @@ export const addCommand = defineCommand({
     const hasDirectSource =
       Boolean(options.command || options.http || options.sse) ||
       options.arg.length > 0
-    const isInteractive =
-      ctx.isTTY && ctx.env.CI !== 'true' && args.yes !== true
+    const isInteractive = ctx.isTTY && ctx.env.CI !== 'true' && !isYesFlag(args)
 
     /**
      * Determine if a positional argument looks like an external source reference
@@ -225,9 +226,9 @@ export const addCommand = defineCommand({
         },
         {
           fetch: globalThis.fetch,
-          yes: args.yes === true,
+          yes: isYesFlag(args),
           selectCandidate:
-            isInteractive && !args.yes
+            isInteractive && !isYesFlag(args)
               ? async (candidates: Candidate[]) => {
                   if (candidates.length === 0) return null
                   // Exact name match wins automatically
@@ -297,7 +298,7 @@ export const addCommand = defineCommand({
         ctx,
         flag: agentsFlag,
         dryRun,
-        yes: args.yes === true,
+        yes: isYesFlag(args),
         quietErrors: true,
         skipAgentSync,
         allowEmptyTargets: true,

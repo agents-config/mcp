@@ -33,7 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `remove` now preserves the other servers in the canonical config when deleting one (fixes silent data loss: previously all other servers were wiped).
 - `remove --no-sync` respects the flag and does not sync agents: writes only canonical, cleans managed plugin files locally, and preserves `state.targets`/`state.agents`.
-- Managed plugin file cleanup on server removal (`plugin.json`, `mcp.json`, `mcp_config.json`, deleting the directory only if empty) and `mcp_config.json` removal when deselecting `antigravity` on `sync`.
+- Managed plugin file cleanup when a server leaves the canonical config (`plugin.json`, `mcp.json`, `mcp_config.json`, deleting the directory only if empty); deselecting an agent no longer deletes its files.
+- `sync` is non-destructive for every agent: omitting `antigravity` from `--agents` no longer removes `.agents/plugins/<name>/mcp_config.json` or deletes `state.agents.antigravity` (ADR-0013).
+- `sync --agents <list>` now appends newly requested targets to `state.targets` (deduplicated, preserving order) instead of overwriting it, so a later plain `sync` still targets previously configured agents (ADR-0013).
+- Global flags placed before the subcommand (`-g`/`--global`, `-y`/`--yes`, `--dry-run`, `--agents`) are no longer silently dropped; short aliases are canonicalized for every subcommand.
+- `sync` rejects unexpected positional arguments with exit code `2` and an actionable message instead of silently falling back to stale targets.
 - Plugin cleanup failures on `sync` are reported with exit code `1`, and the plugin remains registered for retry on the next `sync`.
 
 ## [0.1.1] - 2026-11-19

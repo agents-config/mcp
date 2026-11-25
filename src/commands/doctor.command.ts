@@ -21,6 +21,8 @@ import {
   createUiAndCtx,
   configPath,
   isDryRun,
+  isGlobalFlag,
+  isYesFlag,
   parseAgentsFlag,
 } from '$/src/commands/util'
 import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
@@ -512,8 +514,8 @@ export const doctorCommand = defineCommand({
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const dryRun = isDryRun(args)
     const flag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
 

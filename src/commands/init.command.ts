@@ -17,6 +17,8 @@ import {
   persistSyncState,
   persistCanonicalConfig,
   isDryRun,
+  isGlobalFlag,
+  isYesFlag,
   parseAgentsFlag,
   formatDryRunActions,
 } from '$/src/commands/util'
@@ -44,8 +46,8 @@ export const initCommand = defineCommand({
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     const force = args.force === true
@@ -68,7 +70,7 @@ export const initCommand = defineCommand({
     let targets: AgentId[]
     if (agentsFlag) {
       targets = await resolveTargetsAsync({ flag: agentsFlag, state, ctx })
-    } else if (args.yes === true || !ctx.isTTY || ctx.env.CI === 'true') {
+    } else if (isYesFlag(args) || !ctx.isTTY || ctx.env.CI === 'true') {
       targets = await resolveTargetsAsync({ flag: undefined, state, ctx })
     } else {
       // Interactive: multi-select agents, pre-select detected agents (B7).

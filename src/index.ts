@@ -73,12 +73,28 @@ const SUBCOMMANDS = [
 ]
 
 /** Boolean global flags accepted before or after the subcommand token. */
-const GLOBAL_BOOLEAN_FLAGS = new Set([
-  '-g',
-  '--global',
-  '-y',
-  '--yes',
-  '--dry-run',
+const GLOBAL_BOOLEAN_FLAGS = new Set(['--global', '--yes', '--dry-run'])
+
+/** Short aliases canonicalized to their long form for subcommand parsing. */
+const SHORT_GLOBAL_FLAGS: Readonly<Record<string, string>> = {
+  '-g': '--global',
+  '-y': '--yes',
+}
+
+/**
+ * Long flags that consume the following token as a value. Aliases like `-y`
+ * must not be canonicalized when they are actually an argument value (e.g.
+ * `add x --command npx --arg -y`).
+ */
+const VALUE_FLAGS = new Set([
+  '--arg',
+  '--env',
+  '--header',
+  '--command',
+  '--http',
+  '--sse',
+  '--cwd',
+  '--name',
 ])
 
 /** Index of the first subcommand token, ignoring tokens after `--`. */
@@ -92,12 +108,15 @@ function findSubcommandIndex(rawArgs: readonly string[]): number {
 }
 
 /**
- * Converte `--agents <valor>` em `--agents=<valor>`, preservando tokens após
- * `--` literalmente.
+ * Normaliza tokens de flag: converte `--agents <valor>` em `--agents=<valor>` e
+ * canonicaliza os aliases globais (`-g` → `--global`, `-y` → `--yes`), já que
+ * os subcomandos do `citty` não herdam os aliases do comando raiz. Tokens após
+ * `--` são preservados literalmente.
  */
-function normalizeAgentsFlag(rawArgs: readonly string[]): string[] {
+function normalizeFlagTokens(rawArgs: readonly string[]): string[] {
   const normalized: string[] = []
   let literal = false
+  let previousWasValueFlag = false
 
   for (let i = 0; i < rawArgs.length; i++) {
     const token = rawArgs[i]
@@ -109,11 +128,34 @@ function normalizeAgentsFlag(rawArgs: readonly string[]): string[] {
       continue
     }
 
-    if (!literal && token === '--agents') {
-      const next = rawArgs[i + 1]
-      if (next !== undefined && !next.startsWith('-')) {
-        normalized.push(`--agents=${next}`)
-        i++
+    if (!literal) {
+      // The token is the value of a preceding `--flag <value>`; never rewrite it.
+      if (previousWasValueFlag) {
+        normalized.push(token)
+        previousWasValueFlag = false
+        continue
+      }
+
+      if (token === '--agents') {
+        const next = rawArgs[i + 1]
+        if (next !== undefined && !next.startsWith('-')) {
+          normalized.push(`--agents=${next}`)
+          i++
+          continue
+        }
+        normalized.push(token)
+        continue
+      }
+
+      if (VALUE_FLAGS.has(token)) {
+        normalized.push(token)
+        previousWasValueFlag = true
+        continue
+      }
+
+      const longForm = SHORT_GLOBAL_FLAGS[token]
+      if (longForm !== undefined) {
+        normalized.push(longForm)
         continue
       }
     }
@@ -127,11 +169,12 @@ function normalizeAgentsFlag(rawArgs: readonly string[]): string[] {
 /**
  * Normaliza `rawArgs` para o `citty`.
  *
- * Além de converter `--agents <valor>` em `--agents=<valor>`, move flags
- * globais posicionadas **antes** do subcomando para logo depois dele: o
- * `citty` corta `rawArgs` no índice do subcomando e descarta tudo o que vem
- * antes. Sem isso, `agents-mcp --agents opencode sync` e `agents-mcp -g sync`
- * perderiam as flags silenciosamente.
+ * Além de converter `--agents <valor>` em `--agents=<valor>` e canonicalizar
+ * `-g`/`-y` para `--global`/`--yes`, move flags globais posicionadas **antes**
+ * do subcomando para logo depois dele: o `citty` corta `rawArgs` no índice do
+ * subcomando e descarta tudo o que vem antes. Sem isso,
+ * `agents-mcp --agents opencode sync` e `agents-mcp -g sync` perderiam as flags
+ * silenciosamente.
  *
  * Exemplo: `['--agents', 'opencode,antigravity', 'sync']` →
  * `['sync', '--agents=opencode,antigravity']`.
@@ -141,11 +184,11 @@ function normalizeAgentsFlag(rawArgs: readonly string[]): string[] {
 export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
   const subcommandIndex = findSubcommandIndex(rawArgs)
   if (subcommandIndex === -1) {
-    return normalizeAgentsFlag(rawArgs)
+    return normalizeFlagTokens(rawArgs)
   }
 
-  const prefix = rawArgs.slice(0, subcommandIndex)
-  const rest = normalizeAgentsFlag(rawArgs.slice(subcommandIndex))
+  const prefix = normalizeFlagTokens(rawArgs.slice(0, subcommandIndex))
+  const rest = normalizeFlagTokens(rawArgs.slice(subcommandIndex))
   const subcommand = rest[0] as string
 
   // Tokens que não são flags globais conhecidas permanecem antes do

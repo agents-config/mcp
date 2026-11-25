@@ -53,23 +53,59 @@ describe('normalizeGlobalArgs', () => {
     ])
   })
 
-  it('move flags globais booleanas de antes do subcomando para depois dele', () => {
+  it('canonicaliza flags globais curtas de antes do subcomando', () => {
     expect(normalizeGlobalArgs(['-g', '--dry-run', 'sync'])).toEqual([
       'sync',
-      '-g',
+      '--global',
       '--dry-run',
     ])
-    expect(normalizeGlobalArgs(['--yes', '-y', 'sync'])).toEqual([
-      'sync',
-      '--yes',
-      '-y',
-    ])
+    expect(normalizeGlobalArgs(['-y', 'sync'])).toEqual(['sync', '--yes'])
   })
 
   it('não reposiciona nada quando o separador -- vem antes do subcomando', () => {
     expect(normalizeGlobalArgs(['--agents', 'opencode', '--', 'sync'])).toEqual(
       ['--agents=opencode', '--', 'sync'],
     )
+  })
+
+  it('canonicaliza -g/-y depois do subcomando e preserva tokens após --', () => {
+    expect(normalizeGlobalArgs(['sync', '-g', '-y'])).toEqual([
+      'sync',
+      '--global',
+      '--yes',
+    ])
+    expect(normalizeGlobalArgs(['sync', '--', '-g', '-y'])).toEqual([
+      'sync',
+      '--',
+      '-g',
+      '-y',
+    ])
+  })
+
+  it('não canonicaliza -y usado como valor de uma flag de valor', () => {
+    expect(
+      normalizeGlobalArgs([
+        'add',
+        'x',
+        '--command',
+        'npx',
+        '--arg',
+        '-y',
+        '--arg',
+        'pkg',
+        '-g',
+      ]),
+    ).toEqual([
+      'add',
+      'x',
+      '--command',
+      'npx',
+      '--arg',
+      '-y',
+      '--arg',
+      'pkg',
+      '--global',
+    ])
   })
 })
 
