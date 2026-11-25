@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-25
+
 ### Added
 
 - `antigravity` agent adapter and plugin sync support: per-plugin layouts under `.agents/plugins/<name>/` (`plugin.json`, `mcp.json`, plus `mcp_config.json` when `antigravity` is targeted), with `stdio` → `{ command, args?, env? }` and `streamable-http`/`sse` → `{ serverUrl, headers? }` mapping.
