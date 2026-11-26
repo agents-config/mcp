@@ -28,6 +28,7 @@ import { resolveTargetsAsync, adapters } from '$/src/adapters/index'
 import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import { loadState, type SyncState } from '$/src/core/state'
+import { toPortablePath } from '$/src/core/portable-path'
 import {
   planSecretExtraction,
   applySecretExtraction,
@@ -94,8 +95,14 @@ export const importCommand = defineCommand({
 
     const stateResult = loadState(scope, ctx)
     const state = stateResult.state
+    const now = new Date().toISOString()
 
     const allWarnings: string[] = []
+    // `--dry-run` delegates to `runSync`, which already reports state warnings;
+    // only report here when this command is going to overwrite the lock.
+    if (!dryRun) {
+      allWarnings.push(...stateResult.warnings)
+    }
     // name -> [{agentId, server}] so cross-agent conflicts can be detected.
     const candidates: Map<
       string,
@@ -290,10 +297,18 @@ export const importCommand = defineCommand({
             : (adapters
                 .find((a) => a.id === agentId)!
                 .getConfigPath(scope, ctx) ?? path)
+        const portablePath = toPortablePath(nativePath, scope, ctx)
+        const existingAgent = state.agents[agentId]
+        const nextNames = extractedByAgent[agentId] ?? []
+        const namesChanged =
+          !existingAgent ||
+          existingAgent.path !== portablePath ||
+          existingAgent.names.length !== nextNames.length ||
+          nextNames.some((n) => !existingAgent.names.includes(n))
         nextState.agents[agentId] = {
-          path: nativePath,
-          names: extractedByAgent[agentId] ?? [],
-          updatedAt: new Date().toISOString(),
+          path: portablePath,
+          names: nextNames,
+          updatedAt: namesChanged ? now : (existingAgent?.updatedAt ?? now),
         }
       }
       persistSyncState(scope, ctx, nextState)

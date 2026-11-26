@@ -19,6 +19,7 @@ import {
   parseAgentsFlag,
   formatConfigValidationError,
   formatDryRunActions,
+  reportStateWarnings,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
@@ -101,6 +102,10 @@ export const removeCommand = defineCommand({
     }
 
     if (noSync) {
+      // `remove --no-sync` escreve o estado diretamente (nao delega a
+      // `runSync`), entao reporta avisos de estado antes de gravar. No caminho
+      // normal (com sync) o `runSync` ja reporta os avisos; nao duplicar aqui.
+      reportStateWarnings(ui, stateResult.warnings)
       const removal = removeManagedPlugin({
         scope,
         ctx,

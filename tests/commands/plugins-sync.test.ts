@@ -568,7 +568,7 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
         managedPlugins: ['web'],
         agents: {
           antigravity: {
-            path: join(ctx.cwd, '.agents/plugins'),
+            path: '.agents/plugins',
             names: ['web'],
             updatedAt: '2026-01-01T00:00:00.000Z',
           },
@@ -595,7 +595,7 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
       // `--agents` e aditivo: cursor e anexado preservando a ordem existente.
       expect(state.targets).toEqual(['antigravity', 'cursor'])
       expect(state.agents.antigravity).toEqual({
-        path: join(ctx.cwd, '.agents/plugins'),
+        path: '.agents/plugins',
         names: ['web'],
         updatedAt: '2026-01-01T00:00:00.000Z',
       })

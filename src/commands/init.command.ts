@@ -21,6 +21,7 @@ import {
   isYesFlag,
   parseAgentsFlag,
   formatDryRunActions,
+  reportStateWarnings,
 } from '$/src/commands/util'
 import {
   resolveTargetsAsync,
@@ -66,6 +67,9 @@ export const initCommand = defineCommand({
 
     const stateResult = loadState(scope, ctx)
     const state = stateResult.state
+    // `init` nao delega a `runSync`, entao reporta avisos de estado tanto no
+    // modo normal quanto no dry-run.
+    reportStateWarnings(ui, stateResult.warnings)
 
     let targets: AgentId[]
     if (agentsFlag) {

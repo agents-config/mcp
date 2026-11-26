@@ -614,17 +614,18 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
   function baseUi(ctx: ReturnType<typeof createSandbox>['ctx']) {
     const note = vi.fn()
     const errorMock = vi.fn()
+    const warnMock = vi.fn()
     vi.mocked(createUiAndCtx).mockImplementation(() => ({
       ctx,
       ui: {
         error: errorMock,
-        warn: vi.fn(),
+        warn: warnMock,
         note,
         intro: vi.fn(),
         outro: vi.fn(),
       } as unknown as PromptUi,
     }))
-    return { note, errorMock }
+    return { note, errorMock, warn: warnMock }
   }
 
   function addArgs(name: string, noSync: boolean, yes = true) {
@@ -675,6 +676,38 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
       )
     } finally {
       logSpy.mockRestore()
+      cleanup()
+    }
+  })
+
+  it('surfaces a corrupt/v1 lock warning before overwriting state', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const { warn } = baseUi(ctx)
+    try {
+      // Lock corrompido: add deve surfacar o aviso antes de sobrescrever o estado.
+      mkdirSync(join(ctx.cwd, '.agents'), { recursive: true })
+      writeFileSync(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        '{ not valid json',
+      )
+
+      await addCommand.run!({
+        args: addArgs('web', false),
+        rawArgs: ['--command=npx'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      const warnMessages = warn.mock.calls.map((c) => String(c[0]))
+      expect(warnMessages.length).toBeGreaterThan(0)
+      expect(
+        warnMessages.some(
+          (m) => m.includes('mcp-lock.json') || m.includes('Corrupt'),
+        ),
+      ).toBe(true)
+      // O lock foi reescrito como v2 valido.
+      const state = loadState('project', ctx).state
+      expect(state.version).toBe(2)
+    } finally {
       cleanup()
     }
   })

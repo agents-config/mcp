@@ -185,8 +185,7 @@ export const SCHEMA_DRAFT = 'draft-07'
 export const AGENTS_DIR = '.agents'
 export const CONFIG_FILE = 'mcp.json'
 export const STATE_FILE = 'mcp-lock.json'
-export const LEGACY_STATE_FILE = '.mcp-sync-state.json'
-export const STATE_VERSION = 1
+export const STATE_VERSION = 2
 export const ENV_FILE = '.env'
 export const ENV_EXAMPLE_FILE = '.env.example'
 
@@ -397,10 +396,11 @@ Canonical file access only:
 
 ```ts
 interface SyncState {
-  version: 1
+  version: 2
   scope: 'project' | 'global'
   targets: AgentId[]
   agents: Record<AgentId, {
+    /** Portable path: project-relative (`/`) or `~/` / `$XDG_CONFIG_HOME/` / `$APPDATA/` for global. Informational only; never used for I/O. Native paths are resolved from the adapter. */
     path: string
     names: string[]
     updatedAt: string // ISO-8601
@@ -409,21 +409,25 @@ interface SyncState {
 ```
 
 Location: `<state dir>/mcp-lock.json`, where the state dir is `<cwd>/.agents`
-or `<homeDir>/.agents`. A legacy file at `.agents/.mcp-sync-state.json` (or
-`~/.agents/.mcp-sync-state.json`) is read as a fallback. Rules:
+or `<homeDir>/.agents`. `STATE_VERSION` is `2`; there is no legacy file and no
+legacy read. Rules:
 
-- Missing file → empty state, no warning.
-- Corrupt/unknown-version file → warn, treat as empty, and rewrite on next
-  successful `sync`.
-- Lock precedence: new lock file → legacy file → empty state. Using the legacy
-  file emits a non-fatal notice (not an error). A corrupt new lock never falls
-  back to the legacy file.
+- Missing lock → empty state, no warning.
+- Corrupt/invalid/unsupported lock → warning + empty state; the lock is never
+  partially trusted.
+- Lock precedence: lock file → empty state (no legacy file). Missing = empty,
+  no warning. Corrupt/invalid/unsupported = warning + empty. `version: 1` is
+  unsupported and is not migrated.
+- `agents[].path` is portable metadata: relative to the repo root for project
+  scope, or `~/`, `$XDG_CONFIG_HOME/`, `$APPDATA/` prefixed for global scope.
+  It is never used for I/O; native paths are always resolved from the adapter.
 - `targets` is the persisted agent selection. It is the second source of truth for
   `sync` (after `--agents`, before auto-detection).
 - `names` per agent is the authoritative `previousManagedNames` set.
-- `import` seeds `names` for every agent it read, even with `--no-sync`.
+- `import` seeds `names` for every agent it read, even with `--no-sync`, and
+  preserves `updatedAt` when the portable path and names set are unchanged.
 - `remove` and `sync` prune names no longer present in the canonical file.
-- State is always written atomically; schema and `STATE_VERSION` stay `1`.
+- State is always written atomically; schema `STATE_VERSION` is `2`.
 - The lock is **not** auto-added to `.gitignore`; implementers MAY version it.
   Only `.env` is auto-protected.
 
@@ -480,6 +484,42 @@ Minimal, lazy, and only for tool-owned secrets:
 - If an entry is already covered by another pattern, do not duplicate it.
 - If `.env` is already tracked by Git, warn with
   `git rm --cached .env` and continue (the value is still safe from new commits).
+
+### 8.7 `core/portable-path.ts`
+
+`toPortablePath(absoluteOrPortablePath, scope, ctx)` converts an absolute native
+path into the portable form persisted in `.agents/mcp-lock.json`:
+
+- Project scope: relative to `ctx.cwd` with `/` separators
+  (`.cursor/mcp.json`, `.vscode/mcp.json`, `.agents/plugins`).
+- Any scope: `~/...` when inside `ctx.homeDir` (`~/.claude.json`,
+  `~/.cursor/mcp.json`).
+- Any scope: `$XDG_CONFIG_HOME/...` when the path is inside an absolute
+  `env.XDG_CONFIG_HOME`.
+- Any scope: `$APPDATA/...` when the path is inside an absolute `env.APPDATA`.
+- Already-portable input is returned normalized (separators converted to `/`,
+  leading `./` stripped), so the function is idempotent on paths loaded from a
+  `version: 2` lock.
+- Last resort: `path.basename(...)`, so an exotic path outside all known roots
+  never leaks an absolute machine path. The persisted `path` is metadata only;
+  no I/O uses it.
+
+`isPortablePath(value)` validates a persisted agent path: accepts relative
+paths and the `~/`, `$XDG_CONFIG_HOME/`, `$APPDATA/` forms; rejects empty
+strings, POSIX absolute paths, Windows drive paths, UNC prefixes, backslashes,
+`..` segments, malformed `~`/`$NAME` tokens, and empty or `.` segments.
+
+Deterministic serialization (`serializeState` in `core/state.ts`):
+- Fixed top-level key order: `version`, `scope`, `targets`, `agents`,
+  `managedPlugins`.
+- Agents are emitted in `AGENT_ORDER`, skipping absent records.
+- `targets` are deduplicated, preserving meaningful order.
+- `agents[].names` and `managedPlugins` are deduplicated and sorted
+  (locale-independent).
+- Output is `JSON.stringify(document, null, 2) + '\n'`.
+- `writeState` validates the serialized document against `SyncStateSchema`,
+  short-circuits (no rewrite) when the existing lock is already byte-identical,
+  and never touches `.gitignore` or the legacy state file.
 
 ---
 
@@ -901,4 +941,5 @@ lines/functions and 75% branches over `src/core` and `src/adapters`.
 | [0011](../docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md) | Plugin ownership via `managedPlugins` and safe, non-recursive cleanup. |
 | [0012](../docs/decisions/0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`). |
 | [0013](../docs/decisions/0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets`. |
-| [0014](../docs/decisions/0014-mcp-lock-and-authoritative-sync.md) | `.agents/mcp-lock.json` and authoritative `sync` from `.agents/mcp.json`. |
+| [0014](../docs/decisions/0014-mcp-lock-and-authoritative-sync.md) | `.agents/mcp-lock.json` and authoritative `sync` from `.agents/mcp.json`. **Partially superseded by ADR-0015** (lock portability and `version: 2`). |
+| [0015](../docs/decisions/0015-portable-mcp-lock.md) | Portable `.agents/mcp-lock.json` (`version: 2`, portable paths, no legacy fallback). **Accepted**. |

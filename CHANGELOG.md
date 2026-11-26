@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Sync state renamed to `.agents/mcp-lock.json` (project) and `~/.agents/mcp-lock.json` (global); `STATE_VERSION` stays `1` with a legacy read fallback for `.mcp-sync-state.json`.
+- Sync state renamed to `.agents/mcp-lock.json` (project) and `~/.agents/mcp-lock.json` (global); schema bumped to `version: 2` with no migration and no legacy `.mcp-sync-state.json` read fallback. A `version: 1` lock is unsupported (warns, treated as empty) and is replaced on the next successful write; the legacy file is left untouched and never read.
+- `agents[].path` is portable metadata only: project paths are relative to the repo root with `/` separators (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`, `.agents/plugins`); global paths use `~/`, `$XDG_CONFIG_HOME/`, or `$APPDATA/` (never machine-absolute paths, drive letters, UNC prefixes, backslashes, or `..` segments). The persisted path is never used for I/O.
+- Deterministic serialization: fixed top-level key order (`version`, `scope`, `targets`, `agents`, `managedPlugins`), agents in `AGENT_ORDER`, sorted/deduplicated `names` and `managedPlugins`, deduplicated `targets` preserving order, two-space JSON with trailing newline, and no rewrite when content is byte-identical.
+- `updatedAt` churn control: `updatedAt` is refreshed only when an agent's portable path or managed names set actually change (`sync` and `import`); repeated runs produce a byte-identical lock.
+- State warnings are surfaced by `sync`, `doctor`, `add`, `init`, `remove`, `import`, and `list` instead of silently treating an invalid/unsupported lock as empty.
 - Lock file is no longer auto-added to `.gitignore`; teams choose whether to version it. `.env` remains the only auto-protected entry.
 - `sync` is authoritative from `.agents/mcp.json`: it adopts declared plugin dirs (overwriting `plugin.json`/`mcp.json`/`mcp_config.json` while preserving extra files), overwrites canonical native entries, and preserves manual content.
 - Zero-target `sync` succeeds: it materializes plugins, prints guidance, and exits `0`.

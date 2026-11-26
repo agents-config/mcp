@@ -13,6 +13,7 @@ import {
   isGlobalFlag,
   isYesFlag,
   loadCanonicalOrExit,
+  reportStateWarnings,
 } from '$/src/commands/util'
 import { loadState } from '$/src/core/state'
 import type { ConfigScope } from '$/src/core/context'
@@ -56,6 +57,9 @@ export const listCommand = defineCommand({
       const config = loadCanonicalOrExit(scope, ctx, ui)
       const stateResult = loadState(scope, ctx)
       const state = stateResult.state
+      // `list` le o estado sem delegar a `runSync`: reporta avisos de estado
+      // para cada escopo carregado para que um lock corrompido nao seja silencioso.
+      reportStateWarnings(ui, stateResult.warnings)
       const servers = config.mcpServers ?? {}
       scopeData.push({ scope, servers, state })
       if (scope === 'project') {

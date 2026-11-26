@@ -23,6 +23,7 @@ import {
   parseAgentsFlag,
   statePath,
   formatDryRunActions,
+  reportStateWarnings,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
 import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
@@ -197,6 +198,12 @@ export const addCommand = defineCommand({
     // colisao de plugin (gera ou nao o fluxo interativo).
     const stateResult = loadState(scope, ctx)
     const state = stateResult.state
+    // Surface a lock corrompida/nao suportada antes de sobrescrever o estado.
+    // `add` escreve o estado antes de delegar a `runSync`, entao esta e a
+    // unica chance de expor um lock v1/corrupto.
+    if (!dryRun) {
+      reportStateWarnings(ui, stateResult.warnings)
+    }
 
     let resolved: ReturnType<typeof resolveDirect>
     let name: string

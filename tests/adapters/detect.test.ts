@@ -33,7 +33,7 @@ describe('adapters index', () => {
 
   it('resolveTargets uses flag first', () => {
     const state = {
-      version: 1 as const,
+      version: 2 as const,
       scope: 'project' as const,
       targets: [],
       agents: {},
@@ -44,7 +44,7 @@ describe('adapters index', () => {
 
   it('resolveTargets falls back to state targets', () => {
     const state = {
-      version: 1 as const,
+      version: 2 as const,
       scope: 'project' as const,
       targets: ['vscode'] as AgentId[],
       agents: {},
@@ -55,7 +55,7 @@ describe('adapters index', () => {
 
   it('resolveTargets returns empty when nothing resolvable', () => {
     const state = {
-      version: 1 as const,
+      version: 2 as const,
       scope: 'project' as const,
       targets: [],
       agents: {},
@@ -66,7 +66,7 @@ describe('adapters index', () => {
 
   it('resolveTargetsAsync falls back to detection', async () => {
     const state = {
-      version: 1 as const,
+      version: 2 as const,
       scope: 'project' as const,
       targets: [],
       agents: {},

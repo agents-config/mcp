@@ -5,7 +5,7 @@ import { createRuntimeContext } from '$/src/core/context'
 import { createSandbox } from '$/tests/helpers/sandbox'
 import { persistCanonicalConfig } from '$/src/commands/util'
 import { writeFileAtomic } from '$/src/core/fs-atomic'
-import { writeFileSync, rmSync } from 'node:fs'
+import { writeFileSync, rmSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
@@ -345,7 +345,7 @@ describe('doctor', () => {
     }
   })
 
-  it('state warning: apenas legacy (.mcp-sync-state.json) e importado com aviso STATE (nao e erro)', async () => {
+  it('state error: v1 lock at .agents/mcp-lock.json names the lock path and expected version 2', async () => {
     const { ctx, cleanup } = createSandbox()
     try {
       writeFileAtomic(
@@ -355,14 +355,77 @@ describe('doctor', () => {
           mcpServers: {},
         }),
       )
-      // Apenas o arquivo legacy existe, valido. Nao ha lock novo.
+      // Lock v1 (nao suportado): deve virar aviso de estado vazio, nomeando o
+      // caminho do lock e a versao esperada.
       writeFileAtomic(
-        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
         JSON.stringify({
           version: 1,
           scope: 'project',
           targets: [],
           agents: {},
+          managedPlugins: [],
+        }),
+      )
+
+      const lockPath = join(ctx.cwd, '.agents', 'mcp-lock.json')
+
+      const nonStrict = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const stateResults = nonStrict.results.filter((r) => r.code === 'STATE')
+      expect(stateResults.length).toBeGreaterThan(0)
+      expect(
+        stateResults.some(
+          (r) =>
+            r.message.includes(lockPath) &&
+            r.message.includes(`expected version ${2}`),
+        ),
+      ).toBe(true)
+      expect(nonStrict.errors).toBeGreaterThan(0)
+
+      // Com --strict, falha como qualquer aviso de estado.
+      const strict = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: true,
+      })
+      expect(strict.errors).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('state error: v2 lock with absolute agents[].path names the invalid field', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {},
+        }),
+      )
+      // Lock v2 com caminho absoluto do agente: invalido, nomeia o campo.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        JSON.stringify({
+          version: 2,
+          scope: 'project',
+          targets: ['cursor'],
+          agents: {
+            cursor: {
+              path: join(ctx.cwd, '.cursor/mcp.json'),
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
           managedPlugins: [],
         }),
       )
@@ -374,22 +437,63 @@ describe('doctor', () => {
         dryRun: false,
         strict: false,
       })
-      const stateWarnings = result.results.filter(
-        (r) => r.code === 'STATE' && r.severity === 'warning',
-      )
-      expect(stateWarnings.length).toBeGreaterThan(0)
-      expect(
-        stateWarnings.some((w) => w.message.includes('.mcp-sync-state')),
-      ).toBe(true)
-      expect(
-        stateWarnings.some((w) => w.message.includes('mcp-lock.json')),
-      ).toBe(true)
-      // Nao deve ser um erro: sem strict nao falha.
       const stateErrors = result.results.filter(
         (r) => r.code === 'STATE' && r.severity === 'error',
       )
-      expect(stateErrors.length).toBe(0)
+      expect(stateErrors.length).toBeGreaterThan(0)
+      expect(
+        stateErrors.some((r) => r.message.includes('agents.cursor.path')),
+      ).toBe(true)
+      expect(result.errors).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('legacy-only .mcp-sync-state.json is ignored: no STATE warning, left untouched', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {},
+        }),
+      )
+      // Apenas o arquivo legacy existe, valido. Nao ha lock novo.
+      const legacyContent = JSON.stringify({
+        version: 1,
+        scope: 'project',
+        targets: [],
+        agents: {},
+        managedPlugins: [],
+      })
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
+        legacyContent,
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      // Nenhum aviso de estado sobre o arquivo legacy.
+      const stateResults = result.results.filter((r) => r.code === 'STATE')
+      expect(
+        stateResults.some((r) => r.message.includes('.mcp-sync-state')),
+      ).toBe(false)
+      expect(
+        stateResults.some((r) => r.message.includes('mcp-lock.json')),
+      ).toBe(false)
       expect(result.errors).toBe(0)
+
+      // O arquivo legacy permanece intacto no disco.
+      expect(
+        readFileSync(join(ctx.cwd, '.agents', '.mcp-sync-state.json'), 'utf8'),
+      ).toBe(legacyContent)
     } finally {
       cleanup()
     }

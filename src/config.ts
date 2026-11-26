@@ -8,8 +8,7 @@ export const SCHEMA_DRAFT = 'draft-2020-12'
 export const AGENTS_DIR = '.agents'
 export const CONFIG_FILE = 'mcp.json'
 export const STATE_FILE = 'mcp-lock.json'
-export const LEGACY_STATE_FILE = '.mcp-sync-state.json'
-export const STATE_VERSION = 1
+export const STATE_VERSION = 2
 export const ENV_FILE = '.env'
 export const ENV_EXAMPLE_FILE = '.env.example'
 

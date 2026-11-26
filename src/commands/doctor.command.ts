@@ -286,16 +286,6 @@ export async function runDoctor(
       message: w,
     })
   }
-  // Legacy-import notices are non-fatal STATE warnings by default and are
-  // promoted to failures by --strict (like any other warning). They name
-  // .agents/mcp-lock.json (the lock path).
-  for (const n of stateResult.notices) {
-    results.push({
-      code: 'STATE',
-      severity: 'warning',
-      message: n,
-    })
-  }
   for (const agentId of targets) {
     const adapter = getAdapter(agentId)
     if (!adapter.capabilities.scopes.includes(scope)) {

@@ -357,4 +357,67 @@ describe('commands remove (T3)', () => {
       cleanup()
     }
   })
+
+  it('--no-sync surfaca aviso de lock corrompido antes de gravar estado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonicalAndState(ctx)
+      mkdirSync(join(ctx.cwd, '.agents'), { recursive: true })
+      writeFileSync(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        '{ not valid json',
+      )
+
+      await removeCommand.run!({
+        args: baseArgs({ sync: false, _: ['alpha'] }),
+        rawArgs: ['alpha', '--no-sync'],
+      } as unknown as Parameters<NonNullable<typeof removeCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      const warnMessages = ui.warn.mock.calls.map((c) => String(c[0]))
+      expect(warnMessages.length).toBeGreaterThan(0)
+      expect(
+        warnMessages.some(
+          (m) => m.includes('mcp-lock.json') || m.includes('Corrupt'),
+        ),
+      ).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('caminho normal de remocao nao duplica aviso de estado (runSync reporta)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonicalAndState(ctx)
+      mkdirSync(join(ctx.cwd, '.agents'), { recursive: true })
+      writeFileSync(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        '{ not valid json',
+      )
+      // Reseta o runSync mockado para nao reportar avisos; o caminho normal
+      // de `remove` nao deve reportar o aviso de estado diretamente.
+      runSyncMock.mockResolvedValue({
+        scope: 'project' as const,
+        targets: [],
+        written: [],
+        warnings: [],
+        errors: [],
+      })
+
+      await removeCommand.run!({
+        args: baseArgs({ _: ['alpha'] }),
+        rawArgs: ['alpha'],
+      } as unknown as Parameters<NonNullable<typeof removeCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      // `remove` nao reporta avisos diretamente no caminho normal (delega ao
+      // runSync), portanto nao deve haver aviso duplicado aqui.
+      expect(ui.warn).not.toHaveBeenCalled()
+    } finally {
+      cleanup()
+    }
+  })
 })

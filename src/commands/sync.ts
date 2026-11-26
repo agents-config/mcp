@@ -22,6 +22,7 @@ import { AGENTS_DIR } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
+import { toPortablePath } from '$/src/core/portable-path'
 import { readTextFile } from '$/src/core/fs-atomic'
 import { syncPluginFiles, removeManagedPlugin } from '$/src/core/plugins'
 
@@ -108,6 +109,11 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   if (!skipAgentSync && targets.length === 0 && !allowEmptyTargets) {
     // Strict default: direct `runSync` callers, `remove`, and `import` keep
     // exiting 1. The `sync` command opts in via `allowEmptyTargets`.
+    // The summary is never printed on this path, so surface state warnings
+    // here or an unsupported/corrupt lock would be discarded silently.
+    for (const w of stateResult.warnings) {
+      ui.warn(w)
+    }
     ui.error(
       'No resolvable target agents. Pass --agents <list> (e.g. --agents cursor,vscode).',
     )
@@ -121,13 +127,12 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
         agent: undefined,
         message: w,
       })),
+      ...stateResult.warnings.map((w) => ({
+        code: 'STATE',
+        agent: undefined,
+        message: w,
+      })),
     ]
-  // Surface sync-state notices (e.g. a legacy file was imported) as non-fatal
-  // STATE warnings, once per sync.
-  for (const notice of stateResult.notices) {
-    allWarnings.push({ code: 'STATE', agent: undefined, message: notice })
-  }
-
   // 3. Compile + write per target adapter.
   const written: string[] = []
   // Planned file operations for the --dry-run preview (zero disk writes).
@@ -180,16 +185,17 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
       written.push(nativePath)
     }
 
+    const portablePath = toPortablePath(nativePath, scope, ctx)
     const existingAgent = state.agents[agentId]
     const namesChanged =
       !existingAgent ||
-      existingAgent.path !== nativePath ||
+      existingAgent.path !== portablePath ||
       existingAgent.names.length !== managedNames.length ||
       managedNames.some((n) => !existingAgent.names.includes(n))
-    // Refresh per-agent updatedAt only when names/path actually change
+    // Refresh per-agent updatedAt only when names/portable path actually change
     // (byte-idempotence of state).
     nextAgents[agentId] = {
-      path: nativePath,
+      path: portablePath,
       names: [...managedNames],
       updatedAt: namesChanged ? now : (existingAgent?.updatedAt ?? now),
     }
@@ -292,15 +298,16 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
   if (!skipAgentSync && targets.includes('antigravity')) {
     const base = scope === 'project' ? ctx.cwd : ctx.homeDir
     const antigravityPath = join(base, AGENTS_DIR, 'plugins')
+    const portablePath = toPortablePath(antigravityPath, scope, ctx)
     const existing = state.agents['antigravity']
     const names = [...syncedPluginNames]
     const namesChanged =
       !existing ||
-      existing.path !== antigravityPath ||
+      existing.path !== portablePath ||
       existing.names.length !== names.length ||
       names.some((n) => !existing.names.includes(n))
     nextAgents['antigravity'] = {
-      path: antigravityPath,
+      path: portablePath,
       names,
       updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
     }

@@ -166,6 +166,38 @@ The lock is a record of what the CLI generated — not a gate on what `.agents/m
 - **`add`**: if `.agents/plugins/<name>/` already exists **and** `<name>` is **not** declared in `.agents/mcp.json`, `add` blocks (non-interactive, exit `1`) or re-prompts (interactive). Declared names are adopted by `add`/`sync` instead.
 - **Unmanaged directories** whose name is not declared in `.agents/mcp.json` remain untouched by `sync` (not written, not deleted, not reported as a collision).
 
+### Portable lock file
+
+The lock is deterministic and portable, so a project lock can be committed and shared:
+
+```json
+{
+  "version": 2,
+  "scope": "project",
+  "targets": ["cursor", "vscode"],
+  "agents": {
+    "cursor": {
+      "path": ".cursor/mcp.json",
+      "names": ["github"],
+      "updatedAt": "2026-11-26T12:00:00.000Z"
+    },
+    "vscode": {
+      "path": ".vscode/mcp.json",
+      "names": ["github"],
+      "updatedAt": "2026-11-26T12:00:00.000Z"
+    }
+  },
+  "managedPlugins": ["github"]
+}
+```
+
+- **Paths are metadata.** `agents[].path` records where the lock was written for diagnostics only; it is never used for I/O. Native paths are always resolved from the adapter.
+- **Project scope:** paths are relative to the repository root with `/` separators (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`, `.agents/plugins`).
+- **Global scope:** paths use `~/`, `$XDG_CONFIG_HOME/`, or `$APPDATA/` (for example `~/.claude.json`, `~/.cursor/mcp.json`, `~/.config/Code/User/mcp.json`). Absolute paths, drive letters, UNC prefixes, backslashes, and `..` segments are never persisted.
+- **Deterministic output:** fixed key order, agents in a stable order, sorted and deduplicated names/plugins, two-space JSON with a trailing newline. The file is not rewritten when its content is already byte-identical, and `updatedAt` changes only when an agent's portable path or managed names change.
+- **Zero-diff workflow:** commit `.agents/mcp-lock.json`; a second machine or workspace with the same `.agents/mcp.json` and targets reproduces it byte-for-byte. Global locks may legitimately differ across operating systems.
+- **No migration:** `version: 2` is the only supported schema. A `version: 1` lock is ignored with a warning and replaced by the next successful `sync`; a legacy `.mcp-sync-state.json` is never read and is left untouched on disk.
+
 ### Partial failure
 
 If `.agents/mcp.json` (and/or agent native files) is written successfully, but creation/update of a plugin file fails, the CLI **does not** print a false full-success message. It reports explicitly what was completed and what failed, with actionable next steps (e.g. re-run `agents-mcp sync`), and exits with code `1`.

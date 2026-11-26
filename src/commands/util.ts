@@ -102,6 +102,21 @@ export function loadSyncState(
   return loadState(scope, ctx)
 }
 
+/**
+ * Surface state warnings (unsupported/corrupt lock) through the UI. Commands
+ * that load state and may overwrite it call this so a discarded lock is never
+ * silent. Commands that delegate to `runSync` skip this where the sync summary
+ * already reports the same warnings.
+ */
+export function reportStateWarnings(
+  ui: { warn: (message: string) => void },
+  warnings: readonly string[],
+): void {
+  for (const warning of warnings) {
+    ui.warn(warning)
+  }
+}
+
 /** Persist the sync state atomically. */
 export function persistSyncState(
   scope: ConfigScope,

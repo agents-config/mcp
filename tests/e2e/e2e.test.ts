@@ -3,6 +3,7 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { runSync } from '$/src/commands/sync'
 import { runDoctor } from '$/src/commands/doctor.command'
 import { persistCanonicalConfig } from '$/src/commands/util'
+import { isPortablePath } from '$/src/core/portable-path'
 import { createSandbox } from '$/tests/helpers/sandbox'
 import type { AgentId } from '$/src/adapters/types'
 import { DEFAULT_SCHEMA_URL } from '$/src/config'
@@ -72,6 +73,38 @@ function createMockBinaries(
 }
 
 /**
+ * Asserts the sync lock is `version: 2`, every agent path is portable, and the
+ * raw content leaks no machine-specific absolute path, home dir, backslash, or
+ * drive letter.
+ */
+function assertLockPortable(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+  scope: 'project' | 'global',
+): void {
+  const lockPath =
+    scope === 'project'
+      ? `${ctx.cwd}/.agents/mcp-lock.json`
+      : `${ctx.homeDir}/.agents/mcp-lock.json`
+  expect(existsSync(lockPath)).toBe(true)
+  const raw = readFileSync(lockPath, 'utf8')
+  const parsed = JSON.parse(raw)
+  expect(parsed.version).toBe(2)
+  for (const agentId of Object.keys(parsed.agents ?? {})) {
+    const p = parsed.agents[agentId].path
+    expect(isPortablePath(p)).toBe(true)
+    expect(p).not.toMatch(/^\//)
+    expect(p).not.toMatch(/^[A-Za-z]:[\/\\]/)
+    expect(p).not.toContain('\\')
+    expect(p).not.toContain('..')
+  }
+  // No machine-specific leakage anywhere in the raw lock.
+  expect(raw).not.toContain(ctx.cwd)
+  expect(raw).not.toContain(ctx.homeDir)
+  expect(raw).not.toContain('\\')
+  expect(raw).not.toMatch(/[A-Za-z]:[\/\\]/)
+}
+
+/**
  * Run the full E2E flow: init → sync → doctor.
  */
 async function runFullFlow(
@@ -97,6 +130,9 @@ async function runFullFlow(
   } as Parameters<typeof runSync>[0])
   expect(syncResult.targets).toEqual(agents)
   expect(syncResult.written.length).toBeGreaterThan(0)
+
+  // The lock must be portable (version 2, no machine-specific paths).
+  assertLockPortable(ctx, scope)
 
   // 3. Verify native config file was written
   const projectConfigPath = `${ctx.cwd}/.mcp.json`

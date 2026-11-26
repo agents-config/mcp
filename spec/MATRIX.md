@@ -42,6 +42,12 @@ directory that exists. All paths are resolved from the injected
 `RuntimeContext` (`homeDir`, `platform`, `env`), never from module-level
 `os.homedir()` / `process.platform` calls.
 
+The lock file records global paths in portable form only: `~/`,
+`$XDG_CONFIG_HOME/`, or `$APPDATA/` (for example `~/.claude.json`,
+`~/.config/Code/User/mcp.json`, `~/AppData/Roaming/Code/User/mcp.json`).
+Machine-absolute home directories, drive letters, UNC prefixes, backslashes,
+and `..` segments are never persisted to the lock, for any scope.
+
 ---
 
 ## 2. Compiled Output (`stdio` and `streamable-http`)

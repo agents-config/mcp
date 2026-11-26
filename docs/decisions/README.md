@@ -18,7 +18,8 @@ context, the decision, the alternatives rejected, and the accepted trade-offs.
 | [0011](./0011-plugin-lifecycle-and-safe-cleanup.md) | Ciclo de vida de plugins e limpeza segura | Accepted |
 | [0012](./0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`) | Accepted |
 | [0013](./0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets` | Accepted |
-| [0014](./0014-mcp-lock-and-authoritative-sync.md) | `mcp-lock.json` and authoritative `sync` | Accepted |
+| [0014](./0014-mcp-lock-and-authoritative-sync.md) | `mcp-lock.json` and authoritative `sync` | Partially superseded by ADR-0015 |
+| [0015](./0015-portable-mcp-lock.md) | Portable `.agents/mcp-lock.json` (`version: 2`) | Accepted |
 
 ## Conventions
 

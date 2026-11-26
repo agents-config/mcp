@@ -2,23 +2,25 @@ import { z } from 'zod'
 import { AgentIdSchema } from '$/src/core/schema'
 import {
   AGENTS_DIR,
-  LEGACY_STATE_FILE,
+  AGENT_ORDER,
   STATE_FILE,
   STATE_VERSION,
 } from '$/src/config'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import { isPortablePath, toPortablePath } from '$/src/core/portable-path'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
 
 export interface SyncStateAgent {
+  /** Portable path recorded for diagnostics; never used for I/O. */
   path: string
   names: string[]
   updatedAt: string // ISO-8601
 }
 
 export interface SyncState {
-  version: 1
+  version: typeof STATE_VERSION
   scope: ConfigScope
   targets: AgentId[]
   agents: Partial<Record<AgentId, SyncStateAgent>>
@@ -29,12 +31,19 @@ export interface SyncState {
 export interface LoadStateResult {
   state: SyncState
   warnings: string[]
-  /** Non-fatal hints surfaced to the user (e.g. a legacy file was imported). */
-  notices: string[]
 }
 
+const PORTABLE_PATH_MESSAGE =
+  'must be a portable path: relative to the project or prefixed with "~/", "$XDG_CONFIG_HOME/", or "$APPDATA/", using "/" separators (no absolute paths, drive letters, UNC prefixes, backslashes, or ".." segments)'
+
+const PortablePathSchema = z.string().superRefine((value, ctx) => {
+  if (!isPortablePath(value)) {
+    ctx.addIssue({ code: 'custom', message: PORTABLE_PATH_MESSAGE })
+  }
+})
+
 const SyncStateAgentSchema = z.object({
-  path: z.string(),
+  path: PortablePathSchema,
   names: z.array(z.string()),
   updatedAt: z.string().datetime(),
 })
@@ -67,118 +76,163 @@ export function getStatePath(scope: ConfigScope, ctx: RuntimeContext): string {
   return `${base}/${AGENTS_DIR}/${STATE_FILE}`
 }
 
-export function getLegacyStatePath(
+function dedupe<T>(values: readonly T[]): T[] {
+  return [...new Set(values)]
+}
+
+function dedupeSorted(values: readonly string[]): string[] {
+  return dedupe(values).sort()
+}
+
+/**
+ * Serialize the state deterministically for `.agents/mcp-lock.json`.
+ *
+ * Top-level key order is fixed (`version`, `scope`, `targets`, `agents`,
+ * `managedPlugins`), agents follow `AGENT_ORDER`, targets preserve their
+ * original order, and names/managed plugins are deduplicated and sorted. The
+ * output uses two-space indentation with a trailing newline.
+ */
+export function serializeState(
   scope: ConfigScope,
   ctx: RuntimeContext,
+  state: SyncState,
 ): string {
-  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-  return `${base}/${AGENTS_DIR}/${LEGACY_STATE_FILE}`
+  const agents: Partial<Record<AgentId, SyncStateAgent>> = {}
+  for (const agentId of AGENT_ORDER) {
+    const agent = state.agents[agentId]
+    if (!agent) {
+      continue
+    }
+    agents[agentId] = {
+      path: toPortablePath(agent.path, scope, ctx),
+      names: dedupeSorted(agent.names),
+      updatedAt: agent.updatedAt,
+    }
+  }
+
+  const document = {
+    version: STATE_VERSION,
+    scope,
+    targets: dedupe(state.targets),
+    agents,
+    managedPlugins: dedupeSorted(state.managedPlugins),
+  }
+  return JSON.stringify(document, null, 2) + '\n'
 }
 
 /**
- * Parse a sync state file with `SyncStateSchema`.
+ * Load the sync state from `.agents/mcp-lock.json`.
  *
- * The caller handles the missing-file case before calling this. Returns the
- * parsed state on success, or a warning for corrupt JSON / invalid shape.
- */
-function parseStateFile(
-  raw: string,
-  path: string,
-): { state: SyncState } | { warning: string } {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return { warning: `Corrupt sync state at ${path}; treating as empty` }
-  }
-
-  const result = SyncStateSchema.safeParse(parsed)
-  if (!result.success) {
-    return { warning: `Invalid sync state at ${path}; treating as empty` }
-  }
-
-  return { state: result.data }
-}
-
-/**
- * Load the sync state with precedence: new lock (`.agents/mcp-lock.json`)
- * → legacy file (`.mcp-sync-state.json`) → empty state.
+ * - Missing lock → empty state, no warning.
+ * - Corrupt JSON → warning + empty state.
+ * - Unsupported version (including `version: 1`) → targeted warning + empty.
+ * - Invalid shape or non-portable path → warning naming the field + empty.
  *
- * - Neither file present → empty state, no warning.
- * - New lock present and valid → it wins; the legacy file is ignored silently.
- * - New lock corrupt/invalid → warning + empty state; NO fallback to legacy
- *   (avoid resurrecting stale state over a newer corrupt file).
- * - New absent + legacy valid → legacy state plus a non-fatal notice.
- * - New absent + legacy corrupt → warning + empty state.
+ * The legacy `.mcp-sync-state.json` file is never read.
  */
 export function loadState(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): LoadStateResult {
   const lockPath = getStatePath(scope, ctx)
-  const legacyPath = getLegacyStatePath(scope, ctx)
-
-  // 1. New lock file.
-  const lockRaw = readTextFile(lockPath)
-  if (lockRaw !== null) {
-    const parsed = parseStateFile(lockRaw, lockPath)
-    if ('state' in parsed) {
-      return { state: parsed.state, warnings: [], notices: [] }
-    }
-    // Corrupt/invalid new lock: warn + empty, never read the legacy file.
-    return { state: emptyState(scope), warnings: [parsed.warning], notices: [] }
+  const raw = readTextFile(lockPath)
+  if (raw === null) {
+    return { state: emptyState(scope), warnings: [] }
   }
 
-  // 2. Legacy fallback: only when the new lock is absent.
-  const legacyRaw = readTextFile(legacyPath)
-  if (legacyRaw !== null) {
-    const parsed = parseStateFile(legacyRaw, legacyPath)
-    if ('state' in parsed) {
-      return {
-        state: parsed.state,
-        warnings: [],
-        notices: [
-          `Legacy sync state at ${legacyPath} was imported; it will be replaced by ${lockPath} on the next write. You can delete the legacy file.`,
-        ],
-      }
-    }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
     return {
       state: emptyState(scope),
-      warnings: [parsed.warning],
-      notices: [],
+      warnings: [`Corrupt sync state at ${lockPath}; treating as empty`],
     }
   }
 
-  // 3. Neither file exists → empty state.
-  return { state: emptyState(scope), warnings: [], notices: [] }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return {
+      state: emptyState(scope),
+      warnings: [
+        `Invalid sync state at ${lockPath}; field \`root\` must be a JSON object. Treating as empty.`,
+      ],
+    }
+  }
+
+  const version = (parsed as Record<string, unknown>).version
+  if (typeof version !== 'number') {
+    return {
+      state: emptyState(scope),
+      warnings: [
+        `Invalid sync state at ${lockPath}; field \`version\` must be the number ${STATE_VERSION}. Treating as empty.`,
+      ],
+    }
+  }
+  if (version !== STATE_VERSION) {
+    return {
+      state: emptyState(scope),
+      warnings: [
+        `Unsupported sync state version ${version} at ${lockPath}; expected version ${STATE_VERSION}. Treating as empty. Re-run \`sync --agents <list>\` to write a fresh lock.`,
+      ],
+    }
+  }
+
+  const result = SyncStateSchema.safeParse(parsed)
+  if (!result.success) {
+    const issue = result.error.issues[0]
+    const field = issue && issue.path.length > 0 ? issue.path.join('.') : 'root'
+    const detail = issue?.message ?? 'invalid value'
+    return {
+      state: emptyState(scope),
+      warnings: [
+        `Invalid sync state at ${lockPath}; field \`${field}\` is invalid: ${detail}. Treating as empty.`,
+      ],
+    }
+  }
+
+  return { state: result.data, warnings: [] }
 }
 
 /**
- * Write the sync state (`.agents/mcp-lock.json`) atomically. No root-level
- * `updatedAt` is emitted — the per-agent `updatedAt` is updated only when
- * that agent's `names`/`path` actually changes, so identical states produce
- * byte-identical files. Never touches `.gitignore` and never writes or
- * deletes the legacy state file.
+ * Write the sync state (`.agents/mcp-lock.json`) atomically.
+ *
+ * The state is serialized deterministically and validated against
+ * `SyncStateSchema` before writing. When the existing lock is already
+ * byte-identical, the file is not rewritten (avoids mtime-only churn). Never
+ * touches `.gitignore` and never writes or deletes the legacy state file.
  */
 export function writeState(
   scope: ConfigScope,
   ctx: RuntimeContext,
   state: SyncState,
 ): void {
+  if (state.scope !== scope) {
+    throw new Error(
+      `Cannot write ${state.scope} sync state to the ${scope} lock`,
+    )
+  }
+
   const path = getStatePath(scope, ctx)
-  writeFileAtomic(path, JSON.stringify(state, null, 2) + '\n')
+  const content = serializeState(scope, ctx, state)
+  SyncStateSchema.parse(JSON.parse(content))
+
+  if (readTextFile(path) === content) {
+    return
+  }
+  writeFileAtomic(path, content)
 }
 
 /**
  * Merge `names` into the per-agent record for `agentId`, creating the record if
  * needed. Used by `import` to seed managed names (even with `--no-sync`).
- * The per-agent `updatedAt` is refreshed only when names/path change.
+ * `portablePath` is already portable; the per-agent `updatedAt` is refreshed
+ * only when names/path change.
  */
 export function seedAgentNames(
   state: SyncState,
   agentId: AgentId,
   names: string[],
-  configPath: string,
+  portablePath: string,
 ): SyncState {
   const existing = state.agents[agentId]
   const nextNames = existing
@@ -186,11 +240,11 @@ export function seedAgentNames(
     : names
   const changed =
     !existing ||
-    existing.path !== configPath ||
+    existing.path !== portablePath ||
     existing.names.length !== nextNames.length ||
     nextNames.some((n) => !existing!.names.includes(n))
   const merged: SyncStateAgent = {
-    path: configPath,
+    path: portablePath,
     names: nextNames,
     updatedAt: changed
       ? new Date().toISOString()
