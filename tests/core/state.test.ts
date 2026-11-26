@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   loadState,
   writeState,
+  getStatePath,
+  getLegacyStatePath,
   seedAgentNames,
   pruneAgentNames,
   emptyState,
@@ -11,12 +13,41 @@ import {
 import { createSandbox } from '$/tests/helpers/sandbox'
 
 describe('state', () => {
+  it('getStatePath returns the new lock path for project and global scope', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(getStatePath('project', ctx)).toBe(
+        `${ctx.cwd}/.agents/mcp-lock.json`,
+      )
+      expect(getStatePath('global', ctx)).toBe(
+        `${ctx.homeDir}/.agents/mcp-lock.json`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('getLegacyStatePath returns the legacy path for project and global scope', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(getLegacyStatePath('project', ctx)).toBe(
+        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
+      )
+      expect(getLegacyStatePath('global', ctx)).toBe(
+        `${ctx.homeDir}/.agents/.mcp-sync-state.json`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
   it('loadState returns empty state for missing file, no warning', () => {
     const { ctx, cleanup } = createSandbox()
     try {
       const result = loadState('project', ctx)
       expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -29,6 +60,7 @@ describe('state', () => {
       expect(result.state).toEqual(emptyState('global'))
       expect(result.state.scope).toBe('global')
       expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -75,15 +107,9 @@ describe('state', () => {
         managedPlugins: [],
       }
       writeState('project', ctx, state)
-      const first = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
-        'utf8',
-      )
+      const first = readFileSync(`${ctx.cwd}/.agents/mcp-lock.json`, 'utf8')
       writeState('project', ctx, state)
-      const second = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
-        'utf8',
-      )
+      const second = readFileSync(`${ctx.cwd}/.agents/mcp-lock.json`, 'utf8')
       expect(second).toBe(first)
     } finally {
       cleanup()
@@ -92,7 +118,7 @@ describe('state', () => {
 
   it('loadState treats corrupt file as empty with warning', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(path, '{ not valid json', 'utf8')
@@ -101,6 +127,8 @@ describe('state', () => {
       expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings.length).toBeGreaterThan(0)
       expect(result.warnings[0]).toContain('Corrupt')
+      expect(result.warnings[0]).toContain(path)
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -108,7 +136,7 @@ describe('state', () => {
 
   it('loadState treats unknown version as empty with warning', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -133,7 +161,7 @@ describe('state', () => {
 
   it('loadState rejects invalid agent id in targets', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -157,7 +185,7 @@ describe('state', () => {
 
   it('loadState treats missing agents key as empty state', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -181,7 +209,7 @@ describe('state', () => {
 
   it('loadState rejects unknown agent key in agents as corrupt state', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -280,7 +308,152 @@ describe('state', () => {
     expect(pruned).toEqual(state)
   })
 
-  it("writeState('project') ensures state file is ignored in <cwd>/.gitignore", () => {
+  /* --- Legacy migration / precedence --- */
+
+  it('loads a legacy-only file with a single notice naming both paths', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {
+            'claude-code': {
+              path: `${ctx.cwd}/.mcp.json`,
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state.targets).toEqual(['claude-code'])
+      expect(result.state.agents['claude-code']!.names).toEqual(['github'])
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toHaveLength(1)
+      expect(result.notices[0]).toContain(legacyPath)
+      expect(result.notices[0]).toContain(lockPath)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('when both files exist the new lock wins and the legacy is ignored silently', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['opencode'],
+          agents: {},
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {
+            'claude-code': {
+              path: `${ctx.cwd}/.mcp.json`,
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state.targets).toEqual(['opencode'])
+      expect(result.state.agents).toEqual({})
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a corrupt new lock does NOT fall back to a valid legacy file', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(lockPath, '{ not valid json', 'utf8')
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {},
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toHaveLength(1)
+      expect(result.warnings[0]).toContain(lockPath)
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a corrupt legacy file warns and yields empty state with no notices', () => {
+    const { ctx, cleanup } = createSandbox()
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(legacyPath, '{ not valid json', 'utf8')
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toHaveLength(1)
+      expect(result.warnings[0]).toContain(legacyPath)
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('missing both files yields empty state with no warnings and no notices', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  /* --- .gitignore policy (writeState never touches .gitignore) --- */
+
+  it("writeState('project') writes only mcp-lock.json and never creates .gitignore", () => {
     const { ctx, cleanup } = createSandbox()
     try {
       const state: SyncState = {
@@ -292,20 +465,40 @@ describe('state', () => {
       }
       writeState('project', ctx, state)
 
-      const gitignore = readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')
-      expect(gitignore).toContain('# agents-mcp local (managed)')
-      expect(gitignore).toContain('.agents/.mcp-sync-state.json')
-      expect(gitignore).toContain('# end agents-mcp local (managed)')
+      expect(existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(true)
+      expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
+      expect(existsSync(`${ctx.cwd}/.agents/.mcp-sync-state.json`)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
 
-      const header = '# agents-mcp local (managed)'
-      const footer = '# end agents-mcp local (managed)'
-      const headerIdx = gitignore.indexOf(header)
-      const footerIdx = gitignore.indexOf(footer)
-      expect(headerIdx).toBeGreaterThanOrEqual(0)
-      expect(footerIdx).toBeGreaterThan(headerIdx)
-      expect(gitignore.slice(headerIdx, footerIdx)).toContain(
-        '.agents/.mcp-sync-state.json',
-      )
+  it("writeState('project') leaves a pre-existing legacy file untouched", () => {
+    const { ctx, cleanup } = createSandbox()
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      const legacyContent = JSON.stringify({
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      })
+      writeFileSync(legacyPath, legacyContent, 'utf8')
+
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['opencode'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('project', ctx, state)
+
+      expect(readFileSync(legacyPath, 'utf8')).toBe(legacyContent)
+      expect(existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(true)
+      expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
     } finally {
       cleanup()
     }
@@ -324,11 +517,33 @@ describe('state', () => {
       writeState('global', ctx, state)
 
       expect(
-        readFileSync(`${ctx.homeDir}/.agents/.mcp-sync-state.json`, 'utf8'),
+        readFileSync(`${ctx.homeDir}/.agents/mcp-lock.json`, 'utf8'),
       ).toContain('"scope": "global"')
 
       // global scope must not create or modify <cwd>/.gitignore
       expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeState leaves a pre-existing <cwd>/.gitignore byte-identical', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      mkdirSync(ctx.cwd, { recursive: true })
+      const original = '# existing\n.env\n# custom\n'
+      writeFileSync(`${ctx.cwd}/.gitignore`, original, 'utf8')
+
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('project', ctx, state)
+
+      expect(readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')).toBe(original)
     } finally {
       cleanup()
     }

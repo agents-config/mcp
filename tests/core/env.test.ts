@@ -493,6 +493,33 @@ describe('env.appendToDotenv', () => {
       cleanup()
     }
   })
+
+  it('adds only .env (not the state files) to the managed .gitignore block in project scope', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.env`
+    try {
+      mkdirSync(ctx.cwd, { recursive: true })
+      writeFileSync(path, 'API_TOKEN=abc\n', 'utf8')
+      const result = appendToDotenv(path, [{ key: 'NEW_KEY', value: 'val' }])
+      expect(result.added).toEqual(['NEW_KEY'])
+
+      const gitignore = readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')
+      const header = '# agents-mcp local (managed)'
+      const footer = '# end agents-mcp local (managed)'
+      const headerIdx = gitignore.indexOf(header)
+      const footerIdx = gitignore.indexOf(footer)
+      expect(headerIdx).toBeGreaterThanOrEqual(0)
+      expect(footerIdx).toBeGreaterThan(headerIdx)
+      const block = gitignore.slice(headerIdx, footerIdx)
+      expect(block).toContain('.env')
+      expect(block).not.toContain('.agents/mcp-lock.json')
+      expect(block).not.toContain('.agents/.mcp-sync-state.json')
+      // No warning: the appended key did not collide with an existing value.
+      expect(result.warnings).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('env.syncEnvExample', () => {

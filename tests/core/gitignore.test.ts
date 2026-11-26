@@ -7,15 +7,12 @@ describe('gitignore.ensureIgnored', () => {
   it('creates .gitignore with the managed block when missing', () => {
     const { dir, cleanup } = createSandbox()
     try {
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      expect(result.added).toEqual(['.env', '.agents/.mcp-sync-state.json'])
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      expect(result.added).toEqual(['.env', 'secrets.local'])
       const content = readFileSync(`${dir}/.gitignore`, 'utf8')
       expect(content).toContain('# agents-mcp local (managed)')
       expect(content).toContain('.env')
-      expect(content).toContain('.agents/.mcp-sync-state.json')
+      expect(content).toContain('secrets.local')
       expect(content).toContain('# end agents-mcp local (managed)')
     } finally {
       cleanup()
@@ -30,12 +27,9 @@ describe('gitignore.ensureIgnored', () => {
         '# existing\n.env\n.node_modules\n',
         'utf8',
       )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      // `.env` already covered; only the state file is added.
-      expect(result.added).toEqual(['.agents/.mcp-sync-state.json'])
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      // `.env` already covered; only secrets.local is added.
+      expect(result.added).toEqual(['secrets.local'])
       const content = readFileSync(`${dir}/.gitignore`, 'utf8')
       const managedBlocks = content.match(/# agents-mcp local \(managed\)/g)
       expect(managedBlocks).toHaveLength(1)
@@ -49,13 +43,10 @@ describe('gitignore.ensureIgnored', () => {
     try {
       writeFileSync(
         `${dir}/.gitignore`,
-        '# agents-mcp local (managed)\n.env\n.agents/.mcp-sync-state.json\n# end agents-mcp local (managed)\n',
+        '# agents-mcp local (managed)\n.env\nsecrets.local\n# end agents-mcp local (managed)\n',
         'utf8',
       )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
       expect(result.added).toEqual([])
     } finally {
       cleanup()
@@ -78,9 +69,9 @@ describe('gitignore.ensureIgnored', () => {
   it('repeated calls keep all entries between header and footer, idempotent', () => {
     const { dir, cleanup } = createSandbox()
     try {
-      const first = ensureIgnored(dir, ['.agents/.mcp-sync-state.json'])
+      const first = ensureIgnored(dir, ['secrets.local'])
       const second = ensureIgnored(dir, ['.env'])
-      expect(first.added).toEqual(['.agents/.mcp-sync-state.json'])
+      expect(first.added).toEqual(['secrets.local'])
       expect(second.added).toEqual(['.env'])
 
       const content = readFileSync(`${dir}/.gitignore`, 'utf8')
@@ -93,9 +84,7 @@ describe('gitignore.ensureIgnored', () => {
       const footerIdx = content.indexOf(footer)
       expect(headerIdx).toBeGreaterThanOrEqual(0)
       expect(footerIdx).toBeGreaterThan(headerIdx)
-      expect(content.slice(headerIdx, footerIdx)).toContain(
-        '.agents/.mcp-sync-state.json',
-      )
+      expect(content.slice(headerIdx, footerIdx)).toContain('secrets.local')
       expect(content.slice(headerIdx, footerIdx)).toContain('.env')
 
       // No accumulated blank lines: exactly one trailing newline.
@@ -103,7 +92,7 @@ describe('gitignore.ensureIgnored', () => {
       expect(content.endsWith('\n\n')).toBe(false)
 
       // Idempotent: a third call adds nothing.
-      const third = ensureIgnored(dir, ['.agents/.mcp-sync-state.json', '.env'])
+      const third = ensureIgnored(dir, ['secrets.local', '.env'])
       expect(third.added).toEqual([])
       const again = readFileSync(`${dir}/.gitignore`, 'utf8')
       expect(again).toBe(content)
@@ -120,15 +109,15 @@ describe('gitignore.ensureIgnored', () => {
         '# existing\n# agents-mcp local (managed)\n.env\n# end agents-mcp local (managed)\n',
         'utf8',
       )
-      const result = ensureIgnored(dir, ['.agents/.mcp-sync-state.json'])
-      expect(result.added).toEqual(['.agents/.mcp-sync-state.json'])
+      const result = ensureIgnored(dir, ['secrets.local'])
+      expect(result.added).toEqual(['secrets.local'])
 
       const content = readFileSync(`${dir}/.gitignore`, 'utf8')
       const lines = content.split(/\r?\n/)
       const footerIdx = lines.findIndex(
         (l) => l.trim() === '# end agents-mcp local (managed)',
       )
-      expect(lines[footerIdx - 1]).toBe('.agents/.mcp-sync-state.json')
+      expect(lines[footerIdx - 1]).toBe('secrets.local')
       expect(lines[footerIdx - 2]).toBe('.env')
     } finally {
       cleanup()
@@ -143,11 +132,8 @@ describe('gitignore.ensureIgnored', () => {
         '# existing\n# agents-mcp local (managed)\n',
         'utf8',
       )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      expect(result.added).toEqual(['.env', '.agents/.mcp-sync-state.json'])
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      expect(result.added).toEqual(['.env', 'secrets.local'])
 
       const content = readFileSync(`${dir}/.gitignore`, 'utf8')
       expect(content).toContain('# end agents-mcp local (managed)')

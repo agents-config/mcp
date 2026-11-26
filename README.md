@@ -153,16 +153,18 @@ Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy
 - **`plugin.json` + `mcp.json`**: generated for **any** server added or synced, regardless of target agents. `agents-mcp add` **always** creates/updates these base plugin files, including with `--no-sync` and when no agent is configured or detected in the project.
 - **`mcp_config.json`**: generated only when `antigravity` is among the targets (`--agents antigravity`, `init`, or `sync`). `stdio` servers map to `{ command, args?, env? }`; `streamable-http` and `sse` servers map to `{ serverUrl, headers? }` (Antigravity's native format).
 - When `agents-mcp add` does not resolve any target agent, the CLI completes the index and base plugin and informs that no agent was synced, directing to `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).
-- `agents-mcp sync` without targets remains an error (`No resolvable target agents`, exit code `1`); pass `--agents <list>` to sync.
+- `agents-mcp sync` without targets succeeds: it materializes plugins, prints guidance (`run agents-mcp sync --agents <list>`), and exits `0`.
 - `--no-sync` on `add` suppresses **only** agent sync: plugin files continue to be generated in `.agents/plugins/` and the target state (`state.targets`) and already-registered agents are preserved.
 
 ### Ownership and collision
 
-The CLI tracks which plugins it manages in the sync state (`.agents/.mcp-sync-state.json`, field `managedPlugins`). If a directory `.agents/plugins/<name>/` already exists on disk **and** the name is **not** registered as managed:
+The CLI tracks which plugins it manages in the lock file (`.agents/mcp-lock.json`, field `managedPlugins`; global scope: `~/.agents/mcp-lock.json`). The lock is **not** auto-added to `.gitignore`; teams choose whether to version it. `.env` remains auto-protected.
 
-- **Interactive mode (`add`)**: warns the user and requests a different name (no auto-rename, no overwrite).
-- **Non-interactive mode (`add`)**: fails with a clear error, directing the user to pass a different `--name` (exit code `1`).
-- **`sync`**: skips overwriting the unmanaged directory, logs a warning per plugin, and includes it in the partial failure report.
+The lock is a record of what the CLI generated — not a gate on what `.agents/mcp.json` declares. `.agents/mcp.json` remains the canonical source of truth.
+
+- **`sync`**: for every server declared in `.agents/mcp.json`, the CLI writes/overwrites `.agents/plugins/<name>/plugin.json` and `mcp.json` (and `mcp_config.json` when `antigravity` is targeted), regardless of whether the directory pre-exists or whether the name is in `managedPlugins`. Extra files in the plugin directory are preserved. Declared names are adopted into `managedPlugins`.
+- **`add`**: if `.agents/plugins/<name>/` already exists **and** `<name>` is **not** declared in `.agents/mcp.json`, `add` blocks (non-interactive, exit `1`) or re-prompts (interactive). Declared names are adopted by `add`/`sync` instead.
+- **Unmanaged directories** whose name is not declared in `.agents/mcp.json` remain untouched by `sync` (not written, not deleted, not reported as a collision).
 
 ### Partial failure
 
@@ -171,7 +173,7 @@ If `.agents/mcp.json` (and/or agent native files) is written successfully, but c
 ### Removal and plugin cleanup
 
 - `remove <name>` removes **only** `plugin.json`, `mcp.json`, and `mcp_config.json` from the managed plugin in `.agents/plugins/<name>/`. The directory is deleted only if empty after cleanup; manual files (e.g. `sentinel.txt`) and subdirectories are preserved.
-- Directories in `.agents/plugins/<name>/` whose name is not registered in `managedPlugins` (sync state) are never modified or deleted by `remove` or `sync`.
+- Directories in `.agents/plugins/<name>/` whose name is **not** declared in `.agents/mcp.json` are never modified or deleted by `remove` or `sync`.
 - `sync` without `antigravity` among the targets removes `mcp_config.json` from managed plugins, keeping `plugin.json` and `mcp.json` intact.
 - `remove --no-sync` removes the server from the canonical config and cleans the managed plugin files locally, without syncing agent configs nor changing `state.targets`/`state.agents`.
 - `--dry-run` on `remove` and `sync` writes or deletes nothing: canonical, plugins, state, and agent native configs remain untouched.

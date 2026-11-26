@@ -37,9 +37,11 @@ The content is organized as follows:
 .agents/
   plugins/
     memory/
+      mcp_config.json
       mcp.json
       plugin.json
     sequential-thinking/
+      mcp_config.json
       mcp.json
       plugin.json
   skills/
@@ -106,6 +108,8 @@ docs/
     0010-adopt-agent-plugins-mcp-schema.md
     0011-plugin-lifecycle-and-safe-cleanup.md
     0012-adapter-storage-layout.md
+    0013-non-destructive-antigravity-and-additive-sync-targets.md
+    0014-mcp-lock-and-authoritative-sync.md
     README.md
 scripts/
   dist-package.ts
@@ -175,6 +179,7 @@ tests/
     zed.test.ts
   cli/
     entrypoint.test.ts
+    global-flags.test.ts
   commands/
     add-interactive.test.ts
     add.test.ts
@@ -240,21 +245,67 @@ vitest.config.ts
 
 # Files
 
-## File: .agents/plugins/memory/mcp.json
+## File: docs/decisions/0014-mcp-lock-and-authoritative-sync.md
+````markdown
+# ADR-0014: `mcp-lock.json` and authoritative `sync`
+
+- **Status**: Accepted
+- **Date**: 2026-11-25
+- **Related Workflow**: [`workflow/b14-mcp-lock-authoritative-sync/SPEC.md`](../../workflow/b14-mcp-lock-authoritative-sync/SPEC.md) / [`workflow/b14-mcp-lock-authoritative-sync/PLAN.md`](../../workflow/b14-mcp-lock-authoritative-sync/PLAN.md)
+- **Related Docs**: [`ADR-0005`](./0005-local-sync-state.md), [`ADR-0006`](./0006-non-destructive-compilation.md), [`ADR-0011`](./0011-plugin-lifecycle-and-safe-cleanup.md), [`ADR-0013`](./0013-non-destructive-antigravity-and-additive-sync-targets.md), [`spec/SPEC.md`](../../spec/SPEC.md)
+
+## Context
+
+`ADR-0005` introduced `.agents/.mcp-sync-state.json` as a hidden, always-git-ignored cache of `targets`, per-agent managed names, and `managedPlugins`. `ADR-0011` made that cache the sole ownership source for plugin cleanup, and `sync` skips any `.agents/plugins/<name>/` directory whose name is not registered there.
+
+On a fresh clone, the cache is absent. As a result:
+
+- `sync` classifies every pre-existing plugin directory as "unmanaged", skips it, reports `PLUGIN_UNMANAGED`, and exits `1` — contradicting the product promise that `.agents/mcp.json` is the single source of truth.
+- Teams cannot choose to version the hidden state file, because the CLI adds it to `.gitignore` automatically.
+- With no detected agent, `sync` exits `1` before materializing plugins at all.
+
+The `Expedite` backlog item `B14` is a release blocker for the initial experimental release.
+
+## Decision
+
+1. **Lock file identity.** Sync metadata lives at `.agents/mcp-lock.json` (project) and `~/.agents/mcp-lock.json` (global). The schema and `STATE_VERSION` remain `1`; only the filename changes.
+2. **Non-destructive legacy migration.** `loadState` reads the new lock first, then the legacy `.mcp-sync-state.json`, then an empty state. Using the legacy file emits a non-fatal notice. The legacy file is never deleted automatically, and a corrupt new lock never falls back to the legacy file.
+3. **Optional versioning.** The CLI never adds the lock (or the legacy file) to `.gitignore`; only `.env` remains auto-protected. Existing `.gitignore` content is not rewritten.
+4. **Authoritative `sync` from `.agents/mcp.json`.**
+   - Every server declared in the canonical config has `plugin.json`, `mcp.json`, and (when `antigravity` is targeted) `mcp_config.json` written/overwritten and adopted into `managedPlugins`, regardless of pre-existing directories or lock contents. Other files in the plugin directory are preserved.
+   - Every canonical server entry is overwritten in targeted agent native configs; `previousManagedNames` only governs pruning of stale managed entries, never whether to overwrite.
+   - Unmanaged plugin directories whose name is not declared in the canonical config remain untouched.
+5. **`add` keeps the collision guard.** `add` blocks/re-prompts only when the plugin directory exists, the name is not managed, **and** the name is not declared in the canonical config. Declared names may be adopted (including via `--force`).
+6. **Zero-target `sync` is non-fatal.** The `sync` command opts into `allowEmptyTargets`, so a fresh clone with only `.agents/mcp.json` materializes plugins and exits `0` with guidance. `runSync`'s strict default is preserved for direct callers.
+
+This ADR partially supersedes `ADR-0005` (state filename and Git-ignored rule). It refines `ADR-0011` by populating `managedPlugins` through adoption while keeping its closed removal surface; it does not change `ADR-0013`'s non-destructive target behavior.
+
+## Alternatives Considered
+
+- **Keep the old filename and only fix the collision:** rejected. The hidden name and forced `.gitignore` entry prevent the team-versioning workflow requested by the Product Owner.
+- **Infer plugin ownership from `plugin.json` content:** rejected. It creates a second source of truth and still requires parsing hand-edited files (`ADR-0011`).
+- **Delete and regenerate a colliding plugin directory recursively:** rejected. It would destroy manual files and violates `ADR-0006`.
+- **Auto-delete the legacy state file after migration:** rejected. Silent deletion of tool-owned but user-visible files is unnecessary risk; a notice plus `doctor` warning is enough.
+- **Keep auto-ignoring the lock:** rejected. It makes versioning impossible and keeps the fresh-clone failure mode.
+- **Keep `sync` failing on zero targets:** rejected. Plugin materialization does not depend on targets, and the failure breaks the clone-and-sync onboarding promise.
+
+## Consequences
+
+- **Positive:** Fresh-clone onboarding works without a local lock; `.agents/mcp.json` is authoritative in practice; teams choose whether to version the lock; plugin adoption is explicit and recorded; `add` still protects undeclared manual plugins.
+- **Negative / Trade-offs:** Adopting a same-named manual plugin overwrites its three managed filenames (intended). The lock stores absolute `agents[].path` values and per-agent `updatedAt`, so a committed lock produces cross-machine diff noise. The legacy file lingers until manually removed. Zero-target `sync` no longer signals a usage error. On a lockless clone, `remove` before the first `sync` cannot prove ownership of the removed server's plugin directory and preserves it (run `sync` first or commit the lock).
+- **Follow-up:** Consider a portable/relative lock representation (schema `version: 2`) if committed locks become common. Backlog items `B11` (doctor parse errors) and `B12` (target removal) remain open. Teams that want clean diffs may keep ignoring the lock; this is a project choice, not a CLI default.
+````
+
+## File: .agents/plugins/memory/mcp_config.json
 ````json
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
   "mcpServers": {
     "memory": {
-      "type": "stdio",
       "command": "npx",
       "args": [
         "-y",
         "@modelcontextprotocol/server-memory"
-      ],
-      "env": {
-        "MEMORY_FILE_PATH": "/home/alexbruno/Projetos/GitHub/agents-mcp/cli/memory.jsonl"
-      }
+      ]
     }
   }
 }
@@ -267,6 +318,363 @@ vitest.config.ts
   "version": "1.0.0",
   "description": "MCP server plugin `memory` managed by agents-mcp"
 }
+````
+
+## File: .agents/plugins/sequential-thinking/mcp_config.json
+````json
+{
+  "mcpServers": {
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    }
+  }
+}
+````
+
+## File: .agents/plugins/sequential-thinking/mcp.json
+````json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    }
+  }
+}
+````
+
+## File: .agents/plugins/sequential-thinking/plugin.json
+````json
+{
+  "name": "sequential-thinking",
+  "version": "1.0.0",
+  "description": "MCP server plugin `sequential-thinking` managed by agents-mcp"
+}
+````
+
+## File: .agents/skills/changelog-management/resources/CHANGELOG.md
+````markdown
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+````
+
+## File: .agents/skills/environment-preflight/SKILL.md
+````markdown
+---
+name: environment-preflight
+description: >-
+  Inspect a project's structure, frameworks, and tech stack, then verify in the
+  user's shell and development environment whether the agent has direct access
+  to the required runtimes, package managers, and CLIs. Use this skill when
+  starting work in a repository, before running builds/tests/toolchains, or when
+  diagnosing missing command-line tools—and notify the user clearly whenever
+  required tools are missing or inaccessible.
+---
+
+# Environment Preflight
+
+Before assuming you can build, test, lint, migrate, or run a project's toolchain, **inspect the repository to determine what technologies it uses**, then **probe the active shell environment** to confirm direct access to every required tool. Never guess, fabricate tool output, or silently skip a check when a CLI is unavailable.
+
+## 1. Identify Project Stack & Required Tools
+
+Scan the repository root (and workspace/monorepo packages, if present) for manifests, lockfiles, and configuration files to map the tech stack:
+
+- **Runtimes & Version Pins**: `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml`, `go.mod`, `engines` in `package.json`, `requires-python` in `pyproject.toml`.
+- **Package Managers & Lockfiles**: `package.json` + `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `bun.lockb`, `pyproject.toml` / `uv.lock` / `poetry.lock` / `requirements.txt`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle*`, `Gemfile`, `composer.json`.
+- **Frameworks, Build & Quality Tools**: Scripts and configs (e.g., `scripts` in `package.json`, `Makefile`, `justfile`, `Taskfile.yml`, `tsconfig.json`, `vite.config.*`, `next.config.*`, `pytest.ini`, `ruff.toml`, `.eslintrc*`, `biome.json`).
+- **Infrastructure & External CLIs**: `Dockerfile`, `docker-compose.yml`, `terraform/`, `k8s/`, `.github/workflows/*`, database/migration configs (e.g., `prisma/`, `drizzle.config.*`, `alembic.ini`), or cloud/platform configs (`vercel.json`, `firebase.json`, `fly.toml`).
+
+From these files, build a concise list of **required** tools for the current task (e.g., runtime, package manager, test runner, linter/typechecker, container or cloud CLI) and **optional** tools.
+
+## 2. Probe the Shell & Development Environment
+
+Check what the agent can directly execute in the current terminal/shell:
+
+1. **Check binary availability**:
+   - POSIX (`bash`/`zsh`/`sh`): `command -v <tool>` (or `which <tool>`).
+   - Windows PowerShell: `Get-Command <tool> -ErrorAction SilentlyContinue`.
+2. **Check project-local and version-manager paths** before concluding a tool is missing:
+   - Node.js: `./node_modules/.bin/<tool>` (or `npx` / `pnpm exec` / `bunx`).
+   - Python: `.venv/bin/<tool>`, `venv/bin/<tool>`, or `uv run <tool>`.
+   - Version managers: `nvm`, `fnm`, `mise`, `asdf`, `pyenv`, `rbenv`, `rustup` (check if shims exist or if the shell hasn't initialized them).
+3. **Verify versions & runtime readiness**:
+   - Run lightweight version checks (`<tool> --version` or `<tool> version`) and compare against project version pins.
+   - For daemon- or auth-dependent CLIs (e.g., `docker`, `kubectl`, `gh`, `aws`, `gcloud`, `psql`), verify operational access when the task requires them (e.g., `docker info`, `gh auth status`)—not just binary existence.
+4. **Do not mutate the system silently**:
+   - Never install global packages, modify shell profiles, or change system toolchains without explicit user approval.
+
+## 3. Classify Findings & Notify the User
+
+Categorize each required tool into one of three states:
+
+- **Ready**: Accessible in the agent's shell (or project-local environment) with a compatible version.
+- **Accessible with caveats**: Installed, but requires activating a local environment (e.g., `.venv`, `nvm use`), has a version mismatch against project pins, or its daemon/auth/network access is unavailable in the current shell.
+- **Missing / Inaccessible**: Not installed or not reachable from the agent's terminal environment.
+
+### When Tools Are Missing or Inaccessible
+
+**Notify the user immediately** before proceeding with work that depends on those tools. Keep the notification concise and actionable:
+
+1. **What is missing or blocked**: Name the exact tool/CLI and which part of the project or task requires it (e.g., `pnpm` required by `pnpm-lock.yaml`, `docker` daemon unreachable).
+2. **What was checked**: Mention the probe performed (e.g., `command -v pnpm`, `.venv/bin/pytest`, `docker info`) and the observed error or version mismatch.
+3. **How to resolve**: Provide clear installation, `PATH`/environment activation, or permission instructions—or ask the user to run the command locally and share the output if the agent environment cannot access it.
+4. **Impact on current task**: State clearly whether you can still make progress (e.g., implementing code changes while deferring test/build verification to the user) or whether the task is blocked until the tool is available.
+
+## 4. Session Discipline
+
+- Run this preflight once when entering an unfamiliar project or starting a new toolchain-dependent task; do not repeat identical probes on every step.
+- Re-probe only when switching to a different subproject/stack or after the user confirms they installed or fixed a tool.
+````
+
+## File: .agents/skills/npm-version-management/SKILL.md
+````markdown
+---
+name: npm-version-management
+description: >-
+  Enforce disciplined NPM package version management strictly via the `npm
+  version` CLI. Prohibit manual edits to the `version` field in `package.json`,
+  detect version drift between `package.json` and Git tags, and provide clear
+  remediation steps to restore synchronization.
+---
+
+# NPM Version Management
+
+Define strict policies and workflows for managing and updating NPM package versions in Node.js and JavaScript/TypeScript projects.
+
+---
+
+## The Cardinal Rule: Never Manually Edit `package.json` Version
+
+> [!CAUTION]
+> **NEVER manually edit the `"version"` field in `package.json` using file editing tools, text editors, or search-and-replace scripts.**
+>
+> All version bumps MUST be executed strictly through the official `npm version` command.
+
+---
+
+## Why Git Tag Synchronization Matters
+
+In a Git repository, the `npm version` command performs three critical atomic operations:
+
+1. **Updates Manifests**: Safely bumps the `"version"` field in `package.json` and updates `package-lock.json` (preserving formatting and indentation).
+2. **Creates a Git Commit**: Stages the manifest changes and generates a dedicated release commit with a standardized message (default: `v<version>`).
+3. **Creates a Git Tag**: Creates an annotated Git tag matching the new version (e.g., `v1.2.3`).
+
+### Consequences of Manual Editing
+
+Manual editing bypasses this integrated workflow and causes severe issues:
+- **Version Drift**: The version declared in `package.json` diverges from Git tags.
+- **CI/CD Pipeline Breakage**: Modern release pipelines, automated changelogs, container registries, and package registries (NPM, GitHub Packages) rely on Git tags matching the manifest version.
+- **Broken Release Tracking**: Git history loses the explicit release boundary, complicating rollbacks, `git bisect`, and semantic comparisons.
+
+---
+
+## Pre-Bump Checklist
+
+Before running `npm version`, ensure the following prerequisites are met:
+
+1. **Clean Working Tree**:
+   - The Git working directory MUST be clean:
+     ```bash
+     git status --porcelain
+     ```
+   - If uncommitted changes exist, commit or stash them first. Never bypass `npm version`'s clean working tree check with `--force`.
+2. **Verification & Tests Pass**:
+   - All tests, typechecks, and linters must pass before cutting a version.
+3. **Correct Branch**:
+   - Confirm you are on the designated release branch (e.g., `main`, `master`, or `release/*`).
+
+---
+
+## Versioning Commands & SemVer Selection
+
+Choose the appropriate SemVer increment based on the nature of changes:
+
+| Command | SemVer Level | When to Use | Example (`1.0.0` -> ) |
+| :--- | :--- | :--- | :--- |
+| `npm version patch` | **PATCH** | Backward-compatible bug fixes or minor patches | `1.0.1` |
+| `npm version minor` | **MINOR** | Backward-compatible new features or enhancements | `1.1.0` |
+| `npm version major` | **MAJOR** | Breaking changes, incompatible API modifications | `2.0.0` |
+
+### Pre-release Versioning
+
+For alpha, beta, or release candidate iterations:
+
+```bash
+# Start pre-releases
+npm version prepatch --preid=alpha   # 1.0.0 -> 1.0.1-alpha.0
+npm version preminor --preid=beta    # 1.0.0 -> 1.1.0-beta.0
+npm version premajor --preid=rc      # 1.0.0 -> 2.0.0-rc.0
+
+# Increment existing pre-release
+npm version prerelease               # 1.0.1-alpha.0 -> 1.0.1-alpha.1
+```
+
+### Custom Commit Message
+
+To provide a descriptive commit message alongside the version bump:
+
+```bash
+npm version minor -m "Release %s: Add authentication module"
+```
+*(The `%s` placeholder is replaced with the newly generated version number).*
+
+### Specific Target Version
+
+To bump to an exact explicit version while retaining Git tag creation:
+
+```bash
+npm version 2.4.0
+```
+
+---
+
+## NPM Lifecycle Hooks Integration
+
+Take advantage of NPM's built-in version lifecycle hooks in `package.json` scripts:
+
+```json
+{
+  "scripts": {
+    "preversion": "npm test && npm run lint",
+    "version": "npm run build && git add dist/",
+    "postversion": "git push && git push --tags"
+  }
+}
+```
+
+- **`preversion`**: Runs before the version is bumped. Use to enforce testing, linting, or changelog verification. If it fails, the version bump is aborted.
+- **`version`**: Runs after `package.json` is modified and staged, but **before** the Git commit and tag are created. Perfect for generating build artifacts, syncing changelogs, and staging them (`git add CHANGELOG.md`).
+- **`postversion`**: Runs after the Git commit and tag have been created. Ideal for pushing commits and tags to the remote repository.
+
+---
+
+## Synchronizing with Remote
+
+The `npm version` command creates the commit and tag **locally**. Always remember to push both to the remote repository:
+
+```bash
+git push && git push --tags
+# Or using --follow-tags (pushes annotated tags on the current branch):
+git push --follow-tags
+```
+
+---
+
+## Drift Detection & Remediation (Handling Manual Edits)
+
+When inspecting a project, preparing a release, or reviewing changes, the agent must check whether the current `"version"` in `package.json` matches the latest Git version tag.
+
+### Detecting Drift
+
+Run the following checks to identify if a manual version edit occurred:
+
+1. **Uncommitted Version Edit**:
+   - Check if `package.json` contains unstaged or staged modifications to `"version"`:
+     ```bash
+     git diff package.json
+     ```
+2. **Missing or Mismatched Git Tag**:
+   - Extract the current version from `package.json` (e.g., `X.Y.Z`).
+   - Check if the matching Git tag exists and points to the appropriate commit:
+     ```bash
+     git tag -l "vX.Y.Z"
+     ```
+   - If the tag does not exist or points to an older, unrelated commit, the version has drifted out of sync.
+
+---
+
+### Remediation Workflows
+
+If manual modification or tag desynchronization is detected, **alert the user immediately** and present the following two resolution options:
+
+#### Option 1: Revert Manual Edit and Use `npm version` (Recommended)
+
+This is the cleanest approach as it ensures standard NPM commit and tag generation.
+
+- **If the manual edit is uncommitted**:
+  ```bash
+  # 1. Discard manual changes in package manifests
+  git checkout HEAD -- package.json package-lock.json
+
+  # 2. Run the proper npm version command
+  npm version <patch|minor|major|X.Y.Z>
+  ```
+
+- **If the manual edit was committed locally (HEAD)**:
+  ```bash
+  # 1. Undo the commit while keeping working files
+  git reset --soft HEAD~1
+
+  # 2. Discard the manual version edits
+  git checkout HEAD -- package.json package-lock.json
+
+  # 3. Apply the version bump through npm version
+  npm version <patch|minor|major|X.Y.Z>
+  ```
+
+#### Option 2: Retroactively Synchronize Git Tag with Manual Version
+
+Use this option if the manual change has already been pushed or must be preserved:
+
+1. **Ensure lockfile is in sync**:
+   ```bash
+   npm install --package-lock-only
+   ```
+2. **Commit manifest changes (if not yet committed)**:
+   ```bash
+   git add package.json package-lock.json
+   git commit -m "vX.Y.Z"
+   ```
+3. **Create the missing annotated Git tag**:
+   ```bash
+   git tag -a "vX.Y.Z" -m "vX.Y.Z"
+   ```
+4. **Push commit and tag to remote**:
+   ```bash
+   git push && git push origin "vX.Y.Z"
+   ```
+
+---
+
+## Agent Guardrails & Interception
+
+When acting as an AI assistant:
+
+1. **Intercept Manual Edits**: If requested to "change the version to X", "bump version in package.json", or "prepare release", **do NOT use file modification tools** (`edit_file` or `write_file`) on `package.json` to alter `"version"`.
+2. **Execute Terminal Command**: Run `npm version <major|minor|patch|version>` via the shell execution tool.
+3. **Detect & Alert on Drift**: Whenever inspecting a repository before a release or build, verify if `package.json` version matches Git tags. If a manual edit or missing tag is detected:
+   - Alert the user proactively.
+   - Explain that `package.json` and Git tags are out of sync.
+   - Offer the two remediation paths (revert + `npm version` or create retroactive tag).
+4. **Notify User**: Clearly explain that `npm version` was used to ensure synchronization between `package.json` and Git version tags.
 ````
 
 ## File: .agents/skills/software-audit/resources/AUDIT.md
@@ -1135,6 +1543,456 @@ When the user or another agent:
 *This skill embodies the principle: **Quality is not inspected in; it is architected in.** The auditor's role is to make the invisible visible, the implicit explicit, and the risky managed.*
 ````
 
+## File: .agents/skills/spec-driven-workflow/resources/BACKLOG.md
+````markdown
+# Product Backlog & Demand: <Project or Initiative>
+
+- **Product Owner**: <author or agent>
+- **Product Goal**: <Overarching outcome or product objective>
+- **Last Updated**: <YYYY-MM-DD>
+
+## Product Backlog
+
+Prioritized list of product evolutions, features, bug reports, and improvements before entering downstream engineering (`SPEC.md`).
+
+| Order | ID | Title | Type | Class of Service | Status | Value / Impact |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | B1 | <Short item title> | Feature \| Bug \| Improvement | Expedite \| Fixed Date \| Standard \| Intangible | Ready \| Refining \| Idea \| In Downstream \| Done | <Why this matters to users/business> |
+| 2 | B2 | <Short item title> | Feature \| Bug \| Improvement | Standard | Idea | <Why this matters to users/business> |
+
+---
+
+## Active Demand Brief: <ID - Short Title>
+
+> Complete this section when an item is refined to `Ready` for handoff to the Architect (`workflow/<change-slug>/SPEC.md`).
+
+- **Backlog ID**: `<B1>`
+- **Type**: Feature | Bug Fix | Enhancement
+- **Class of Service**: Expedite | Fixed Date | Standard | Intangible
+- **Target Release / Urgency**: <e.g., Immediate hotfix, Next sprint, Q4 milestone>
+
+### User Problem & Business Value
+
+Describe who is affected, what problem or opportunity exists, and what measurable product or user outcome we want to achieve.
+
+### User Story / Job-to-be-Done
+
+- **As a** <user role or persona>,
+- **I want** <capability or behavior>,
+- **So that** <expected benefit or outcome>.
+
+### Bug Impact & Observed Behavior (For Bug Fixes)
+
+- **User-Observed Behavior**: <What happens today from the user's perspective>
+- **Expected Behavior**: <What should happen instead>
+- **Business / Customer Impact**: <Severity, affected users, workarounds>
+
+### Supporting Assets & Evidence (Optional)
+
+Store screenshots (including annotated captures), mockups, or supporting files in `workflow/assets/` and link them here:
+
+- ![<Short description>](./assets/<filename>) — <What this image or file highlights>
+
+### Product Acceptance Expectations
+
+- [ ] <High-level outcome observable by a user or stakeholder>
+- [ ] <High-level outcome observable by a user or stakeholder>
+
+### Out of Scope
+
+- <Explicitly excluded capability or deferred evolution>
+
+### Definition of Ready (DoR)
+
+- [ ] Problem and user value are clear without prescribing technical implementation.
+- [ ] Priority and class of service are explicit.
+- [ ] Product acceptance expectations are testable at a behavioral level.
+- [ ] Open product questions are resolved or explicitly flagged.
+````
+
+## File: .codegraph/.gitignore
+````
+# CodeGraph data files — local to each machine, not for committing.
+# Ignore everything in .codegraph/ except this file itself, so transient
+# files (the database, daemon.pid, sockets, logs) never show up in git.
+*
+!.gitignore
+````
+
+## File: docs/decisions/0003-bundler-tsup.md
+````markdown
+# ADR-0003: Bundle the CLI with `tsup` (esbuild), no declarations
+
+- **Status**: Accepted
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+
+## Context
+
+The deliverable is a Node CLI distributed as a single ESM file with zero runtime
+dependencies and a shebang. We do not publish type declarations. The build must be
+fast, deterministic, and require little bespoke glue. The project also runs
+TypeScript 7 (native compiler), which makes any tool that depends on the
+TypeScript JS API a risk.
+
+## Decision
+
+Use `tsup@^9` with esbuild under the hood:
+
+- single entry `src/index.ts`, `format: ['esm']`, `platform: 'node'`,
+  `target: 'node22'`, `splitting: false`, `sourcemap: false`, `treeshake: true`;
+- `banner: { js: '#!/usr/bin/env node' }`, `clean: true`;
+- **`dts: false`** — there are no types to emit, which also removes the
+  `rollup-plugin-dts`/TypeScript-API dependency from the build.
+
+If `tsup` blocks a future Node/TypeScript upgrade, replace it with a
+`scripts/build.ts` that calls `esbuild.build()` with the same options.
+
+## Alternatives Considered
+
+- **Vite**: rejected. Browser-first; CLI use requires library/SSR mode with Rollup,
+  externalization rules, and a dev server we never use.
+- **Raw esbuild**: viable, but requires hand-maintaining a build script for
+  banner, clean, target, and single-file output.
+- **`tsc` only**: rejected. It does not bundle dependencies into one file and
+  cannot inline JSON at build time.
+
+## Consequences
+
+- **Positive**: near-zero build configuration, esbuild speed, single-file output,
+  no type-emission failure mode.
+- **Negative / Trade-offs**: one dev dependency wrapper; its defaults can change
+  between majors.
+- **Follow-up**: verify the output contract in CI (`node dist/index.js --help`, no
+  bare external imports).
+````
+
+## File: docs/decisions/0004-runtime-context-and-pure-compilers.md
+````markdown
+# ADR-0004: Injected runtime context and pure native compilers
+
+- **Status**: Accepted
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+
+## Context
+
+The tool resolves OS-specific global paths (VS Code profiles, XDG, APPDATA), must
+behave identically on Linux/macOS/Windows, and needs diagnostics (`doctor`) that
+compare intended output with what is on disk. Calling `os.homedir()`,
+`process.platform`, or `process.cwd()` inside modules forces brittle module
+mocking and makes Windows behavior untestable on Linux CI.
+
+## Decision
+
+- Introduce `RuntimeContext { cwd, homeDir, platform, env, isTTY }`, created once
+  at the entrypoint and injected everywhere.
+- Adapters expose `capabilities` (scopes, format, env syntax, native default,
+  native disable, `cwd`) and a **pure** `compile(server) → native entry`.
+- `applyServers()` returns `{ content, managedNames, warnings }`; it never prints
+  and never touches the filesystem.
+- `extractServers()` returns `{ servers, warnings }`.
+- Detection uses file/directory existence only; binary lookup belongs to `doctor`.
+
+## Alternatives Considered
+
+- **Module mocking in tests** (`vi.mock('node:os')`): rejected. Fragile, leaks
+  into unrelated tests, and cannot model cross-platform path resolution cleanly.
+- **Text-diff drift checks**: rejected. They produce false positives whenever a
+  user reformats a file.
+
+## Consequences
+
+- **Positive**: hermetic tests, reusable pure compilers, semantic drift checks,
+  correct Windows/Linux behavior.
+- **Negative / Trade-offs**: every call site must thread the context; a missed
+  argument is a compile-time error by design.
+- **Follow-up**: keep `RuntimeContext` dependency-free; never add I/O methods to it.
+````
+
+## File: docs/decisions/0005-local-sync-state.md
+````markdown
+# ADR-0005: Local sync state and persisted agent targets
+
+- **Status**: Partially superseded by [ADR-0014](./0014-mcp-lock-and-authoritative-sync.md) (state filename and Git-ignored rule)
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+
+## Context
+
+Non-destructive compilation means `sync` may only remove native entries it created
+before. That requires remembering which server names were written to which agent
+file. It also needs to know which agents the user selected, because in a fresh
+repository no native file exists yet — detection alone would make `sync` a silent
+no-op. The state cannot live in the canonical file, which is shared and
+hand-edited.
+
+## Decision
+
+Maintain `.agents/.mcp-sync-state.json` (project) and
+`~/.agents/.mcp-sync-state.json` (global):
+
+```json
+{
+  "version": 1,
+  "scope": "project",
+  "targets": ["claude-code", "opencode"],
+  "agents": {
+    "claude-code": { "path": "/abs/.mcp.json", "names": ["github"], "updatedAt": "..." }
+  }
+}
+```
+
+- `targets` is persisted by `init`, `sync --agents`, and `add`/`import` selections;
+  `sync` precedence is `--agents` → `targets` → detection.
+- `names` per agent is the authoritative `previousManagedNames`.
+- `import` seeds names even with `--no-sync`.
+- Missing state = empty; corrupt/unknown version = warn, treat as empty, rewrite
+  after the next successful sync.
+- State is git-ignored, written atomically, and never required by third-party
+  implementations of the format.
+
+## Alternatives Considered
+
+- **Commit the state file**: rejected. Contains absolute paths and machine-local
+  history; merge conflicts on every branch.
+- **Marker comments inside native files**: rejected. Not portable across JSON
+  files/agents and pollutes user config.
+- **Own the entire root key (`mcpServers`/`mcp`)**: rejected. Destructive; would
+  delete servers the user added manually.
+
+## Consequences
+
+- **Positive**: safe pruning, working fresh-clone flow, deterministic behavior.
+- **Negative / Trade-offs**: each developer must run `init`/`sync --agents` once per
+  checkout; state is not portable between machines.
+- **Follow-up**: bump `STATE_VERSION` only with a migration path.
+````
+
+## File: docs/decisions/0006-non-destructive-compilation.md
+````markdown
+# ADR-0006: Preserve native files in place
+
+- **Status**: Accepted
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+
+## Context
+
+Existing agent files are often multi-purpose (`opencode.json`, `.zed/settings.json`,
+`~/.claude.json`) or contain data we do not model (VS Code `inputs`, editor
+settings, Claude projects/history). A migration that deletes or strips those files
+after import is irreversible, loses non-MCP data, and breaks users who open the
+old client before running `sync`.
+
+## Decision
+
+- Compilation is always in place and additive/non-destructive, using JSONC AST
+  edits.
+- The CLI never deletes, moves, or renames a native config file, and offers no
+  destructive cleanup mode.
+- `import` reads native files, merges into the canonical file, and then `sync`
+  rewrites only the managed entries — the net effect of "migration" without data
+  loss.
+- `--force` on `init` writes a timestamped `.bak` before overwriting.
+- Unparsable native files are never overwritten; the command fails with a clear
+  message.
+
+## Alternatives Considered
+
+- **Delete native files after import**: rejected. Destructive and lossy.
+- **Remove the MCP root key from shared files**: rejected. Same loss of manual
+  entries; also impossible to distinguish ours without state.
+- **Backup-then-delete**: rejected. Still surprises users and leaves stale files
+  that can shadow the canonical config.
+
+## Consequences
+
+- **Positive**: no data loss, safe adoption path, users can keep using their
+  existing clients during migration.
+- **Negative / Trade-offs**: native files remain in the repository unless the user
+  chooses otherwise; `sync` produces diffs in tracked files.
+- **Follow-up**: document in `spec/SPEC.md` §9–10 and in the README quick start.
+````
+
+## File: docs/decisions/0007-env-and-secrets.md
+````markdown
+# ADR-0007: `.env` precedence and safe secret extraction
+
+- **Status**: Accepted
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
+
+## Context
+
+The canonical file is committed, so it must never contain plaintext credentials.
+Values must come from the project, not from whatever happens to be exported in the
+developer's shell, because that makes builds non-reproducible. Importing existing
+configs frequently encounters hard-coded tokens that must be moved somewhere safe
+without silently rewriting unrelated values.
+
+## Decision
+
+- Resolution order: local `.env` of the active scope (`<cwd>/.env`, or
+  `~/.agents/.env` for global) **first**, then `process.env`. This intentionally
+  inverts the common `dotenv` default.
+- Canonical and native files contain only `${VAR}` / `${VAR:-default}`
+  placeholders; the compiler translates syntax, never substitutes values.
+- Secret detection uses key-name heuristics plus value heuristics (URL credentials,
+  known token prefixes, high-entropy ≥ 20 chars) across `env`, `headers`, `args`,
+  `url`.
+- Interactive imports propose extraction per finding; `--yes`/CI only **warn**
+  unless `--extract-secrets` is passed.
+- Before writing `.env`: ensure it is git-ignored, create it with mode `0600`, and
+  never overwrite an existing key. `.env.example` receives `KEY=` only.
+- Secret values are masked in all output, including `--dry-run`.
+
+## Alternatives Considered
+
+- **`process.env` first**: rejected. Shell state would override the project and
+  make "works on my machine" bugs invisible.
+- **Regex-only detection** (any non-placeholder value): rejected. It rewrites
+  harmless values such as `NODE_ENV=production`.
+- **Never extract automatically**: rejected. It leaves users with invalid
+  committed secrets and no guided path.
+
+## Consequences
+
+- **Positive**: reproducible resolution, no secret leakage, explicit CI behavior.
+- **Negative / Trade-offs**: differs from `dotenv`; may surprise users who rely on
+  exported variables. Must be documented prominently.
+- **Follow-up**: `doctor` reports unresolved required variables and tracked `.env`.
+````
+
+## File: docs/decisions/0009-typescript-7-removes-baseurl.md
+````markdown
+# ADR-0009: TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`
+
+- **Status**: Accepted
+- **Date**: 2026-11-13
+- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md), `workflow/PLAN.md`
+
+## Context
+
+BLUEPRINT §6 specified `baseUrl: "."` together with
+`paths: { "$/*": ["./*"] }`, and stated that if TypeScript 7 rejected any option,
+the project should fall back to TypeScript 5.9 and record a new ADR. TypeScript
+7.0.2 removes `baseUrl` (`TS5102`), but it resolves `paths` relative to
+`tsconfig.json` without it, so the `$` alias keeps working for `tsc`, `tsup`, and
+`tsx`.
+
+## Decision
+
+- Keep TypeScript 7 as the only type checker.
+- Omit `baseUrl`; keep `paths: { "$/*": ["./*"] }`, which TS 7 resolves relative
+  to `tsconfig.json`.
+- `vitest.config.ts` keeps its explicit `$` alias because Vitest does not read
+  `tsconfig` paths.
+
+## Alternatives Considered
+
+- **Fall back to TypeScript 5.9**: rejected. It restores `baseUrl` but loses the
+  TS 7 checker the plan targets, for an option TS 7 intentionally removed.
+- **Add `paths: { "*": ["./*"] }`**: rejected. It broadens resolution beyond the
+  `$` convention and can mask accidental bare imports.
+- **Drop the `$` alias entirely**: rejected. It would force long relative paths
+  and diverge from the import rule.
+
+## Consequences
+
+- **Positive**: TS 7 works with no configuration beyond removing `baseUrl`; the
+  import/alias rule is preserved.
+- **Negative / Trade-offs**: the literal `baseUrl` line in BLUEPRINT §6 is no
+  longer accurate; readers must follow this ADR.
+- **Follow-up**: treat the T1 `tsconfig.json` as the reference config and verify
+  that `scripts/` (T2) resolve `$` under `tsx`.
+````
+
+## File: docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md
+````markdown
+# ADR-0011: Ciclo de vida de plugins e limpeza segura
+
+- **Status**: Accepted
+- **Date**: 2026-11-21
+- **Related Docs**: [`spec/SPEC.md`](../../spec/SPEC.md), [`ADR-0005`](./0005-local-sync-state.md), [`ADR-0006`](./0006-non-destructive-compilation.md), [`ADR-0010`](./0010-adopt-agent-plugins-mcp-schema.md)
+
+## Context
+
+A partir de B3/B5, a CLI gera artefatos próprios em `.agents/plugins/<nome>/`:
+`plugin.json`, `mcp.json` e, quando `antigravity` está entre os targets,
+`mcp_config.json`. Esses diretórios convivem com plugins e arquivos criados
+manualmente pela pessoa usuária no mesmo caminho.
+
+O `sync` era estritamente aditivo: escrevia/sobrescrevia, mas nunca removia. Como
+consequência, remover um servidor (ou desselecionar `antigravity`) deixava
+arquivos obsoletos que podiam fazer agentes continuarem carregando servidores já
+removidos. Ao mesmo tempo, o princípio de compilação não destrutiva (ADR-0006)
+proíbe tocar em arquivos nativos ou em conteúdo manual.
+
+É necessário um critério explícito e conservador para decidir **o que a CLI pode
+apagar**, sem depender de heurísticas de conteúdo e sem risco para arquivos da
+pessoa usuária.
+
+## Decision
+
+1. **Propriedade declarada, não inferida.** `SyncState.managedPlugins`
+   (`.agents/.mcp-sync-state.json`, por escopo) é a única fonte de verdade sobre
+   quais plugins pertencem à CLI. Um diretório em `.agents/plugins/<nome>/` só é
+   considerado gerenciado se `<nome>` constar em `managedPlugins`.
+
+2. **Superfície de remoção fechada.** A CLI pode remover exclusivamente
+   `plugin.json`, `mcp.json` e `mcp_config.json` de um plugin gerenciado. Qualquer
+   outro arquivo ou subdiretório é preservado.
+
+3. **Diretório só sai se vazio.** Após remover os arquivos gerenciados, o
+   diretório é removido com `rmdir` não recursivo e somente se estiver vazio.
+   Arquivos extras mantêm o diretório.
+
+4. **Reconciliação no `sync`.** A cada sincronização real, o conjunto
+   `managedPlugins − nomesCanônicos` é considerado obsoleto e tem os arquivos
+   gerenciados removidos; `managedPlugins` é reduzido ao conjunto canônico mais
+   os plugins gravados com sucesso. Isso cobre `remove`, edição manual do
+   canônico e estado legado.
+
+5. **`mcp_config.json` segue os targets ativos.** Quando uma sincronização real
+   ocorre sem `antigravity` entre os targets, `mcp_config.json` é removido de
+   todos os plugins gerenciados, preservando `plugin.json` e `mcp.json`.
+   `add --no-sync` cria o arquivo quando `antigravity` está ativo, mas **não**
+   poda plugins existentes (escopo de escrita restrito ao servidor adicionado —
+   ver B8).
+
+6. **Falhas são visíveis.** Erros de I/O na limpeza são capturados por arquivo,
+   reportados ao usuário e resultam em exit code `1`. Em `remove --no-sync`, o
+   nome permanece em `managedPlugins` para que o próximo `sync` tente novamente.
+
+7. **`--dry-run` é absoluto.** Nenhuma primitiva de limpeza toca no disco em
+   dry-run; ela apenas relata o que seria removido.
+
+## Alternatives Considered
+
+- **Inferir propriedade pelo conteúdo de `plugin.json`** (ex.: descrição
+  `managed by agents-mcp`): rejeitado. Cria segundo critério de verdade,
+  duplica estado e ainda exigiria parsing tolerante a edições manuais.
+- **Apagar o diretório recursivamente** quando o nome é gerenciado: rejeitado.
+  Viola a proteção de arquivos manuais e amplia o raio de destruição.
+- **Não remover nada e apenas avisar** (status quo): rejeitado. Mantém agentes
+  carregando servidores removidos e não cumpre o ciclo de vida esperado.
+- **Poda apenas dentro do `remove`**: rejeitado. Não cobre edição manual do
+  canônico nem desseleção de `antigravity` via `sync`.
+
+## Consequences
+
+- **Positive**: ciclo de vida completo e previsível; workspace limpo; nenhum
+  arquivo manual é apagado; `--dry-run` continua seguro; erros não são
+  mascarados.
+- **Negative / Trade-offs**: projetos cujo estado local não registra
+  `managedPlugins` (estado legado ou removido) mantêm diretórios órfãos até
+  limpeza manual — escolha deliberada em favor da segurança.
+- **Follow-up**: B7 (ausência de targets em `init`/`import`/`remove`) e B8
+  (regeneração granular no `add`) permanecem fora deste ADR. O mesmo defeito de
+  `--no-sync` em `import` deve ser corrigido em item próprio.
+````
+
 ## File: docs/decisions/0012-adapter-storage-layout.md
 ````markdown
 # ADR-0012: Explicit Adapter Storage Layout (`single-file` vs `per-plugin`)
@@ -1175,6 +2033,416 @@ Separately, `doctor` lacked a declarative `rootKey` on `AdapterCapabilities`, fo
 
 - **Positive:** Eliminates four bugs from a single contract fix; makes `doctor` drift checks deterministic via `rootKey`; cleanly supports future per-plugin agents.
 - **Negative / Trade-offs:** Requires updating `AdapterCapabilities` across all 7 adapters and recording `state.agents.antigravity` in `sync.ts`.
+````
+
+## File: docs/decisions/0013-non-destructive-antigravity-and-additive-sync-targets.md
+````markdown
+# ADR-0013: Non-Destructive Antigravity Sync and Additive `state.targets`
+
+- **Status**: Accepted
+- **Date**: 2026-11-25
+- **Related Docs**: [`docs/decisions/0006-non-destructive-compilation.md`](./0006-non-destructive-compilation.md), [`docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md`](./0011-plugin-lifecycle-and-safe-cleanup.md), [`docs/decisions/0012-adapter-storage-layout.md`](./0012-adapter-storage-layout.md)
+
+## Context
+
+`ADR-0011` introduced automatic deletion of `.agents/plugins/<name>/mcp_config.json` whenever `sync` ran without `antigravity` in the resolved `targets`. Meanwhile, `sync` also overwrote `state.targets` with the resolved `targets` array on every run.
+
+In practice, this caused two severe UX regressions:
+1. Running `sync --agents opencode` (or running `sync` with a legacy `state.targets: ["opencode"]`) **silently deleted** all `antigravity` `mcp_config.json` files and removed `antigravity` from `state.targets` and `state.agents` — whereas every other adapter (`claude-code`, `cursor`, `vscode`, `opencode`, `zed`, `windsurf`) is preserved non-destructively when omitted from `--agents`.
+2. Adding a new target via `sync --agents <new-agent>` wiped previously configured targets from `state.targets`, breaking subsequent plain `agents-mcp sync` runs.
+
+## Decision
+
+1. **Non-destructive `antigravity` preservation (partially supersedes `ADR-0011`):** `sync` MUST NOT delete `mcp_config.json` or `state.agents.antigravity` simply because `antigravity` is omitted from the current `targets` list. `mcp_config.json` is only deleted when its owning server is removed from `.agents/mcp.json` (via `remove` or stale plugin cleanup) or via a future explicit target-removal command.
+2. **Additive `state.targets` on `sync --agents <list>`:** Passing `--agents <list>` to `sync` appends any newly specified valid agent IDs to `state.targets` (deduplicated, preserving order) instead of overwriting the list. Running `sync` without `--agents` syncs **all** agents recorded in `state.targets` (falling back to `detectAgents()` only when `state.targets` is empty).
+
+## Alternatives Considered
+
+- **Delete `mcp_config.json` only when `antigravity` was explicitly in `state.targets` and `--agents` omitted it:** Rejected. Still breaks the intuitive workflow of running `sync --agents opencode` to refresh a single agent without destroying another agent's configuration.
+
+## Consequences
+
+- **Positive:** Symmetric non-destructive guarantee across all 7 adapters (`ADR-0006`); ergonomic incremental target adoption (`sync --agents <new>` followed by plain `sync`).
+- **Negative / Trade-offs:** Removing a target from `state.targets` requires editing `.agents/.mcp-sync-state.json` (or a future `targets remove` command) rather than omitting it from `sync --agents`.
+````
+
+## File: skills/system/run-workflow/SKILL.md
+````markdown
+---
+name: run-workflow
+description: 'How to write and run a dynamic workflow script with the `run_workflow` tool: a Python script that orchestrates many agents with `agent`, `parallel`, `pipeline`, and `phase`. Use when a task splits into many independent or staged pieces of agent work (fan out over files, modules, bugs, or review angles, then aggregate), or when the user asks for a workflow. Don''t use for a single delegated task (use a subagent) or for legacy workflow files (see migrate-workflows).'
+metadata:
+    namespace: system
+---
+# Dynamic workflows with `run_workflow`
+
+A workflow is a short Python script that the `run_workflow` tool executes. The
+script decides which agents to start, in what order, and what to do with their
+results. Use it instead of many manual subagent calls when the orchestration
+itself is code: loops over a list, fan-out then aggregate, or staged pipelines.
+
+## Steps
+
+1.  Pass the script inline as `Script`, or write it to a file (for example in
+    the conversation scratch directory) and pass its absolute path as
+    `ScriptPath`. Set exactly one of them; a file is easier to fix and rerun.
+2.  Call `run_workflow(Script="...", Description="...")` or
+    `run_workflow(ScriptPath="/abs/path/workflow.py", Description="...")`.
+    `Description` is a one-line goal shown in the UI.
+    The workflow runs in the background, and you are notified when it ends.
+    For a quick script, such as a `call_tool` fan-out, set
+    `WaitMsBeforeAsync` (up to 10000) to get the result in the same turn if it
+    finishes in time.
+    To pass inputs, set `Args` to a JSON object; the script reads it as the
+    `args` dict. When `ScriptPath` is a saved workflow's entry script, `Args`
+    is validated against the args schema in its `workflow.json`.
+3.  Read the tool result: it contains the `log()` output (`Logs:`) and what the
+    script printed (`Output:`). Each agent is also linked from the workflow
+    step, so the user can open its conversation.
+4.  If the tool returns an error, fix the script at the reported line and run
+    it again.
+
+## Script rules
+
+The script runs in its own `python3` process, which needs Python 3.8 or later
+on `PATH`:
+
+-   `await` works at the top level, and you can define `async def` helpers.
+-   Installed library workflows are importable by name (`import <library>` or
+    `from <library> import <name>`); library modules see the same primitives as
+    the script.
+-   What the script prints (`print()`, `stderr`, child-process output, and the
+    `repr` of a trailing expression) is returned in the tool result's `Output:`
+    section (and appended to the error when the workflow fails).
+-   An uncaught exception stops the workflow and reports the script line.
+-   `CONVERSATION_ID` and `STEP_INDEX` identify the `run_workflow` step.
+    `WORKSPACES` is a tuple of the workspace directories, primary first (empty
+    if there are none).
+-   The working directory is `Cwd` if given, else `WORKSPACES[0]`, so relative
+    paths resolve against it. Local modules are not importable.
+
+## Primitives
+
+| Primitive | Behavior |
+| --- | --- |
+| `log(*args)` | Adds a line to the workflow output and the UI. |
+| `phase(name)` | Starts a named phase; later logs and agents group under it. |
+| `agent(prompt=None, schema=None, role=None, type_name="self", workspace="inherit", model=None)` | Defines an agent; nothing runs yet. `await agent(prompt, schema)` runs it once and returns its result. `a = agent(...)` then `await a(prompt, schema)` runs one turn in a conversation kept across calls. |
+| `parallel(items, fn)` | Promise that calls `fn(item)` for each item and awaits all results concurrently; results are in item order. If one fails, the rest are cancelled. |
+| `pipeline(items, fn)` | Promise that calls and awaits `fn(item)` one item at a time; results are in item order. |
+| `trajectory(last=None, types=None, tools=None, min_index=None, max_index=None)` | `await trajectory()` returns steps before this `run_workflow` call started, oldest first. `min_index` and `max_index` bound `step.index` (inclusive); `types` and `tools` filter by step type or tool name; `last` keeps the last N matching steps. |
+
+Arguments:
+
+-   `type_name`: the agent type to run. `"self"` uses the current agent's
+    configuration; any available custom agent name also works.
+-   `workspace`: `"inherit"` (the current workspace), `"branch"` (a new isolated
+    clone, for agents that edit code in parallel), or `"share"` (a new workspace
+    that shares the underlying repository). Other values are errors.
+-   `schema` (required): a JSON schema (dict or string) for the agent's result.
+    The agent returns the result by calling its `finish` tool, which checks it
+    against the schema, and `await agent(...)` returns the parsed value. An
+    agent that ends without calling `finish` fails the workflow. Use
+    `{"type": "string"}` for a free-form answer.
+-   `role`: an optional short title for the agent's card, such as
+    `"Security reviewer"`.
+-   `model`: the agent's model tier: `"inherit"` (default, your model),
+    `"flash_lite"`, `"flash"`, or `"pro"`. Use a lighter tier for simple,
+    high-fan-out work.
+-   `fn`: usually a `lambda` that returns `agent(...)`, or an `async def`
+    helper that awaits several agents. It must return something awaitable:
+    an `agent()` or a call on one, a nested `parallel()` / `pipeline()`, or
+    an `async def` call. Build per-item prompts and roles with f-strings.
+
+Awaiting the same agent twice runs it once and returns the same result. An
+`agent()` that is never awaited or called never runs, so always `await` it, or
+pass it to `parallel` / `pipeline` and await that.
+
+The workflow step shows one card per agent, in the order agents start, titled
+with its `role`, or else the first line of its prompt, so set a role or start
+each prompt with a short line that names the job.
+
+## Agents that keep their context
+
+When one agent should do several related turns, such as a reviewer that checks
+the fixes for the bugs it found, call it instead of awaiting it. Each
+`a(prompt, schema)` is lazy like an awaited `agent()` and returns that turn's
+`finish` result; the agent's own `prompt`, if any, is its standing instructions
+and leads the first turn. `schema` on a call defaults to the agent's. Turns on
+one agent run one at a time, in the order they were started. A failed turn
+raises, but the agent stays usable. An agent is either awaited or called, not
+both. `del a` ends the agent, unless something else, such as a lambda, still
+references it; every agent ends when the workflow ends.
+
+```python
+reviewer = agent("You review Go code for correctness.", role="Reviewer")
+bugs = await reviewer("List the bugs in foo.go.", {"type": "array", "items": {"type": "string"}})
+fixes = await parallel(bugs, lambda b: agent(f"Fix: {b}", {"type": "string"}))
+ok = await reviewer(f"Fixes made: {fixes}. Are all your bugs fixed?", {"type": "boolean"})
+del reviewer
+```
+
+## Calling tools from the script
+
+Where the `run_workflow` tool description lists tools for `call_tool`, the
+script can call them directly:
+
+-   `call_tool(name, **args)` returns a promise like `agent()` does. Awaiting it
+    runs the tool with the arguments you would pass to it directly and returns
+    the tool's output as a `str`.
+-   It raises `ToolError` (with `.tool` and `.message`) if the tool fails or
+    the call is denied. `.denied` is `True` when a pre-tool hook or the
+    permission check rejected the call before the tool ran, so a script can
+    skip denied calls and still fail on real errors.
+-   The user cannot be asked anything from a workflow: a call that needs user
+    approval that has not already been granted is denied.
+-   Tool outputs are not shown to you unless the script logs or prints them.
+
+## Reading earlier conversation steps
+
+Pass inputs you already have in `Args` (or inline in the script). Use
+`await trajectory(...)` when the script needs to inspect steps from earlier in
+this conversation—such as mining a failed `run_command` output without
+rerunning it—and pass only the relevant slice into child `agent()` prompts.
+
+Each returned `Step` is a `dict` that also supports attribute access (missing
+fields return `None` as attributes):
+
+-   `index` (`int`): 0-based step index.
+-   `type` (`str`): step type, e.g. `"USER_INPUT"`, `"PLANNER_RESPONSE"`,
+    `"SYSTEM_MESSAGE"`, or `"GENERIC"` (tool calls).
+-   `status` (`str`): e.g. `"DONE"`, `"ERROR"`, or `"CLEARED"`.
+-   Message steps set `text` (`str`); tool steps set `tool` (`str`), `args`
+    (parsed `dict`), and `output` (`str`, truncated at 200k characters).
+
+```python
+steps = await trajectory(tools=["run_command"], last=20)
+errors = [s.output for s in steps if s.status == "ERROR" and s.output]
+log(f"Found {len(errors)} failed command(s)")
+```
+
+`trajectory()` only returns steps before the `run_workflow` call started (steps
+added while the workflow runs in the background are not included). Older tool
+steps evicted from memory have `status == "CLEARED"` and `output == None`; read
+the conversation's `transcript.jsonl` / `transcript_full.jsonl` when you need
+cleared tool outputs or steps added after the workflow started.
+
+## Behavior to know
+
+-   Workflow agents are main agents, not subagents. They are hidden from the
+    conversation list and reachable from the workflow step. An awaited agent
+    is single-use; a called agent lasts until deleted or the workflow ends.
+-   `await agent(...)` returns when the agent's run ends, with the result it
+    passed to `finish`.
+-   If one agent in `parallel` fails, the whole call fails and the other agents
+    in it are cancelled. Stopping the parent conversation stops all running
+    workflow agents.
+-   Agents do not see the script or each other. Put all the context an agent
+    needs in its prompt, and ask for a short, well-defined output.
+
+## Example
+
+Fan out over a list that an agent produces:
+
+```python
+phase("Discover")
+files = await agent(
+    "List the Go files under pkg/foo that call Bar(). Paths only.",
+    schema={"type": "array", "items": {"type": "string"}},
+)
+
+phase("Review")
+reviews = await parallel(files, lambda f: agent(
+    f"Review {f} for misuse of Bar(). Reply in 3 bullets or 'OK'.",
+    schema={"type": "string"},
+    role=f"Review {f}",
+))
+for r in reviews:
+    log(r)
+```
+````
+
+## File: src/adapters/shared.ts
+````typescript
+/**
+ * Shared helpers for the adapter layer.
+ *
+ * Implements BLUEPRINT §9.2/§9.3: one JSONC batch edit via a single
+ * `jsonc-parser.modify` call on the `rootKey` (avoiding the multi-edit
+ * offset footgun), tolerant entry reader, and warning factory. Preserves
+ * CRLF/BOM/comments outside the replaced `rootKey`; aborts on parse error.
+ */
+
+import { modify, applyEdits, parse, type ParseError } from 'jsonc-parser'
+import type { WarningCode } from '$/src/adapters/types'
+import { makeWarning } from '$/src/adapters/types'
+import type { AgentId, CompileResult, Warning } from '$/src/adapters/types'
+
+export interface ApplyServerEntriesOptions {
+  /** Names being produced in this sync (the managed set). */
+  readonly managed: string[]
+  /** Previously managed names (from sync state) to prune when no longer produced. */
+  readonly previous: ReadonlySet<string>
+  readonly format: 'json' | 'jsonc'
+}
+
+/**
+ * Apply managed entries to `rootKey` in an existing JSONC document, never
+ * touching sibling keys or manual entries.
+ *
+ * Strategy: compute the desired `rootKey` object (manual entries that are not
+ * in `previous`, overlaid by the current managed entries) and replace the
+ * whole `rootKey` node in a single `modify` call. This preserves everything
+ * outside `rootKey` byte-for-byte (comments, unrelated keys, `inputs`, etc.)
+ * while keeping the edit atomic and offset-safe.
+ *
+ * - Creates `rootKey` only when needed.
+ * - Deletes names in `previous` that are no longer produced.
+ * - Aborts (throws) on parse error; the file is left byte-identical.
+ */
+export function applyServerEntries(
+  existing: string | null,
+  rootKey: string,
+  entries: Record<string, unknown>,
+  opts: ApplyServerEntriesOptions,
+): {
+  content: string
+  edits: Array<{ offset: number; length: number; content: string }>
+} {
+  const { managed, previous, format } = opts
+
+  if (existing === null || existing.trim() === '') {
+    if (Object.keys(entries).length === 0) {
+      return { content: '', edits: [] }
+    }
+    const document = { [rootKey]: entries }
+    const content = JSON.stringify(document, null, 2) + '\n'
+    return { content, edits: [] }
+  }
+
+  // Validate the existing document before touching it.
+  const errors: ParseError[] = []
+  parse(existing, errors, { allowTrailingComma: true, allowEmptyContent: true })
+  if (errors.length > 0) {
+    const first = errors[0]!
+    throw new Error(
+      `Invalid JSONC at offset ${first.offset}: unable to edit safely`,
+    )
+  }
+
+  const formattingOptions =
+    format === 'jsonc' ? { tabSize: 2, insertSpaces: true } : undefined
+
+  // Read the current rootKey object (or {} if absent).
+  let currentRoot: Record<string, unknown> = {}
+  try {
+    const parsed = parse(existing) as Record<string, unknown>
+    const existingRoot = parsed[rootKey]
+    if (
+      existingRoot &&
+      typeof existingRoot === 'object' &&
+      !Array.isArray(existingRoot)
+    ) {
+      currentRoot = existingRoot as Record<string, unknown>
+    }
+  } catch {
+    // If we can't read the rootKey, treat it as empty.
+    currentRoot = {}
+  }
+
+  // Manual entries: keys present in the file that are NOT in `previous`
+  // (i.e. not previously managed by the compiler) are preserved.
+  const manualEntries: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(currentRoot)) {
+    if (!previous.has(key)) {
+      manualEntries[key] = value
+    }
+  }
+
+  // Managed entries overlay manual ones; previously managed names no longer
+  // produced are simply absent from `entries`, hence dropped.
+  const newRoot: Record<string, unknown> = { ...manualEntries, ...entries }
+
+  // Nothing to do if rootKey absent and nothing to write.
+  const rootExists = Object.prototype.hasOwnProperty.call(
+    parse(existing) as Record<string, unknown>,
+    rootKey,
+  )
+  if (!rootExists && Object.keys(newRoot).length === 0) {
+    return { content: existing, edits: [] }
+  }
+
+  const edits = modify(existing, [rootKey], newRoot, {
+    formattingOptions,
+  })
+
+  const content = applyEdits(existing, edits)
+  return { content, edits }
+}
+
+/**
+ * Tolerant nested lookup: `readEntry(parsed, ['context_servers', 'x', 'command', 'path'])`.
+ * Returns `undefined` when any segment is missing.
+ */
+export function readEntry(parsed: unknown, path: readonly string[]): unknown {
+  let current: unknown = parsed
+  for (const segment of path) {
+    if (
+      current === null ||
+      current === undefined ||
+      typeof current !== 'object' ||
+      Array.isArray(current)
+    ) {
+      return undefined
+    }
+    current = (current as Record<string, unknown>)[segment]
+  }
+  return current
+}
+
+/**
+ * Build a `Warning`. Thin re-export friendly wrapper around `makeWarning`.
+ */
+export function buildWarning(
+  agent: AgentId,
+  code: WarningCode,
+  message: string,
+  meta?: { server?: string; field?: string },
+): Warning {
+  return makeWarning(agent, code, message, meta)
+}
+````
+
+## File: src/core/context.ts
+````typescript
+import { homedir, platform } from 'node:os'
+
+export type ConfigScope = 'project' | 'global'
+
+export interface RuntimeContext {
+  readonly cwd: string
+  readonly homeDir: string
+  readonly platform: NodeJS.Platform
+  readonly env: NodeJS.ProcessEnv
+  readonly isTTY: boolean
+}
+
+/**
+ * Build a `RuntimeContext`. All path/TTY reads happen here (once, at creation),
+ * never at module import time and never inside adapters. This makes Windows
+ * path behavior testable on Linux CI by overriding `platform`/`homeDir`.
+ */
+export function createRuntimeContext(
+  overrides?: Partial<RuntimeContext>,
+): RuntimeContext {
+  return {
+    cwd: overrides?.cwd ?? process.cwd(),
+    homeDir: overrides?.homeDir ?? homedir(),
+    platform: overrides?.platform ?? platform(),
+    env: overrides?.env ?? process.env,
+    isTTY: overrides?.isTTY ?? Boolean(process.stdout?.isTTY),
+  }
+}
 ````
 
 ## File: src/sources/http.ts
@@ -1332,6 +2600,128 @@ export async function fetchJson(
 
   clearTimeout(timeoutId)
   throw lastError
+}
+````
+
+## File: src/ui/auto.ts
+````typescript
+/**
+ * Non-interactive UI implementation used for `--yes`, `CI=true`, and tests.
+ *
+ * Never blocks on input. Every prompt resolves from the supplied `defaults`
+ * (or sensible fallbacks) and prints through `log`. Secrets are masked.
+ */
+
+import type { Option, PromptUi, Spinner } from '$/src/ui/prompts'
+
+export interface AutoUiDefaults {
+  confirm?: boolean
+  select?: unknown
+  multiselect?: unknown[]
+  text?: string
+  password?: string
+}
+
+export interface AutoUiLogger {
+  info(message: string): void
+  warn(message: string): void
+  error(message: string): void
+}
+
+function maskSecret(value: string): string {
+  if (!value) {
+    return ''
+  }
+  return value.length > 4 ? `${value.slice(0, 2)}***` : '***'
+}
+
+/**
+ * Build a non-interactive `PromptUi`. `defaults` supply answers for prompts;
+ * `log` receives informational/warning/error output.
+ */
+export function createAutoUi({
+  defaults = {},
+  log,
+}: {
+  defaults?: AutoUiDefaults
+  log?: AutoUiLogger
+}): PromptUi {
+  const info = log?.info ?? ((message: string) => console.log(message))
+  const warn = log?.warn ?? ((message: string) => console.warn(message))
+  const error = log?.error ?? ((message: string) => console.error(message))
+
+  const noopSpinner: Spinner = {
+    start() {},
+    stop() {},
+  }
+
+  return {
+    intro(message: string) {
+      info(message)
+    },
+    outro(message: string) {
+      info(message)
+    },
+    note(message: string, title?: string) {
+      info(title ? `${title}: ${message}` : message)
+    },
+    warn(message: string) {
+      warn(message)
+    },
+    error(message: string) {
+      error(message)
+    },
+    confirm(opts: {
+      message: string
+      initialValue: boolean
+    }): Promise<boolean> {
+      info(`${opts.message} (${opts.initialValue ? 'Y/n' : 'y/N'})`)
+      return Promise.resolve(defaults.confirm ?? opts.initialValue)
+    },
+    async select<T>(opts: {
+      message: string
+      options: Option<T>[]
+      initialValue?: T
+    }): Promise<T> {
+      const chosen =
+        defaults.select ?? opts.options[0]?.value ?? opts.initialValue
+      info(`${opts.message} → ${String(chosen)}`)
+      const option = opts.options.find((o) => o.value === chosen)
+      if (option) {
+        info(
+          `  ${option.hint ? `${option.label} (${option.hint})` : option.label}`,
+        )
+      }
+      return chosen as T
+    },
+    async multiselect<T>(opts: {
+      message: string
+      options: Option<T>[]
+      initialValues?: T[]
+    }): Promise<T[]> {
+      const chosen = defaults.multiselect ?? opts.initialValues ?? []
+      info(`${opts.message} → ${chosen.join(', ') || '(none)'}`)
+      return chosen as T[]
+    },
+    async text(opts: {
+      message: string
+      placeholder?: string
+      defaultValue?: string
+      validate?: (v: string) => string | undefined
+    }): Promise<string> {
+      const chosen = defaults.text ?? opts.defaultValue ?? ''
+      info(`${opts.message} → ${maskSecret(chosen)}`)
+      return chosen
+    },
+    async password(opts: { message: string }): Promise<string> {
+      const chosen = defaults.password ?? ''
+      info(`${opts.message} → ***`)
+      return chosen
+    },
+    spinner(): Spinner {
+      return noopSpinner
+    },
+  }
 }
 ````
 
@@ -2061,2119 +3451,232 @@ describe('adapter contract: detect returns false when no config present', () => 
 })
 ````
 
-## File: tests/sources/http.test.ts
+## File: tests/cli/global-flags.test.ts
 ````typescript
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { fetchJson } from '$/src/sources/http'
-
-const originalFetch = global.fetch
-
-type FetchMock = ReturnType<typeof vi.fn> & {
-  mock: {
-    calls: Array<[url: string, init?: RequestInit]>
-  }
-}
-
-function responseFactory(
-  response: unknown,
-  status = 200,
-  extra?: Record<string, string>,
-): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: new Headers(extra ?? {}),
-    text: async () => JSON.stringify(response),
-    json: async () => response,
-  } as unknown as Response
-}
-
-describe('sources http', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', originalFetch)
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  it('fetches JSON and returns parsed body', async () => {
-    const fetchMock = vi.fn(async () => responseFactory({ hello: 'world' }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await fetchJson('https://api.example.com/data')
-
-    expect(result).toEqual({ hello: 'world' })
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('sends User-Agent header with package version', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson('https://api.example.com/data')
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    const headers = init?.headers as Record<string, string>
-    expect(headers['User-Agent']).toMatch(/^agents-mcp\/\d+\.\d+\.\d+$/)
-  })
-
-  it('sends Authorization Bearer GITHUB_TOKEN for api.github.com', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson('https://api.github.com/repos/owner/repo', {
-      env: { GITHUB_TOKEN: 'ghp_secret123' },
-    })
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    const headers = init?.headers as Record<string, string>
-    expect(headers['Authorization']).toBe('Bearer ghp_secret123')
-  })
-
-  it('sends Authorization Bearer GITHUB_TOKEN for raw.githubusercontent.com', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson(
-      'https://raw.githubusercontent.com/owner/repo/main/server.json',
-      {
-        env: { GITHUB_TOKEN: 'ghp_secret123' },
-      },
-    )
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    const headers = init?.headers as Record<string, string>
-    expect(headers['Authorization']).toBe('Bearer ghp_secret123')
-  })
-
-  it('does not send Authorization for non-GitHub URLs', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson('https://api.example.com/data', {
-      env: { GITHUB_TOKEN: 'ghp_secret123' },
-    })
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    const headers = init?.headers as Record<string, string>
-    expect(headers['Authorization']).toBeUndefined()
-  })
-
-  it('does not send Authorization when GITHUB_TOKEN is not set', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson('https://api.github.com/repos/owner/repo')
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    const headers = init?.headers as Record<string, string>
-    expect(headers['Authorization']).toBeUndefined()
-  })
-
-  it('throws on non-ok HTTP status', async () => {
-    const fetchMock = vi.fn(async () => responseFactory('Not Found', 404))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(fetchJson('https://api.example.com/missing')).rejects.toThrow(
-      'HTTP 404',
-    )
-  })
-
-  it('retries on 5xx with exponential backoff', async () => {
-    let calls = 0
-    const fetchMock = vi.fn(async () => {
-      calls += 1
-      if (calls < 3) {
-        return responseFactory('Server Error', 500)
-      }
-      return responseFactory({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await fetchJson('https://api.example.com/data')
-
-    expect(result).toEqual({ ok: true })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-  })
-
-  it('retries on 429 respecting Retry-After header', async () => {
-    let calls = 0
-    const fetchMock = vi.fn(async () => {
-      calls += 1
-      if (calls === 1) {
-        return responseFactory('Too Many Requests', 429, {
-          'Retry-After': '2',
-        })
-      }
-      return responseFactory({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const start = Date.now()
-    await fetchJson('https://api.example.com/data')
-    const elapsed = Date.now() - start
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(elapsed).toBeGreaterThanOrEqual(1900) // ~2s delay
-  }, 10000)
-
-  it('caps Retry-After delay at 5s', async () => {
-    let calls = 0
-    const fetchMock = vi.fn(async () => {
-      calls += 1
-      if (calls === 1) {
-        return responseFactory('Too Many Requests', 429, {
-          'Retry-After': '100',
-        })
-      }
-      return responseFactory({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const start = Date.now()
-    await fetchJson('https://api.example.com/data')
-    const elapsed = Date.now() - start
-
-    expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(elapsed).toBeLessThan(6000) // capped at 5s
-  }, 10000)
-
-  it('retries on transient network errors', async () => {
-    let calls = 0
-    const fetchMock = vi.fn(async () => {
-      calls += 1
-      if (calls < 3) {
-        throw new Error('fetch failed: ECONNREFUSED')
-      }
-      return responseFactory({ ok: true })
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await fetchJson('https://api.example.com/data')
-
-    expect(result).toEqual({ ok: true })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
-  }, 10000)
-
-  it('gives up after max retries on persistent 5xx', async () => {
-    const fetchMock = vi.fn(async () => responseFactory('Server Error', 500))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(fetchJson('https://api.example.com/data')).rejects.toThrow(
-      'HTTP 500',
-    )
-    expect(fetchMock).toHaveBeenCalledTimes(3) // initial + 2 retries
-  }, 10000)
-
-  it('enforces 2 MiB response cap', async () => {
-    const bigResponse = 'x'.repeat(3 * 1024 * 1024) // 3 MiB
-    const fetchMock = vi.fn(async () => {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        text: async () => bigResponse,
-        json: async () => JSON.parse(bigResponse),
-      } as unknown as Response
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(fetchJson('https://api.example.com/big')).rejects.toThrow(
-      'too large',
-    )
-  })
-
-  it('injects fetch via opts for testability', async () => {
-    const globalFetchSpy = vi.spyOn(globalThis, 'fetch')
-    const injectedFetch = vi.fn(async () => responseFactory({ injected: true }))
-
-    const result = await fetchJson('https://api.example.com/data', {
-      fetch: injectedFetch,
-    })
-
-    expect(result).toEqual({ injected: true })
-    expect(injectedFetch).toHaveBeenCalledTimes(1)
-    // global fetch should NOT have been called
-    expect(globalFetchSpy).not.toHaveBeenCalled()
-    globalFetchSpy.mockRestore()
-  })
-
-  it('passes AbortSignal to fetch', async () => {
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
-      responseFactory({ ok: true }),
-    ) as unknown as FetchMock
-    vi.stubGlobal('fetch', fetchMock)
-
-    await fetchJson('https://api.example.com/data')
-
-    const init = fetchMock.mock.calls[0]?.[1]
-    expect(init?.signal).toBeDefined()
-  })
-})
-````
-
-## File: tests/sources/index.test.ts
-````typescript
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { resolveSource } from '$/src/sources/index'
-import { resolveDirect } from '$/src/sources/direct'
-import type { ResolvedServerPackage } from '$/src/sources/types'
-
-const originalFetch = global.fetch
-
-function responseFactory(
-  response: unknown,
-  status = 200,
-  extra?: Record<string, string>,
-): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: new Headers(extra ?? {}),
-    text: async () => JSON.stringify(response),
-    json: async () => response,
-  } as unknown as Response
-}
-
-describe('sources index', () => {
-  beforeEach(() => {
-    vi.stubGlobal('fetch', originalFetch)
-  })
-
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
-  it('dispatches direct flags to resolveDirect', async () => {
-    const result = await resolveSource({
-      command: 'npx',
-      arg: ['-y', '@scope/pkg'],
-      name: 'my-server',
-    })
-    expect(result.source.type).toBe('direct')
-    expect(result.suggestedName).toBe('my-server')
-  })
-
-  it('includes sse in direct-flag dispatch', async () => {
-    const result = await resolveSource({
-      sse: 'https://mcp.linear.app/sse',
-      name: 'linear',
-    })
-    expect(result.source.type).toBe('direct')
-    expect(result.suggestedName).toBe('linear')
-  })
-
-  it('routes https://github.com/owner/repo to resolveGithub', async () => {
-    const fetchMock = vi.fn(async () =>
-      responseFactory(
-        {
-          name: 'server-github',
-          registry_type: 'npm',
-          identifier: '@modelcontextprotocol/server-github',
-        },
-        200,
-      ),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await resolveSource({
-      source: 'https://github.com/modelcontextprotocol/server-github',
-      name: 'my-github',
-    })
-
-    expect(result.source.type).toBe('github')
-    expect(result.suggestedName).toBe('server-github')
-    expect(fetchMock).toHaveBeenCalled()
-  })
-
-  it('routes owner/repo to resolveGithub', async () => {
-    const fetchMock = vi.fn(async () =>
-      responseFactory(
-        {
-          name: 'server-github',
-          registry_type: 'npm',
-          identifier: '@modelcontextprotocol/server-github',
-        },
-        200,
-      ),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await resolveSource({
-      source: 'modelcontextprotocol/server-github',
-    })
-
-    expect(result.source.type).toBe('github')
-    expect(fetchMock).toHaveBeenCalled()
-  })
-
-  it('routes other https URLs to resolveDirect as http', async () => {
-    const result = await resolveSource({
-      source: 'https://mcp.example.com/mcp',
-      name: 'remote',
-    })
-    expect(result.source.type).toBe('direct')
-    expect(result.suggestedName).toBe('remote')
-  })
-
-  it('routes bare package name to resolveRegistry', async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.includes('registry.npmjs.org')) {
-        return responseFactory('Not Found', 404)
-      }
-      return responseFactory(
-        {
-          servers: [
-            {
-              name: 'server-query',
-              packages: [{ name: 'server-query', type: 'npm' }],
-            },
-          ],
-        },
-        200,
-      )
-    })
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await resolveSource({ source: 'server-query' })
-
-    expect(result.source.type).toBe('registry')
-    expect(result.suggestedName).toBe('server-query')
-  })
-
-  it('forwards env to resolvers', async () => {
-    const fetchMock = vi.fn(async () =>
-      responseFactory(
-        {
-          name: 'server-env',
-          registry_type: 'npm',
-          identifier: 'server-env',
-          environment_variables: [{ name: 'API_KEY', is_required: true }],
-        },
-        200,
-      ),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-
-    const result = await resolveSource(
-      { source: 'owner/server-env' },
-      { env: { GITHUB_TOKEN: 'ghp_token' } },
-    )
-
-    expect(result.source.type).toBe('github')
-    expect(fetchMock).toHaveBeenCalled()
-  })
-
-  it('throws when no source specified', async () => {
-    await expect(resolveSource({})).rejects.toThrow('No source specified')
-  })
-
-  it('passes fetch injection through to resolvers', async () => {
-    const injectedFetch = vi.fn(async () =>
-      responseFactory(
-        {
-          name: 'server-github',
-          registry_type: 'npm',
-          identifier: '@modelcontextprotocol/server-github',
-        },
-        200,
-      ),
-    )
-    vi.stubGlobal('fetch', originalFetch)
-
-    await resolveSource(
-      { source: 'https://github.com/owner/repo' },
-      { fetch: injectedFetch },
-    )
-
-    expect(injectedFetch).toHaveBeenCalled()
-  })
-})
-````
-
-## File: index-update.sh
-````bash
-#! /usr/bin/bash
-
-repomix --style markdown
-
-codegraph sync
-````
-
-## File: .agents/plugins/sequential-thinking/mcp.json
-````json
-{
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
-    "sequential-thinking": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-sequential-thinking"
-      ]
-    }
-  }
-}
-````
-
-## File: .agents/plugins/sequential-thinking/plugin.json
-````json
-{
-  "name": "sequential-thinking",
-  "version": "1.0.0",
-  "description": "MCP server plugin `sequential-thinking` managed by agents-mcp"
-}
-````
-
-## File: .agents/skills/changelog-management/resources/CHANGELOG.md
-````markdown
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
-````
-
-## File: .agents/skills/environment-preflight/SKILL.md
-````markdown
----
-name: environment-preflight
-description: >-
-  Inspect a project's structure, frameworks, and tech stack, then verify in the
-  user's shell and development environment whether the agent has direct access
-  to the required runtimes, package managers, and CLIs. Use this skill when
-  starting work in a repository, before running builds/tests/toolchains, or when
-  diagnosing missing command-line tools—and notify the user clearly whenever
-  required tools are missing or inaccessible.
----
-
-# Environment Preflight
-
-Before assuming you can build, test, lint, migrate, or run a project's toolchain, **inspect the repository to determine what technologies it uses**, then **probe the active shell environment** to confirm direct access to every required tool. Never guess, fabricate tool output, or silently skip a check when a CLI is unavailable.
-
-## 1. Identify Project Stack & Required Tools
-
-Scan the repository root (and workspace/monorepo packages, if present) for manifests, lockfiles, and configuration files to map the tech stack:
-
-- **Runtimes & Version Pins**: `.nvmrc`, `.node-version`, `.python-version`, `.ruby-version`, `.tool-versions`, `mise.toml`, `rust-toolchain.toml`, `go.mod`, `engines` in `package.json`, `requires-python` in `pyproject.toml`.
-- **Package Managers & Lockfiles**: `package.json` + `package-lock.json` / `pnpm-lock.yaml` / `yarn.lock` / `bun.lockb`, `pyproject.toml` / `uv.lock` / `poetry.lock` / `requirements.txt`, `Cargo.toml`, `go.mod`, `pom.xml`, `build.gradle*`, `Gemfile`, `composer.json`.
-- **Frameworks, Build & Quality Tools**: Scripts and configs (e.g., `scripts` in `package.json`, `Makefile`, `justfile`, `Taskfile.yml`, `tsconfig.json`, `vite.config.*`, `next.config.*`, `pytest.ini`, `ruff.toml`, `.eslintrc*`, `biome.json`).
-- **Infrastructure & External CLIs**: `Dockerfile`, `docker-compose.yml`, `terraform/`, `k8s/`, `.github/workflows/*`, database/migration configs (e.g., `prisma/`, `drizzle.config.*`, `alembic.ini`), or cloud/platform configs (`vercel.json`, `firebase.json`, `fly.toml`).
-
-From these files, build a concise list of **required** tools for the current task (e.g., runtime, package manager, test runner, linter/typechecker, container or cloud CLI) and **optional** tools.
-
-## 2. Probe the Shell & Development Environment
-
-Check what the agent can directly execute in the current terminal/shell:
-
-1. **Check binary availability**:
-   - POSIX (`bash`/`zsh`/`sh`): `command -v <tool>` (or `which <tool>`).
-   - Windows PowerShell: `Get-Command <tool> -ErrorAction SilentlyContinue`.
-2. **Check project-local and version-manager paths** before concluding a tool is missing:
-   - Node.js: `./node_modules/.bin/<tool>` (or `npx` / `pnpm exec` / `bunx`).
-   - Python: `.venv/bin/<tool>`, `venv/bin/<tool>`, or `uv run <tool>`.
-   - Version managers: `nvm`, `fnm`, `mise`, `asdf`, `pyenv`, `rbenv`, `rustup` (check if shims exist or if the shell hasn't initialized them).
-3. **Verify versions & runtime readiness**:
-   - Run lightweight version checks (`<tool> --version` or `<tool> version`) and compare against project version pins.
-   - For daemon- or auth-dependent CLIs (e.g., `docker`, `kubectl`, `gh`, `aws`, `gcloud`, `psql`), verify operational access when the task requires them (e.g., `docker info`, `gh auth status`)—not just binary existence.
-4. **Do not mutate the system silently**:
-   - Never install global packages, modify shell profiles, or change system toolchains without explicit user approval.
-
-## 3. Classify Findings & Notify the User
-
-Categorize each required tool into one of three states:
-
-- **Ready**: Accessible in the agent's shell (or project-local environment) with a compatible version.
-- **Accessible with caveats**: Installed, but requires activating a local environment (e.g., `.venv`, `nvm use`), has a version mismatch against project pins, or its daemon/auth/network access is unavailable in the current shell.
-- **Missing / Inaccessible**: Not installed or not reachable from the agent's terminal environment.
-
-### When Tools Are Missing or Inaccessible
-
-**Notify the user immediately** before proceeding with work that depends on those tools. Keep the notification concise and actionable:
-
-1. **What is missing or blocked**: Name the exact tool/CLI and which part of the project or task requires it (e.g., `pnpm` required by `pnpm-lock.yaml`, `docker` daemon unreachable).
-2. **What was checked**: Mention the probe performed (e.g., `command -v pnpm`, `.venv/bin/pytest`, `docker info`) and the observed error or version mismatch.
-3. **How to resolve**: Provide clear installation, `PATH`/environment activation, or permission instructions—or ask the user to run the command locally and share the output if the agent environment cannot access it.
-4. **Impact on current task**: State clearly whether you can still make progress (e.g., implementing code changes while deferring test/build verification to the user) or whether the task is blocked until the tool is available.
-
-## 4. Session Discipline
-
-- Run this preflight once when entering an unfamiliar project or starting a new toolchain-dependent task; do not repeat identical probes on every step.
-- Re-probe only when switching to a different subproject/stack or after the user confirms they installed or fixed a tool.
-````
-
-## File: .agents/skills/npm-version-management/SKILL.md
-````markdown
----
-name: npm-version-management
-description: >-
-  Enforce disciplined NPM package version management strictly via the `npm
-  version` CLI. Prohibit manual edits to the `version` field in `package.json`,
-  detect version drift between `package.json` and Git tags, and provide clear
-  remediation steps to restore synchronization.
----
-
-# NPM Version Management
-
-Define strict policies and workflows for managing and updating NPM package versions in Node.js and JavaScript/TypeScript projects.
-
----
-
-## The Cardinal Rule: Never Manually Edit `package.json` Version
-
-> [!CAUTION]
-> **NEVER manually edit the `"version"` field in `package.json` using file editing tools, text editors, or search-and-replace scripts.**
->
-> All version bumps MUST be executed strictly through the official `npm version` command.
-
----
-
-## Why Git Tag Synchronization Matters
-
-In a Git repository, the `npm version` command performs three critical atomic operations:
-
-1. **Updates Manifests**: Safely bumps the `"version"` field in `package.json` and updates `package-lock.json` (preserving formatting and indentation).
-2. **Creates a Git Commit**: Stages the manifest changes and generates a dedicated release commit with a standardized message (default: `v<version>`).
-3. **Creates a Git Tag**: Creates an annotated Git tag matching the new version (e.g., `v1.2.3`).
-
-### Consequences of Manual Editing
-
-Manual editing bypasses this integrated workflow and causes severe issues:
-- **Version Drift**: The version declared in `package.json` diverges from Git tags.
-- **CI/CD Pipeline Breakage**: Modern release pipelines, automated changelogs, container registries, and package registries (NPM, GitHub Packages) rely on Git tags matching the manifest version.
-- **Broken Release Tracking**: Git history loses the explicit release boundary, complicating rollbacks, `git bisect`, and semantic comparisons.
-
----
-
-## Pre-Bump Checklist
-
-Before running `npm version`, ensure the following prerequisites are met:
-
-1. **Clean Working Tree**:
-   - The Git working directory MUST be clean:
-     ```bash
-     git status --porcelain
-     ```
-   - If uncommitted changes exist, commit or stash them first. Never bypass `npm version`'s clean working tree check with `--force`.
-2. **Verification & Tests Pass**:
-   - All tests, typechecks, and linters must pass before cutting a version.
-3. **Correct Branch**:
-   - Confirm you are on the designated release branch (e.g., `main`, `master`, or `release/*`).
-
----
-
-## Versioning Commands & SemVer Selection
-
-Choose the appropriate SemVer increment based on the nature of changes:
-
-| Command | SemVer Level | When to Use | Example (`1.0.0` -> ) |
-| :--- | :--- | :--- | :--- |
-| `npm version patch` | **PATCH** | Backward-compatible bug fixes or minor patches | `1.0.1` |
-| `npm version minor` | **MINOR** | Backward-compatible new features or enhancements | `1.1.0` |
-| `npm version major` | **MAJOR** | Breaking changes, incompatible API modifications | `2.0.0` |
-
-### Pre-release Versioning
-
-For alpha, beta, or release candidate iterations:
-
-```bash
-# Start pre-releases
-npm version prepatch --preid=alpha   # 1.0.0 -> 1.0.1-alpha.0
-npm version preminor --preid=beta    # 1.0.0 -> 1.1.0-beta.0
-npm version premajor --preid=rc      # 1.0.0 -> 2.0.0-rc.0
-
-# Increment existing pre-release
-npm version prerelease               # 1.0.1-alpha.0 -> 1.0.1-alpha.1
-```
-
-### Custom Commit Message
-
-To provide a descriptive commit message alongside the version bump:
-
-```bash
-npm version minor -m "Release %s: Add authentication module"
-```
-*(The `%s` placeholder is replaced with the newly generated version number).*
-
-### Specific Target Version
-
-To bump to an exact explicit version while retaining Git tag creation:
-
-```bash
-npm version 2.4.0
-```
-
----
-
-## NPM Lifecycle Hooks Integration
-
-Take advantage of NPM's built-in version lifecycle hooks in `package.json` scripts:
-
-```json
-{
-  "scripts": {
-    "preversion": "npm test && npm run lint",
-    "version": "npm run build && git add dist/",
-    "postversion": "git push && git push --tags"
-  }
-}
-```
-
-- **`preversion`**: Runs before the version is bumped. Use to enforce testing, linting, or changelog verification. If it fails, the version bump is aborted.
-- **`version`**: Runs after `package.json` is modified and staged, but **before** the Git commit and tag are created. Perfect for generating build artifacts, syncing changelogs, and staging them (`git add CHANGELOG.md`).
-- **`postversion`**: Runs after the Git commit and tag have been created. Ideal for pushing commits and tags to the remote repository.
-
----
-
-## Synchronizing with Remote
-
-The `npm version` command creates the commit and tag **locally**. Always remember to push both to the remote repository:
-
-```bash
-git push && git push --tags
-# Or using --follow-tags (pushes annotated tags on the current branch):
-git push --follow-tags
-```
-
----
-
-## Drift Detection & Remediation (Handling Manual Edits)
-
-When inspecting a project, preparing a release, or reviewing changes, the agent must check whether the current `"version"` in `package.json` matches the latest Git version tag.
-
-### Detecting Drift
-
-Run the following checks to identify if a manual version edit occurred:
-
-1. **Uncommitted Version Edit**:
-   - Check if `package.json` contains unstaged or staged modifications to `"version"`:
-     ```bash
-     git diff package.json
-     ```
-2. **Missing or Mismatched Git Tag**:
-   - Extract the current version from `package.json` (e.g., `X.Y.Z`).
-   - Check if the matching Git tag exists and points to the appropriate commit:
-     ```bash
-     git tag -l "vX.Y.Z"
-     ```
-   - If the tag does not exist or points to an older, unrelated commit, the version has drifted out of sync.
-
----
-
-### Remediation Workflows
-
-If manual modification or tag desynchronization is detected, **alert the user immediately** and present the following two resolution options:
-
-#### Option 1: Revert Manual Edit and Use `npm version` (Recommended)
-
-This is the cleanest approach as it ensures standard NPM commit and tag generation.
-
-- **If the manual edit is uncommitted**:
-  ```bash
-  # 1. Discard manual changes in package manifests
-  git checkout HEAD -- package.json package-lock.json
-
-  # 2. Run the proper npm version command
-  npm version <patch|minor|major|X.Y.Z>
-  ```
-
-- **If the manual edit was committed locally (HEAD)**:
-  ```bash
-  # 1. Undo the commit while keeping working files
-  git reset --soft HEAD~1
-
-  # 2. Discard the manual version edits
-  git checkout HEAD -- package.json package-lock.json
-
-  # 3. Apply the version bump through npm version
-  npm version <patch|minor|major|X.Y.Z>
-  ```
-
-#### Option 2: Retroactively Synchronize Git Tag with Manual Version
-
-Use this option if the manual change has already been pushed or must be preserved:
-
-1. **Ensure lockfile is in sync**:
-   ```bash
-   npm install --package-lock-only
-   ```
-2. **Commit manifest changes (if not yet committed)**:
-   ```bash
-   git add package.json package-lock.json
-   git commit -m "vX.Y.Z"
-   ```
-3. **Create the missing annotated Git tag**:
-   ```bash
-   git tag -a "vX.Y.Z" -m "vX.Y.Z"
-   ```
-4. **Push commit and tag to remote**:
-   ```bash
-   git push && git push origin "vX.Y.Z"
-   ```
-
----
-
-## Agent Guardrails & Interception
-
-When acting as an AI assistant:
-
-1. **Intercept Manual Edits**: If requested to "change the version to X", "bump version in package.json", or "prepare release", **do NOT use file modification tools** (`edit_file` or `write_file`) on `package.json` to alter `"version"`.
-2. **Execute Terminal Command**: Run `npm version <major|minor|patch|version>` via the shell execution tool.
-3. **Detect & Alert on Drift**: Whenever inspecting a repository before a release or build, verify if `package.json` version matches Git tags. If a manual edit or missing tag is detected:
-   - Alert the user proactively.
-   - Explain that `package.json` and Git tags are out of sync.
-   - Offer the two remediation paths (revert + `npm version` or create retroactive tag).
-4. **Notify User**: Clearly explain that `npm version` was used to ensure synchronization between `package.json` and Git version tags.
-````
-
-## File: .agents/skills/spec-driven-workflow/resources/BACKLOG.md
-````markdown
-# Product Backlog & Demand: <Project or Initiative>
-
-- **Product Owner**: <author or agent>
-- **Product Goal**: <Overarching outcome or product objective>
-- **Last Updated**: <YYYY-MM-DD>
-
-## Product Backlog
-
-Prioritized list of product evolutions, features, bug reports, and improvements before entering downstream engineering (`SPEC.md`).
-
-| Order | ID | Title | Type | Class of Service | Status | Value / Impact |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | B1 | <Short item title> | Feature \| Bug \| Improvement | Expedite \| Fixed Date \| Standard \| Intangible | Ready \| Refining \| Idea \| In Downstream \| Done | <Why this matters to users/business> |
-| 2 | B2 | <Short item title> | Feature \| Bug \| Improvement | Standard | Idea | <Why this matters to users/business> |
-
----
-
-## Active Demand Brief: <ID - Short Title>
-
-> Complete this section when an item is refined to `Ready` for handoff to the Architect (`workflow/<change-slug>/SPEC.md`).
-
-- **Backlog ID**: `<B1>`
-- **Type**: Feature | Bug Fix | Enhancement
-- **Class of Service**: Expedite | Fixed Date | Standard | Intangible
-- **Target Release / Urgency**: <e.g., Immediate hotfix, Next sprint, Q4 milestone>
-
-### User Problem & Business Value
-
-Describe who is affected, what problem or opportunity exists, and what measurable product or user outcome we want to achieve.
-
-### User Story / Job-to-be-Done
-
-- **As a** <user role or persona>,
-- **I want** <capability or behavior>,
-- **So that** <expected benefit or outcome>.
-
-### Bug Impact & Observed Behavior (For Bug Fixes)
-
-- **User-Observed Behavior**: <What happens today from the user's perspective>
-- **Expected Behavior**: <What should happen instead>
-- **Business / Customer Impact**: <Severity, affected users, workarounds>
-
-### Supporting Assets & Evidence (Optional)
-
-Store screenshots (including annotated captures), mockups, or supporting files in `workflow/assets/` and link them here:
-
-- ![<Short description>](./assets/<filename>) — <What this image or file highlights>
-
-### Product Acceptance Expectations
-
-- [ ] <High-level outcome observable by a user or stakeholder>
-- [ ] <High-level outcome observable by a user or stakeholder>
-
-### Out of Scope
-
-- <Explicitly excluded capability or deferred evolution>
-
-### Definition of Ready (DoR)
-
-- [ ] Problem and user value are clear without prescribing technical implementation.
-- [ ] Priority and class of service are explicit.
-- [ ] Product acceptance expectations are testable at a behavioral level.
-- [ ] Open product questions are resolved or explicitly flagged.
-````
-
-## File: .codegraph/.gitignore
-````
-# CodeGraph data files — local to each machine, not for committing.
-# Ignore everything in .codegraph/ except this file itself, so transient
-# files (the database, daemon.pid, sockets, logs) never show up in git.
-*
-!.gitignore
-````
-
-## File: docs/decisions/0003-bundler-tsup.md
-````markdown
-# ADR-0003: Bundle the CLI with `tsup` (esbuild), no declarations
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
-
-## Context
-
-The deliverable is a Node CLI distributed as a single ESM file with zero runtime
-dependencies and a shebang. We do not publish type declarations. The build must be
-fast, deterministic, and require little bespoke glue. The project also runs
-TypeScript 7 (native compiler), which makes any tool that depends on the
-TypeScript JS API a risk.
-
-## Decision
-
-Use `tsup@^9` with esbuild under the hood:
-
-- single entry `src/index.ts`, `format: ['esm']`, `platform: 'node'`,
-  `target: 'node22'`, `splitting: false`, `sourcemap: false`, `treeshake: true`;
-- `banner: { js: '#!/usr/bin/env node' }`, `clean: true`;
-- **`dts: false`** — there are no types to emit, which also removes the
-  `rollup-plugin-dts`/TypeScript-API dependency from the build.
-
-If `tsup` blocks a future Node/TypeScript upgrade, replace it with a
-`scripts/build.ts` that calls `esbuild.build()` with the same options.
-
-## Alternatives Considered
-
-- **Vite**: rejected. Browser-first; CLI use requires library/SSR mode with Rollup,
-  externalization rules, and a dev server we never use.
-- **Raw esbuild**: viable, but requires hand-maintaining a build script for
-  banner, clean, target, and single-file output.
-- **`tsc` only**: rejected. It does not bundle dependencies into one file and
-  cannot inline JSON at build time.
-
-## Consequences
-
-- **Positive**: near-zero build configuration, esbuild speed, single-file output,
-  no type-emission failure mode.
-- **Negative / Trade-offs**: one dev dependency wrapper; its defaults can change
-  between majors.
-- **Follow-up**: verify the output contract in CI (`node dist/index.js --help`, no
-  bare external imports).
-````
-
-## File: docs/decisions/0004-runtime-context-and-pure-compilers.md
-````markdown
-# ADR-0004: Injected runtime context and pure native compilers
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
-
-## Context
-
-The tool resolves OS-specific global paths (VS Code profiles, XDG, APPDATA), must
-behave identically on Linux/macOS/Windows, and needs diagnostics (`doctor`) that
-compare intended output with what is on disk. Calling `os.homedir()`,
-`process.platform`, or `process.cwd()` inside modules forces brittle module
-mocking and makes Windows behavior untestable on Linux CI.
-
-## Decision
-
-- Introduce `RuntimeContext { cwd, homeDir, platform, env, isTTY }`, created once
-  at the entrypoint and injected everywhere.
-- Adapters expose `capabilities` (scopes, format, env syntax, native default,
-  native disable, `cwd`) and a **pure** `compile(server) → native entry`.
-- `applyServers()` returns `{ content, managedNames, warnings }`; it never prints
-  and never touches the filesystem.
-- `extractServers()` returns `{ servers, warnings }`.
-- Detection uses file/directory existence only; binary lookup belongs to `doctor`.
-
-## Alternatives Considered
-
-- **Module mocking in tests** (`vi.mock('node:os')`): rejected. Fragile, leaks
-  into unrelated tests, and cannot model cross-platform path resolution cleanly.
-- **Text-diff drift checks**: rejected. They produce false positives whenever a
-  user reformats a file.
-
-## Consequences
-
-- **Positive**: hermetic tests, reusable pure compilers, semantic drift checks,
-  correct Windows/Linux behavior.
-- **Negative / Trade-offs**: every call site must thread the context; a missed
-  argument is a compile-time error by design.
-- **Follow-up**: keep `RuntimeContext` dependency-free; never add I/O methods to it.
-````
-
-## File: docs/decisions/0005-local-sync-state.md
-````markdown
-# ADR-0005: Local sync state and persisted agent targets
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
-
-## Context
-
-Non-destructive compilation means `sync` may only remove native entries it created
-before. That requires remembering which server names were written to which agent
-file. It also needs to know which agents the user selected, because in a fresh
-repository no native file exists yet — detection alone would make `sync` a silent
-no-op. The state cannot live in the canonical file, which is shared and
-hand-edited.
-
-## Decision
-
-Maintain `.agents/.mcp-sync-state.json` (project) and
-`~/.agents/.mcp-sync-state.json` (global):
-
-```json
-{
-  "version": 1,
-  "scope": "project",
-  "targets": ["claude-code", "opencode"],
-  "agents": {
-    "claude-code": { "path": "/abs/.mcp.json", "names": ["github"], "updatedAt": "..." }
-  }
-}
-```
-
-- `targets` is persisted by `init`, `sync --agents`, and `add`/`import` selections;
-  `sync` precedence is `--agents` → `targets` → detection.
-- `names` per agent is the authoritative `previousManagedNames`.
-- `import` seeds names even with `--no-sync`.
-- Missing state = empty; corrupt/unknown version = warn, treat as empty, rewrite
-  after the next successful sync.
-- State is git-ignored, written atomically, and never required by third-party
-  implementations of the format.
-
-## Alternatives Considered
-
-- **Commit the state file**: rejected. Contains absolute paths and machine-local
-  history; merge conflicts on every branch.
-- **Marker comments inside native files**: rejected. Not portable across JSON
-  files/agents and pollutes user config.
-- **Own the entire root key (`mcpServers`/`mcp`)**: rejected. Destructive; would
-  delete servers the user added manually.
-
-## Consequences
-
-- **Positive**: safe pruning, working fresh-clone flow, deterministic behavior.
-- **Negative / Trade-offs**: each developer must run `init`/`sync --agents` once per
-  checkout; state is not portable between machines.
-- **Follow-up**: bump `STATE_VERSION` only with a migration path.
-````
-
-## File: docs/decisions/0006-non-destructive-compilation.md
-````markdown
-# ADR-0006: Preserve native files in place
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
-
-## Context
-
-Existing agent files are often multi-purpose (`opencode.json`, `.zed/settings.json`,
-`~/.claude.json`) or contain data we do not model (VS Code `inputs`, editor
-settings, Claude projects/history). A migration that deletes or strips those files
-after import is irreversible, loses non-MCP data, and breaks users who open the
-old client before running `sync`.
-
-## Decision
-
-- Compilation is always in place and additive/non-destructive, using JSONC AST
-  edits.
-- The CLI never deletes, moves, or renames a native config file, and offers no
-  destructive cleanup mode.
-- `import` reads native files, merges into the canonical file, and then `sync`
-  rewrites only the managed entries — the net effect of "migration" without data
-  loss.
-- `--force` on `init` writes a timestamped `.bak` before overwriting.
-- Unparsable native files are never overwritten; the command fails with a clear
-  message.
-
-## Alternatives Considered
-
-- **Delete native files after import**: rejected. Destructive and lossy.
-- **Remove the MCP root key from shared files**: rejected. Same loss of manual
-  entries; also impossible to distinguish ours without state.
-- **Backup-then-delete**: rejected. Still surprises users and leaves stale files
-  that can shadow the canonical config.
-
-## Consequences
-
-- **Positive**: no data loss, safe adoption path, users can keep using their
-  existing clients during migration.
-- **Negative / Trade-offs**: native files remain in the repository unless the user
-  chooses otherwise; `sync` produces diffs in tracked files.
-- **Follow-up**: document in `spec/SPEC.md` §9–10 and in the README quick start.
-````
-
-## File: docs/decisions/0007-env-and-secrets.md
-````markdown
-# ADR-0007: `.env` precedence and safe secret extraction
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
-
-## Context
-
-The canonical file is committed, so it must never contain plaintext credentials.
-Values must come from the project, not from whatever happens to be exported in the
-developer's shell, because that makes builds non-reproducible. Importing existing
-configs frequently encounters hard-coded tokens that must be moved somewhere safe
-without silently rewriting unrelated values.
-
-## Decision
-
-- Resolution order: local `.env` of the active scope (`<cwd>/.env`, or
-  `~/.agents/.env` for global) **first**, then `process.env`. This intentionally
-  inverts the common `dotenv` default.
-- Canonical and native files contain only `${VAR}` / `${VAR:-default}`
-  placeholders; the compiler translates syntax, never substitutes values.
-- Secret detection uses key-name heuristics plus value heuristics (URL credentials,
-  known token prefixes, high-entropy ≥ 20 chars) across `env`, `headers`, `args`,
-  `url`.
-- Interactive imports propose extraction per finding; `--yes`/CI only **warn**
-  unless `--extract-secrets` is passed.
-- Before writing `.env`: ensure it is git-ignored, create it with mode `0600`, and
-  never overwrite an existing key. `.env.example` receives `KEY=` only.
-- Secret values are masked in all output, including `--dry-run`.
-
-## Alternatives Considered
-
-- **`process.env` first**: rejected. Shell state would override the project and
-  make "works on my machine" bugs invisible.
-- **Regex-only detection** (any non-placeholder value): rejected. It rewrites
-  harmless values such as `NODE_ENV=production`.
-- **Never extract automatically**: rejected. It leaves users with invalid
-  committed secrets and no guided path.
-
-## Consequences
-
-- **Positive**: reproducible resolution, no secret leakage, explicit CI behavior.
-- **Negative / Trade-offs**: differs from `dotenv`; may surprise users who rely on
-  exported variables. Must be documented prominently.
-- **Follow-up**: `doctor` reports unresolved required variables and tracked `.env`.
-````
-
-## File: docs/decisions/0009-typescript-7-removes-baseurl.md
-````markdown
-# ADR-0009: TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`
-
-- **Status**: Accepted
-- **Date**: 2026-11-13
-- **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md), `workflow/PLAN.md`
-
-## Context
-
-BLUEPRINT §6 specified `baseUrl: "."` together with
-`paths: { "$/*": ["./*"] }`, and stated that if TypeScript 7 rejected any option,
-the project should fall back to TypeScript 5.9 and record a new ADR. TypeScript
-7.0.2 removes `baseUrl` (`TS5102`), but it resolves `paths` relative to
-`tsconfig.json` without it, so the `$` alias keeps working for `tsc`, `tsup`, and
-`tsx`.
-
-## Decision
-
-- Keep TypeScript 7 as the only type checker.
-- Omit `baseUrl`; keep `paths: { "$/*": ["./*"] }`, which TS 7 resolves relative
-  to `tsconfig.json`.
-- `vitest.config.ts` keeps its explicit `$` alias because Vitest does not read
-  `tsconfig` paths.
-
-## Alternatives Considered
-
-- **Fall back to TypeScript 5.9**: rejected. It restores `baseUrl` but loses the
-  TS 7 checker the plan targets, for an option TS 7 intentionally removed.
-- **Add `paths: { "*": ["./*"] }`**: rejected. It broadens resolution beyond the
-  `$` convention and can mask accidental bare imports.
-- **Drop the `$` alias entirely**: rejected. It would force long relative paths
-  and diverge from the import rule.
-
-## Consequences
-
-- **Positive**: TS 7 works with no configuration beyond removing `baseUrl`; the
-  import/alias rule is preserved.
-- **Negative / Trade-offs**: the literal `baseUrl` line in BLUEPRINT §6 is no
-  longer accurate; readers must follow this ADR.
-- **Follow-up**: treat the T1 `tsconfig.json` as the reference config and verify
-  that `scripts/` (T2) resolve `$` under `tsx`.
-````
-
-## File: docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md
-````markdown
-# ADR-0011: Ciclo de vida de plugins e limpeza segura
-
-- **Status**: Accepted
-- **Date**: 2026-11-21
-- **Related Docs**: [`spec/SPEC.md`](../../spec/SPEC.md), [`ADR-0005`](./0005-local-sync-state.md), [`ADR-0006`](./0006-non-destructive-compilation.md), [`ADR-0010`](./0010-adopt-agent-plugins-mcp-schema.md)
-
-## Context
-
-A partir de B3/B5, a CLI gera artefatos próprios em `.agents/plugins/<nome>/`:
-`plugin.json`, `mcp.json` e, quando `antigravity` está entre os targets,
-`mcp_config.json`. Esses diretórios convivem com plugins e arquivos criados
-manualmente pela pessoa usuária no mesmo caminho.
-
-O `sync` era estritamente aditivo: escrevia/sobrescrevia, mas nunca removia. Como
-consequência, remover um servidor (ou desselecionar `antigravity`) deixava
-arquivos obsoletos que podiam fazer agentes continuarem carregando servidores já
-removidos. Ao mesmo tempo, o princípio de compilação não destrutiva (ADR-0006)
-proíbe tocar em arquivos nativos ou em conteúdo manual.
-
-É necessário um critério explícito e conservador para decidir **o que a CLI pode
-apagar**, sem depender de heurísticas de conteúdo e sem risco para arquivos da
-pessoa usuária.
-
-## Decision
-
-1. **Propriedade declarada, não inferida.** `SyncState.managedPlugins`
-   (`.agents/.mcp-sync-state.json`, por escopo) é a única fonte de verdade sobre
-   quais plugins pertencem à CLI. Um diretório em `.agents/plugins/<nome>/` só é
-   considerado gerenciado se `<nome>` constar em `managedPlugins`.
-
-2. **Superfície de remoção fechada.** A CLI pode remover exclusivamente
-   `plugin.json`, `mcp.json` e `mcp_config.json` de um plugin gerenciado. Qualquer
-   outro arquivo ou subdiretório é preservado.
-
-3. **Diretório só sai se vazio.** Após remover os arquivos gerenciados, o
-   diretório é removido com `rmdir` não recursivo e somente se estiver vazio.
-   Arquivos extras mantêm o diretório.
-
-4. **Reconciliação no `sync`.** A cada sincronização real, o conjunto
-   `managedPlugins − nomesCanônicos` é considerado obsoleto e tem os arquivos
-   gerenciados removidos; `managedPlugins` é reduzido ao conjunto canônico mais
-   os plugins gravados com sucesso. Isso cobre `remove`, edição manual do
-   canônico e estado legado.
-
-5. **`mcp_config.json` segue os targets ativos.** Quando uma sincronização real
-   ocorre sem `antigravity` entre os targets, `mcp_config.json` é removido de
-   todos os plugins gerenciados, preservando `plugin.json` e `mcp.json`.
-   `add --no-sync` cria o arquivo quando `antigravity` está ativo, mas **não**
-   poda plugins existentes (escopo de escrita restrito ao servidor adicionado —
-   ver B8).
-
-6. **Falhas são visíveis.** Erros de I/O na limpeza são capturados por arquivo,
-   reportados ao usuário e resultam em exit code `1`. Em `remove --no-sync`, o
-   nome permanece em `managedPlugins` para que o próximo `sync` tente novamente.
-
-7. **`--dry-run` é absoluto.** Nenhuma primitiva de limpeza toca no disco em
-   dry-run; ela apenas relata o que seria removido.
-
-## Alternatives Considered
-
-- **Inferir propriedade pelo conteúdo de `plugin.json`** (ex.: descrição
-  `managed by agents-mcp`): rejeitado. Cria segundo critério de verdade,
-  duplica estado e ainda exigiria parsing tolerante a edições manuais.
-- **Apagar o diretório recursivamente** quando o nome é gerenciado: rejeitado.
-  Viola a proteção de arquivos manuais e amplia o raio de destruição.
-- **Não remover nada e apenas avisar** (status quo): rejeitado. Mantém agentes
-  carregando servidores removidos e não cumpre o ciclo de vida esperado.
-- **Poda apenas dentro do `remove`**: rejeitado. Não cobre edição manual do
-  canônico nem desseleção de `antigravity` via `sync`.
-
-## Consequences
-
-- **Positive**: ciclo de vida completo e previsível; workspace limpo; nenhum
-  arquivo manual é apagado; `--dry-run` continua seguro; erros não são
-  mascarados.
-- **Negative / Trade-offs**: projetos cujo estado local não registra
-  `managedPlugins` (estado legado ou removido) mantêm diretórios órfãos até
-  limpeza manual — escolha deliberada em favor da segurança.
-- **Follow-up**: B7 (ausência de targets em `init`/`import`/`remove`) e B8
-  (regeneração granular no `add`) permanecem fora deste ADR. O mesmo defeito de
-  `--no-sync` em `import` deve ser corrigido em item próprio.
-````
-
-## File: skills/system/run-workflow/SKILL.md
-````markdown
----
-name: run-workflow
-description: 'How to write and run a dynamic workflow script with the `run_workflow` tool: a Python script that orchestrates many agents with `agent`, `parallel`, `pipeline`, and `phase`. Use when a task splits into many independent or staged pieces of agent work (fan out over files, modules, bugs, or review angles, then aggregate), or when the user asks for a workflow. Don''t use for a single delegated task (use a subagent) or for legacy workflow files (see migrate-workflows).'
-metadata:
-    namespace: system
----
-# Dynamic workflows with `run_workflow`
-
-A workflow is a short Python script that the `run_workflow` tool executes. The
-script decides which agents to start, in what order, and what to do with their
-results. Use it instead of many manual subagent calls when the orchestration
-itself is code: loops over a list, fan-out then aggregate, or staged pipelines.
-
-## Steps
-
-1.  Pass the script inline as `Script`, or write it to a file (for example in
-    the conversation scratch directory) and pass its absolute path as
-    `ScriptPath`. Set exactly one of them; a file is easier to fix and rerun.
-2.  Call `run_workflow(Script="...", Description="...")` or
-    `run_workflow(ScriptPath="/abs/path/workflow.py", Description="...")`.
-    `Description` is a one-line goal shown in the UI.
-    The workflow runs in the background, and you are notified when it ends.
-    For a quick script, such as a `call_tool` fan-out, set
-    `WaitMsBeforeAsync` (up to 10000) to get the result in the same turn if it
-    finishes in time.
-    To pass inputs, set `Args` to a JSON object; the script reads it as the
-    `args` dict. When `ScriptPath` is a saved workflow's entry script, `Args`
-    is validated against the args schema in its `workflow.json`.
-3.  Read the tool result: it contains the `log()` output (`Logs:`) and what the
-    script printed (`Output:`). Each agent is also linked from the workflow
-    step, so the user can open its conversation.
-4.  If the tool returns an error, fix the script at the reported line and run
-    it again.
-
-## Script rules
-
-The script runs in its own `python3` process, which needs Python 3.8 or later
-on `PATH`:
-
--   `await` works at the top level, and you can define `async def` helpers.
--   Installed library workflows are importable by name (`import <library>` or
-    `from <library> import <name>`); library modules see the same primitives as
-    the script.
--   What the script prints (`print()`, `stderr`, child-process output, and the
-    `repr` of a trailing expression) is returned in the tool result's `Output:`
-    section (and appended to the error when the workflow fails).
--   An uncaught exception stops the workflow and reports the script line.
--   `CONVERSATION_ID` and `STEP_INDEX` identify the `run_workflow` step.
-    `WORKSPACES` is a tuple of the workspace directories, primary first (empty
-    if there are none).
--   The working directory is `Cwd` if given, else `WORKSPACES[0]`, so relative
-    paths resolve against it. Local modules are not importable.
-
-## Primitives
-
-| Primitive | Behavior |
-| --- | --- |
-| `log(*args)` | Adds a line to the workflow output and the UI. |
-| `phase(name)` | Starts a named phase; later logs and agents group under it. |
-| `agent(prompt=None, schema=None, role=None, type_name="self", workspace="inherit", model=None)` | Defines an agent; nothing runs yet. `await agent(prompt, schema)` runs it once and returns its result. `a = agent(...)` then `await a(prompt, schema)` runs one turn in a conversation kept across calls. |
-| `parallel(items, fn)` | Promise that calls `fn(item)` for each item and awaits all results concurrently; results are in item order. If one fails, the rest are cancelled. |
-| `pipeline(items, fn)` | Promise that calls and awaits `fn(item)` one item at a time; results are in item order. |
-| `trajectory(last=None, types=None, tools=None, min_index=None, max_index=None)` | `await trajectory()` returns steps before this `run_workflow` call started, oldest first. `min_index` and `max_index` bound `step.index` (inclusive); `types` and `tools` filter by step type or tool name; `last` keeps the last N matching steps. |
-
-Arguments:
-
--   `type_name`: the agent type to run. `"self"` uses the current agent's
-    configuration; any available custom agent name also works.
--   `workspace`: `"inherit"` (the current workspace), `"branch"` (a new isolated
-    clone, for agents that edit code in parallel), or `"share"` (a new workspace
-    that shares the underlying repository). Other values are errors.
--   `schema` (required): a JSON schema (dict or string) for the agent's result.
-    The agent returns the result by calling its `finish` tool, which checks it
-    against the schema, and `await agent(...)` returns the parsed value. An
-    agent that ends without calling `finish` fails the workflow. Use
-    `{"type": "string"}` for a free-form answer.
--   `role`: an optional short title for the agent's card, such as
-    `"Security reviewer"`.
--   `model`: the agent's model tier: `"inherit"` (default, your model),
-    `"flash_lite"`, `"flash"`, or `"pro"`. Use a lighter tier for simple,
-    high-fan-out work.
--   `fn`: usually a `lambda` that returns `agent(...)`, or an `async def`
-    helper that awaits several agents. It must return something awaitable:
-    an `agent()` or a call on one, a nested `parallel()` / `pipeline()`, or
-    an `async def` call. Build per-item prompts and roles with f-strings.
-
-Awaiting the same agent twice runs it once and returns the same result. An
-`agent()` that is never awaited or called never runs, so always `await` it, or
-pass it to `parallel` / `pipeline` and await that.
-
-The workflow step shows one card per agent, in the order agents start, titled
-with its `role`, or else the first line of its prompt, so set a role or start
-each prompt with a short line that names the job.
-
-## Agents that keep their context
-
-When one agent should do several related turns, such as a reviewer that checks
-the fixes for the bugs it found, call it instead of awaiting it. Each
-`a(prompt, schema)` is lazy like an awaited `agent()` and returns that turn's
-`finish` result; the agent's own `prompt`, if any, is its standing instructions
-and leads the first turn. `schema` on a call defaults to the agent's. Turns on
-one agent run one at a time, in the order they were started. A failed turn
-raises, but the agent stays usable. An agent is either awaited or called, not
-both. `del a` ends the agent, unless something else, such as a lambda, still
-references it; every agent ends when the workflow ends.
-
-```python
-reviewer = agent("You review Go code for correctness.", role="Reviewer")
-bugs = await reviewer("List the bugs in foo.go.", {"type": "array", "items": {"type": "string"}})
-fixes = await parallel(bugs, lambda b: agent(f"Fix: {b}", {"type": "string"}))
-ok = await reviewer(f"Fixes made: {fixes}. Are all your bugs fixed?", {"type": "boolean"})
-del reviewer
-```
-
-## Calling tools from the script
-
-Where the `run_workflow` tool description lists tools for `call_tool`, the
-script can call them directly:
-
--   `call_tool(name, **args)` returns a promise like `agent()` does. Awaiting it
-    runs the tool with the arguments you would pass to it directly and returns
-    the tool's output as a `str`.
--   It raises `ToolError` (with `.tool` and `.message`) if the tool fails or
-    the call is denied. `.denied` is `True` when a pre-tool hook or the
-    permission check rejected the call before the tool ran, so a script can
-    skip denied calls and still fail on real errors.
--   The user cannot be asked anything from a workflow: a call that needs user
-    approval that has not already been granted is denied.
--   Tool outputs are not shown to you unless the script logs or prints them.
-
-## Reading earlier conversation steps
-
-Pass inputs you already have in `Args` (or inline in the script). Use
-`await trajectory(...)` when the script needs to inspect steps from earlier in
-this conversation—such as mining a failed `run_command` output without
-rerunning it—and pass only the relevant slice into child `agent()` prompts.
-
-Each returned `Step` is a `dict` that also supports attribute access (missing
-fields return `None` as attributes):
-
--   `index` (`int`): 0-based step index.
--   `type` (`str`): step type, e.g. `"USER_INPUT"`, `"PLANNER_RESPONSE"`,
-    `"SYSTEM_MESSAGE"`, or `"GENERIC"` (tool calls).
--   `status` (`str`): e.g. `"DONE"`, `"ERROR"`, or `"CLEARED"`.
--   Message steps set `text` (`str`); tool steps set `tool` (`str`), `args`
-    (parsed `dict`), and `output` (`str`, truncated at 200k characters).
-
-```python
-steps = await trajectory(tools=["run_command"], last=20)
-errors = [s.output for s in steps if s.status == "ERROR" and s.output]
-log(f"Found {len(errors)} failed command(s)")
-```
-
-`trajectory()` only returns steps before the `run_workflow` call started (steps
-added while the workflow runs in the background are not included). Older tool
-steps evicted from memory have `status == "CLEARED"` and `output == None`; read
-the conversation's `transcript.jsonl` / `transcript_full.jsonl` when you need
-cleared tool outputs or steps added after the workflow started.
-
-## Behavior to know
-
--   Workflow agents are main agents, not subagents. They are hidden from the
-    conversation list and reachable from the workflow step. An awaited agent
-    is single-use; a called agent lasts until deleted or the workflow ends.
--   `await agent(...)` returns when the agent's run ends, with the result it
-    passed to `finish`.
--   If one agent in `parallel` fails, the whole call fails and the other agents
-    in it are cancelled. Stopping the parent conversation stops all running
-    workflow agents.
--   Agents do not see the script or each other. Put all the context an agent
-    needs in its prompt, and ask for a short, well-defined output.
-
-## Example
-
-Fan out over a list that an agent produces:
-
-```python
-phase("Discover")
-files = await agent(
-    "List the Go files under pkg/foo that call Bar(). Paths only.",
-    schema={"type": "array", "items": {"type": "string"}},
-)
-
-phase("Review")
-reviews = await parallel(files, lambda f: agent(
-    f"Review {f} for misuse of Bar(). Reply in 3 bullets or 'OK'.",
-    schema={"type": "string"},
-    role=f"Review {f}",
-))
-for r in reviews:
-    log(r)
-```
-````
-
-## File: src/adapters/antigravity.ts
-````typescript
-// Antigravity adapter (B3).
-//
-// Antigravity consumes mcp_config.json files written per-plugin under
-// <scopeBase>/.agents/plugins/<name>/mcp_config.json, not a single monolithic
-// agent file. Accordingly:
-//   - getConfigPath returns null (no single native config path).
-//   - compile produces Antigravity's entry format: stdio -> { command, args?,
-//     env? }; streamable-http/sse -> { serverUrl, headers? }.
-//   - applyServers is a no-op passthrough (plugin files are written by
-//     syncPluginFiles in the command layer, not by per-adapter file writes).
-//   - detect looks for any .agents/plugins/*/mcp_config.json.
-//
-// Implements the adapter contract (BLUEPRINT 9.1) + B3 spec section 2.
-
+/**
+ * Global flag contract across every subcommand.
+ *
+ * `citty` does not inherit the root command aliases into subcommands, so
+ * `normalizeGlobalArgs` canonicalizes `-g` → `--global` and `-y` → `--yes`
+ * before and after the subcommand token, and commands read them through
+ * `isGlobalFlag` / `isYesFlag`. These tests exercise the whole contract via
+ * the real entrypoint for all 7 commands.
+ */
+
+import { describe, expect, it } from 'vitest'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { readdirSync, statSync } from 'node:fs'
-import { readTextFile } from '$/src/core/fs-atomic'
-import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import type { CanonicalServer } from '$/src/core/schema'
-import type {
-  AgentId,
-  AdapterCapabilities,
-  AgentAdapter,
-  CompileResult,
-  ExtractResult,
-  Warning,
-  AdapterContext,
-} from '$/src/adapters/types'
-import { compileAntigravityMcpConfig } from '$/src/core/plugins'
+import { main, normalizeGlobalArgs } from '$/src/index'
+import {
+  isGlobalFlag,
+  isYesFlag,
+  persistCanonicalConfig,
+} from '$/src/commands/util'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import type { RuntimeContext } from '$/src/core/context'
+import { createSandbox } from '$/tests/helpers/sandbox'
 
-export const id: AgentId = 'antigravity'
-export const displayName = 'Antigravity'
+const SUBCOMMANDS = [
+  'sync',
+  'init',
+  'remove',
+  'list',
+  'import',
+  'add',
+  'doctor',
+] as const
 
-export const capabilities: AdapterCapabilities = {
-  scopes: ['project', 'global'],
-  format: 'json',
-  envSyntax: 'posix',
-  nativeDefault: false,
-  nativeDisabled: false,
-  cwd: false,
-  layout: 'per-plugin' as const,
-  rootKey: 'mcpServers',
+describe('normalizeGlobalArgs: short global aliases', () => {
+  for (const subcommand of SUBCOMMANDS) {
+    it(`canonicaliza -g/-y antes de \`${subcommand}\``, () => {
+      expect(normalizeGlobalArgs(['-g', '-y', subcommand])).toEqual([
+        subcommand,
+        '--global',
+        '--yes',
+      ])
+    })
+
+    it(`canonicaliza -g/-y depois de \`${subcommand}\``, () => {
+      expect(normalizeGlobalArgs([subcommand, '-g', '-y'])).toEqual([
+        subcommand,
+        '--global',
+        '--yes',
+      ])
+    })
+  }
+})
+
+describe('isGlobalFlag / isYesFlag', () => {
+  it('aceita as formas longa e curta', () => {
+    expect(isGlobalFlag({ global: true })).toBe(true)
+    expect(isGlobalFlag({ g: true })).toBe(true)
+    expect(isGlobalFlag({})).toBe(false)
+    expect(isYesFlag({ yes: true })).toBe(true)
+    expect(isYesFlag({ y: true })).toBe(true)
+    expect(isYesFlag({})).toBe(false)
+  })
+})
+
+interface CliResult {
+  exitCode: number | undefined
+  stdout: string[]
+  stderr: string[]
 }
 
-export function getConfigPath(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): string | null {
-  return null
-}
+const savedEnvKeys = ['HOME', 'XDG_CONFIG_HOME'] as const
 
-export async function detect(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): Promise<boolean> {
-  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-  const pluginsDir = join(base, '.agents', 'plugins')
-  let entries: string[]
+/** Run the real CLI in a sandbox, capturing output, exit code and disk scope. */
+async function runCli(
+  argv: readonly string[],
+  sandbox: ReturnType<typeof createSandbox>,
+): Promise<CliResult> {
+  mkdirSync(sandbox.ctx.cwd, { recursive: true })
+  mkdirSync(sandbox.ctx.homeDir, { recursive: true })
+
+  const result: CliResult = {
+    exitCode: undefined,
+    stdout: [],
+    stderr: [],
+  }
+  const savedArgv = process.argv
+  const savedCwd = process.cwd()
+  const savedExit = process.exit
+  const savedLog = console.log
+  const savedError = console.error
+  const savedEnv = new Map<string, string | undefined>()
+  for (const key of savedEnvKeys) {
+    savedEnv.set(key, process.env[key])
+  }
+
+  process.argv = ['node', 'index.js', ...argv]
+  process.chdir(sandbox.ctx.cwd)
+  process.env.HOME = sandbox.ctx.homeDir
+  process.env.XDG_CONFIG_HOME = join(sandbox.ctx.homeDir, '.config')
+  process.exit = ((code: number) => {
+    result.exitCode = code
+  }) as unknown as NodeJS.Process['exit']
+  console.log = ((message: unknown) => {
+    result.stdout.push(String(message))
+  }) as typeof console.log
+  console.error = ((message: unknown) => {
+    result.stderr.push(String(message))
+  }) as typeof console.error
+
   try {
-    entries = readdirSync(pluginsDir)
-  } catch {
-    return false
-  }
-  for (const entry of entries) {
-    const mcpConfigPath = join(pluginsDir, entry, 'mcp_config.json')
-    try {
-      if (statSync(mcpConfigPath).isFile()) {
-        return true
+    await main()
+  } finally {
+    process.argv = savedArgv
+    process.chdir(savedCwd)
+    process.exit = savedExit
+    console.log = savedLog
+    console.error = savedError
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) {
+        delete process.env[key]
+      } else {
+        process.env[key] = value
       }
-    } catch {
-      // ignore
     }
   }
-  return false
+
+  return result
 }
 
-export function compile(server: CanonicalServer): {
-  entry: unknown | null
-  warnings: readonly Warning[]
-} {
-  const warnings: Warning[] = []
-  const config = compileAntigravityMcpConfig('server', server)
-  const entry = (config.mcpServers as Record<string, unknown>)['server']
-  return { entry: entry ?? null, warnings }
-}
-
-export function extractServers(
-  rawContent: string,
-  scope: ConfigScope,
-): ExtractResult {
-  const warnings: Warning[] = []
-  const resultServers: Record<string, CanonicalServer> = {}
-
-  let parsed: Record<string, unknown>
-  try {
-    parsed = JSON.parse(rawContent) as Record<string, unknown>
-  } catch {
-    return { servers: {}, warnings }
-  }
-
-  const mcpServers = parsed.mcpServers
-  if (
-    !mcpServers ||
-    typeof mcpServers !== 'object' ||
-    Array.isArray(mcpServers)
-  ) {
-    return { servers: {}, warnings }
-  }
-
-  for (const [name, rawEntry] of Object.entries(
-    mcpServers as Record<string, unknown>,
-  )) {
-    const entry = rawEntry as Record<string, unknown> | null
-    if (!entry || typeof entry !== 'object') {
-      continue
-    }
-
-    const command = entry.command
-    const serverUrl = entry.serverUrl
-
-    const hasCommand = typeof command === 'string' && command.length > 0
-    const hasServerUrl = typeof serverUrl === 'string' && serverUrl.length > 0
-
-    if (hasCommand) {
-      const server: CanonicalServer = {
-        type: 'stdio',
-        command,
-        args: [],
-      }
-      if (entry.args && Array.isArray(entry.args)) {
-        server.args = entry.args.filter(
-          (a): a is string => typeof a === 'string',
-        )
-      }
-      if (
-        entry.env &&
-        typeof entry.env === 'object' &&
-        !Array.isArray(entry.env)
-      ) {
-        server.env = {}
-        for (const [k, v] of Object.entries(
-          entry.env as Record<string, unknown>,
-        )) {
-          if (typeof v === 'string') {
-            server.env[k] = v
-          }
-        }
-      }
-      resultServers[name] = server
-      continue
-    }
-
-    if (hasServerUrl) {
-      const server: CanonicalServer = {
+function seedGlobalCanonicalConfig(ctx: RuntimeContext): void {
+  persistCanonicalConfig('global', ctx, {
+    $schema: DEFAULT_SCHEMA_URL,
+    mcpServers: {
+      gonly: {
         type: 'streamable-http',
-        url: serverUrl,
-      }
-      if (
-        entry.headers &&
-        typeof entry.headers === 'object' &&
-        !Array.isArray(entry.headers)
-      ) {
-        server.headers = {}
-        for (const [k, v] of Object.entries(
-          entry.headers as Record<string, unknown>,
-        )) {
-          if (typeof v === 'string') {
-            server.headers[k] = v
-          }
-        }
-      }
-      resultServers[name] = server
-      continue
-    }
-
-    warnings.push({
-      code: 'UNKNOWN_FIELD_DROPPED',
-      agent: 'antigravity',
-      server: name,
-      message: 'No command or serverUrl for `' + name + '`; entry dropped',
-    })
-  }
-
-  return { servers: resultServers, warnings }
-}
-
-export function applyServers(
-  existingRawContent: string | null,
-  servers: Record<string, CanonicalServer>,
-  ctx: AdapterContext,
-): CompileResult {
-  const managed = Object.keys(servers)
-  return {
-    content: existingRawContent ?? '',
-    managedNames: managed,
-    warnings: [],
-  }
-}
-````
-
-## File: src/adapters/shared.ts
-````typescript
-/**
- * Shared helpers for the adapter layer.
- *
- * Implements BLUEPRINT §9.2/§9.3: one JSONC batch edit via a single
- * `jsonc-parser.modify` call on the `rootKey` (avoiding the multi-edit
- * offset footgun), tolerant entry reader, and warning factory. Preserves
- * CRLF/BOM/comments outside the replaced `rootKey`; aborts on parse error.
- */
-
-import { modify, applyEdits, parse, type ParseError } from 'jsonc-parser'
-import type { WarningCode } from '$/src/adapters/types'
-import { makeWarning } from '$/src/adapters/types'
-import type { AgentId, CompileResult, Warning } from '$/src/adapters/types'
-
-export interface ApplyServerEntriesOptions {
-  /** Names being produced in this sync (the managed set). */
-  readonly managed: string[]
-  /** Previously managed names (from sync state) to prune when no longer produced. */
-  readonly previous: ReadonlySet<string>
-  readonly format: 'json' | 'jsonc'
-}
-
-/**
- * Apply managed entries to `rootKey` in an existing JSONC document, never
- * touching sibling keys or manual entries.
- *
- * Strategy: compute the desired `rootKey` object (manual entries that are not
- * in `previous`, overlaid by the current managed entries) and replace the
- * whole `rootKey` node in a single `modify` call. This preserves everything
- * outside `rootKey` byte-for-byte (comments, unrelated keys, `inputs`, etc.)
- * while keeping the edit atomic and offset-safe.
- *
- * - Creates `rootKey` only when needed.
- * - Deletes names in `previous` that are no longer produced.
- * - Aborts (throws) on parse error; the file is left byte-identical.
- */
-export function applyServerEntries(
-  existing: string | null,
-  rootKey: string,
-  entries: Record<string, unknown>,
-  opts: ApplyServerEntriesOptions,
-): {
-  content: string
-  edits: Array<{ offset: number; length: number; content: string }>
-} {
-  const { managed, previous, format } = opts
-
-  if (existing === null || existing.trim() === '') {
-    if (Object.keys(entries).length === 0) {
-      return { content: '', edits: [] }
-    }
-    const document = { [rootKey]: entries }
-    const content = JSON.stringify(document, null, 2) + '\n'
-    return { content, edits: [] }
-  }
-
-  // Validate the existing document before touching it.
-  const errors: ParseError[] = []
-  parse(existing, errors, { allowTrailingComma: true, allowEmptyContent: true })
-  if (errors.length > 0) {
-    const first = errors[0]!
-    throw new Error(
-      `Invalid JSONC at offset ${first.offset}: unable to edit safely`,
-    )
-  }
-
-  const formattingOptions =
-    format === 'jsonc' ? { tabSize: 2, insertSpaces: true } : undefined
-
-  // Read the current rootKey object (or {} if absent).
-  let currentRoot: Record<string, unknown> = {}
-  try {
-    const parsed = parse(existing) as Record<string, unknown>
-    const existingRoot = parsed[rootKey]
-    if (
-      existingRoot &&
-      typeof existingRoot === 'object' &&
-      !Array.isArray(existingRoot)
-    ) {
-      currentRoot = existingRoot as Record<string, unknown>
-    }
-  } catch {
-    // If we can't read the rootKey, treat it as empty.
-    currentRoot = {}
-  }
-
-  // Manual entries: keys present in the file that are NOT in `previous`
-  // (i.e. not previously managed by the compiler) are preserved.
-  const manualEntries: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(currentRoot)) {
-    if (!previous.has(key)) {
-      manualEntries[key] = value
-    }
-  }
-
-  // Managed entries overlay manual ones; previously managed names no longer
-  // produced are simply absent from `entries`, hence dropped.
-  const newRoot: Record<string, unknown> = { ...manualEntries, ...entries }
-
-  // Nothing to do if rootKey absent and nothing to write.
-  const rootExists = Object.prototype.hasOwnProperty.call(
-    parse(existing) as Record<string, unknown>,
-    rootKey,
-  )
-  if (!rootExists && Object.keys(newRoot).length === 0) {
-    return { content: existing, edits: [] }
-  }
-
-  const edits = modify(existing, [rootKey], newRoot, {
-    formattingOptions,
+        url: 'https://example.com/mcp',
+      },
+    },
   })
-
-  const content = applyEdits(existing, edits)
-  return { content, edits }
 }
 
 /**
- * Tolerant nested lookup: `readEntry(parsed, ['context_servers', 'x', 'command', 'path'])`.
- * Returns `undefined` when any segment is missing.
+ * Every command must honor `-g`/`--global` regardless of where the flag sits.
+ * `expected` is matched against stdout unless `stderrExcludes` is set.
  */
-export function readEntry(parsed: unknown, path: readonly string[]): unknown {
-  let current: unknown = parsed
-  for (const segment of path) {
-    if (
-      current === null ||
-      current === undefined ||
-      typeof current !== 'object' ||
-      Array.isArray(current)
-    ) {
-      return undefined
-    }
-    current = (current as Record<string, unknown>)[segment]
-  }
-  return current
-}
-
-/**
- * Build a `Warning`. Thin re-export friendly wrapper around `makeWarning`.
- */
-export function buildWarning(
-  agent: AgentId,
-  code: WarningCode,
-  message: string,
-  meta?: { server?: string; field?: string },
-): Warning {
-  return makeWarning(agent, code, message, meta)
-}
-````
-
-## File: src/core/context.ts
-````typescript
-import { homedir, platform } from 'node:os'
-
-export type ConfigScope = 'project' | 'global'
-
-export interface RuntimeContext {
-  readonly cwd: string
-  readonly homeDir: string
-  readonly platform: NodeJS.Platform
-  readonly env: NodeJS.ProcessEnv
-  readonly isTTY: boolean
-}
-
-/**
- * Build a `RuntimeContext`. All path/TTY reads happen here (once, at creation),
- * never at module import time and never inside adapters. This makes Windows
- * path behavior testable on Linux CI by overriding `platform`/`homeDir`.
- */
-export function createRuntimeContext(
-  overrides?: Partial<RuntimeContext>,
-): RuntimeContext {
-  return {
-    cwd: overrides?.cwd ?? process.cwd(),
-    homeDir: overrides?.homeDir ?? homedir(),
-    platform: overrides?.platform ?? platform(),
-    env: overrides?.env ?? process.env,
-    isTTY: overrides?.isTTY ?? Boolean(process.stdout?.isTTY),
-  }
-}
-````
-
-## File: src/core/gitignore.ts
-````typescript
-/**
- * Minimal, lazy `.gitignore` management for tool-owned secrets and state.
- *
- * Implements BLUEPRINT §8.6: adds a managed block only for `.env` and the sync
- * state file, lazily (only when something is about to be written), never
- * touching agent configuration files, never duplicating entries.
- */
-
-import { execFileSync } from 'node:child_process'
-import { join } from 'node:path'
-import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
-import { ENV_FILE } from '$/src/config'
-
-const MANAGED_BLOCK_HEADER = '# agents-mcp local (managed)'
-const MANAGED_BLOCK_FOOTER = '# end agents-mcp local (managed)'
-
-export interface EnsureIgnoredResult {
-  added: string[]
-  warnings: string[]
-}
-
-/**
- * Ensure `entries` are covered by `.gitignore` at `rootDir`. Adds a managed
- * block only when at least one entry is not already covered. Entries already
- * covered by another pattern are not duplicated.
- */
-export function ensureIgnored(
-  rootDir: string,
-  entries: string[],
-): EnsureIgnoredResult {
-  const added: string[] = []
-  const warnings: string[] = []
-
-  const gitignorePath = join(rootDir, '.gitignore')
-  const raw = readTextFile(gitignorePath)
-  const existingLines = raw !== null ? raw.split(/\r?\n/) : []
-
-  const alreadyCovered = (entry: string): boolean => {
-    for (const line of existingLines) {
-      const trimmed = line.trim()
-      if (trimmed === '' || trimmed.startsWith('#')) continue
-      // Exact match or the entry is a prefix-anchored pattern already present.
-      if (trimmed === entry) return true
-      // A trailing-slash directory pattern covers contained files.
-      if (trimmed === entry + '/') return true
-      // Only match directory prefixes (require '/' boundary after the prefix)
-      // so `.env` does not false-positive match `.env.example`.
-      if (trimmed.endsWith('/') && entry.startsWith(trimmed)) return true
-    }
-    return false
-  }
-
-  const uncovered = entries.filter((e) => !alreadyCovered(e))
-
-  if (uncovered.length === 0) {
-    // Check git-tracked status for `.env` specifically without duplicating.
-    if (entries.includes(ENV_FILE) && isGitTracked(rootDir, ENV_FILE)) {
-      warnings.push(
-        `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it (values are still safe from new commits)`,
-      )
-    }
-    return { added, warnings }
-  }
-
-  // A trailing newline leaves a final empty element; drop it so rejoining
-  // never accumulates blank lines across repeated calls.
-  if (
-    existingLines.length > 0 &&
-    existingLines[existingLines.length - 1] === ''
-  ) {
-    existingLines.pop()
-  }
-
-  const headerIdx = existingLines.findIndex(
-    (l) => l.trim() === MANAGED_BLOCK_HEADER,
-  )
-  const footerIdx = existingLines.findIndex(
-    (l) => l.trim() === MANAGED_BLOCK_FOOTER,
-  )
-
-  const nextLines = [...existingLines]
-
-  if (headerIdx !== -1 && footerIdx !== -1) {
-    // Block complete: insert uncovered entries right before the footer.
-    nextLines.splice(footerIdx, 0, ...uncovered)
-  } else if (headerIdx !== -1) {
-    // Header only (corrupted/partial block): append entries and close it.
-    nextLines.push(...uncovered, MANAGED_BLOCK_FOOTER)
-  } else {
-    // No managed block yet: create header -> entries -> footer.
-    nextLines.push('', MANAGED_BLOCK_HEADER, ...uncovered, MANAGED_BLOCK_FOOTER)
-  }
-
-  const next = nextLines.join('\n') + '\n'
-  writeFileAtomic(gitignorePath, next)
-  added.push(...uncovered)
-
-  if (uncovered.includes(ENV_FILE) && isGitTracked(rootDir, ENV_FILE)) {
-    warnings.push(
-      `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it (values are still safe from new commits)`,
-    )
-  }
-
-  return { added, warnings }
-}
-
-/**
- * Return `true` when `entry` is tracked by Git in `rootDir`. Any error (not a
- * git repo, git unavailable, entry not tracked) yields `false` so the caller
- * can proceed without git.
- */
-export function isGitTracked(rootDir: string, entry: string): boolean {
-  try {
-    execFileSync('git', ['ls-files', '--error-unmatch', '--', entry], {
-      cwd: rootDir,
-      stdio: 'ignore',
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-````
-
-## File: src/sources/types.ts
-````typescript
-/**
- * Source resolvers DTOs (§10).
- *
- * `ResolvedServerPackage` is the common output of every source resolver
- * (direct, github, registry), ready to be turned into a canonical server by
- * `commands/add.ts`.
- */
-
-import type { CanonicalServer } from '$/src/core/schema'
-
-export interface RequiredEnvVar {
+const CASES: Array<{
   name: string
-  description?: string
-  isSecret: boolean
-}
+  argv: string[]
+  expected: (homeDir: string) => string
+  stderrExcludes?: string
+}> = [
+  {
+    name: 'init',
+    argv: ['init', '--force', '--dry-run'],
+    expected: (home) =>
+      `Initialized global canonical config at ${join(home, '.agents/mcp.json')}`,
+  },
+  {
+    name: 'sync',
+    argv: ['sync', '--agents', 'vscode', '--dry-run'],
+    expected: (home) => join(home, '.config', 'Code', 'User', 'mcp.json'),
+  },
+  {
+    name: 'remove',
+    argv: ['remove', 'gonly', '--dry-run'],
+    expected: (home) => join(home, '.agents/mcp.json'),
+  },
+  {
+    name: 'list',
+    argv: ['list'],
+    expected: () => 'gonly',
+  },
+  {
+    name: 'import',
+    argv: ['import', '--dry-run'],
+    expected: (home) => join(home, '.agents/mcp.json'),
+  },
+  {
+    name: 'add',
+    argv: ['add', 'demo', '--command', 'npx', '--dry-run'],
+    expected: (home) => join(home, '.agents/mcp.json'),
+  },
+  {
+    name: 'doctor',
+    argv: ['doctor', '--dry-run'],
+    expected: () => 'doctor:',
+    stderrExcludes: 'No canonical config',
+  },
+]
 
-export interface ResolvedServerPackage {
-  suggestedName: string
-  definition: CanonicalServer
-  requiredEnv: RequiredEnvVar[]
-  source: { type: 'direct' | 'github' | 'registry'; ref: string }
-}
+for (const placement of ['antes', 'depois'] as const) {
+  describe(`-g/-y ${placement} do subcomando`, () => {
+    for (const testCase of CASES) {
+      it(`\`${testCase.name}\` opera no escopo global`, async () => {
+        const sandbox = createSandbox()
+        try {
+          seedGlobalCanonicalConfig(sandbox.ctx)
 
-/** Optional inputs shared by all source resolvers (§10.5). */
-export interface SourceResolveOptions {
-  /** Runtime environment record (e.g. process.env) used to resolve GITHUB_TOKEN for fetch. */
-  env?: Record<string, string>
-  yes?: boolean
-  /** Interactive candidate selector (TTY, `!yes`). Receives the candidates and must return one or `null` to abort. */
-  selectCandidate?: (candidates: Candidate[]) => Promise<Candidate | null>
-  /** Injectable `fetch` for tests (zero live network calls). */
-  fetch?: typeof fetch
-}
+          const argv =
+            placement === 'antes'
+              ? ['-g', '-y', ...testCase.argv]
+              : [
+                  testCase.argv[0] as string,
+                  '-g',
+                  '-y',
+                  ...testCase.argv.slice(1),
+                ]
 
-/** A registry/GitHub candidate presented to the user for disambiguation. */
-export interface Candidate {
-  name: string
-  ref: string
-  type: 'npm' | 'pypi' | 'oci' | 'streamable-http' | 'sse'
-  url?: string
-}
-````
+          const result = await runCli(argv, sandbox)
 
-## File: src/ui/auto.ts
-````typescript
-/**
- * Non-interactive UI implementation used for `--yes`, `CI=true`, and tests.
- *
- * Never blocks on input. Every prompt resolves from the supplied `defaults`
- * (or sensible fallbacks) and prints through `log`. Secrets are masked.
- */
-
-import type { Option, PromptUi, Spinner } from '$/src/ui/prompts'
-
-export interface AutoUiDefaults {
-  confirm?: boolean
-  select?: unknown
-  multiselect?: unknown[]
-  text?: string
-  password?: string
-}
-
-export interface AutoUiLogger {
-  info(message: string): void
-  warn(message: string): void
-  error(message: string): void
-}
-
-function maskSecret(value: string): string {
-  if (!value) {
-    return ''
-  }
-  return value.length > 4 ? `${value.slice(0, 2)}***` : '***'
-}
-
-/**
- * Build a non-interactive `PromptUi`. `defaults` supply answers for prompts;
- * `log` receives informational/warning/error output.
- */
-export function createAutoUi({
-  defaults = {},
-  log,
-}: {
-  defaults?: AutoUiDefaults
-  log?: AutoUiLogger
-}): PromptUi {
-  const info = log?.info ?? ((message: string) => console.log(message))
-  const warn = log?.warn ?? ((message: string) => console.warn(message))
-  const error = log?.error ?? ((message: string) => console.error(message))
-
-  const noopSpinner: Spinner = {
-    start() {},
-    stop() {},
-  }
-
-  return {
-    intro(message: string) {
-      info(message)
-    },
-    outro(message: string) {
-      info(message)
-    },
-    note(message: string, title?: string) {
-      info(title ? `${title}: ${message}` : message)
-    },
-    warn(message: string) {
-      warn(message)
-    },
-    error(message: string) {
-      error(message)
-    },
-    confirm(opts: {
-      message: string
-      initialValue: boolean
-    }): Promise<boolean> {
-      info(`${opts.message} (${opts.initialValue ? 'Y/n' : 'y/N'})`)
-      return Promise.resolve(defaults.confirm ?? opts.initialValue)
-    },
-    async select<T>(opts: {
-      message: string
-      options: Option<T>[]
-      initialValue?: T
-    }): Promise<T> {
-      const chosen =
-        defaults.select ?? opts.options[0]?.value ?? opts.initialValue
-      info(`${opts.message} → ${String(chosen)}`)
-      const option = opts.options.find((o) => o.value === chosen)
-      if (option) {
-        info(
-          `  ${option.hint ? `${option.label} (${option.hint})` : option.label}`,
-        )
-      }
-      return chosen as T
-    },
-    async multiselect<T>(opts: {
-      message: string
-      options: Option<T>[]
-      initialValues?: T[]
-    }): Promise<T[]> {
-      const chosen = defaults.multiselect ?? opts.initialValues ?? []
-      info(`${opts.message} → ${chosen.join(', ') || '(none)'}`)
-      return chosen as T[]
-    },
-    async text(opts: {
-      message: string
-      placeholder?: string
-      defaultValue?: string
-      validate?: (v: string) => string | undefined
-    }): Promise<string> {
-      const chosen = defaults.text ?? opts.defaultValue ?? ''
-      info(`${opts.message} → ${maskSecret(chosen)}`)
-      return chosen
-    },
-    async password(opts: { message: string }): Promise<string> {
-      const chosen = defaults.password ?? ''
-      info(`${opts.message} → ***`)
-      return chosen
-    },
-    spinner(): Spinner {
-      return noopSpinner
-    },
-  }
+          expect(result.exitCode).toBeUndefined()
+          const output = [...result.stdout, ...result.stderr].join('\n')
+          expect(output).toContain(testCase.expected(sandbox.ctx.homeDir))
+          if (testCase.stderrExcludes) {
+            expect(result.stderr.join('\n')).not.toContain(
+              testCase.stderrExcludes,
+            )
+          }
+        } finally {
+          sandbox.cleanup()
+        }
+      })
+    }
+  })
 }
 ````
 
@@ -4812,170 +4315,6 @@ describe('commands remove (T3)', () => {
 })
 ````
 
-## File: tests/core/gitignore.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import { readFileSync, writeFileSync } from 'node:fs'
-import { ensureIgnored } from '$/src/core/gitignore'
-import { createSandbox } from '$/tests/helpers/sandbox'
-
-describe('gitignore.ensureIgnored', () => {
-  it('creates .gitignore with the managed block when missing', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      expect(result.added).toEqual(['.env', '.agents/.mcp-sync-state.json'])
-      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
-      expect(content).toContain('# agents-mcp local (managed)')
-      expect(content).toContain('.env')
-      expect(content).toContain('.agents/.mcp-sync-state.json')
-      expect(content).toContain('# end agents-mcp local (managed)')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('does not duplicate entries already covered', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      writeFileSync(
-        `${dir}/.gitignore`,
-        '# existing\n.env\n.node_modules\n',
-        'utf8',
-      )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      // `.env` already covered; only the state file is added.
-      expect(result.added).toEqual(['.agents/.mcp-sync-state.json'])
-      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
-      const managedBlocks = content.match(/# agents-mcp local \(managed\)/g)
-      expect(managedBlocks).toHaveLength(1)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('returns empty added when everything is already covered', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      writeFileSync(
-        `${dir}/.gitignore`,
-        '# agents-mcp local (managed)\n.env\n.agents/.mcp-sync-state.json\n# end agents-mcp local (managed)\n',
-        'utf8',
-      )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      expect(result.added).toEqual([])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('never touches agent configuration files', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      writeFileSync(`${dir}/.mcp.json`, '{}', 'utf8')
-      writeFileSync(`${dir}/opencode.json`, '{}', 'utf8')
-      ensureIgnored(dir, ['.env'])
-      expect(readFileSync(`${dir}/.mcp.json`, 'utf8')).toBe('{}')
-      expect(readFileSync(`${dir}/opencode.json`, 'utf8')).toBe('{}')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('repeated calls keep all entries between header and footer, idempotent', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      const first = ensureIgnored(dir, ['.agents/.mcp-sync-state.json'])
-      const second = ensureIgnored(dir, ['.env'])
-      expect(first.added).toEqual(['.agents/.mcp-sync-state.json'])
-      expect(second.added).toEqual(['.env'])
-
-      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
-      const header = '# agents-mcp local (managed)'
-      const footer = '# end agents-mcp local (managed)'
-      expect(content.split(header).length - 1).toBe(1)
-      expect(content.split(footer).length - 1).toBe(1)
-
-      const headerIdx = content.indexOf(header)
-      const footerIdx = content.indexOf(footer)
-      expect(headerIdx).toBeGreaterThanOrEqual(0)
-      expect(footerIdx).toBeGreaterThan(headerIdx)
-      expect(content.slice(headerIdx, footerIdx)).toContain(
-        '.agents/.mcp-sync-state.json',
-      )
-      expect(content.slice(headerIdx, footerIdx)).toContain('.env')
-
-      // No accumulated blank lines: exactly one trailing newline.
-      expect(content.endsWith('\n')).toBe(true)
-      expect(content.endsWith('\n\n')).toBe(false)
-
-      // Idempotent: a third call adds nothing.
-      const third = ensureIgnored(dir, ['.agents/.mcp-sync-state.json', '.env'])
-      expect(third.added).toEqual([])
-      const again = readFileSync(`${dir}/.gitignore`, 'utf8')
-      expect(again).toBe(content)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('inserts new entries immediately before the footer when block exists', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      writeFileSync(
-        `${dir}/.gitignore`,
-        '# existing\n# agents-mcp local (managed)\n.env\n# end agents-mcp local (managed)\n',
-        'utf8',
-      )
-      const result = ensureIgnored(dir, ['.agents/.mcp-sync-state.json'])
-      expect(result.added).toEqual(['.agents/.mcp-sync-state.json'])
-
-      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
-      const lines = content.split(/\r?\n/)
-      const footerIdx = lines.findIndex(
-        (l) => l.trim() === '# end agents-mcp local (managed)',
-      )
-      expect(lines[footerIdx - 1]).toBe('.agents/.mcp-sync-state.json')
-      expect(lines[footerIdx - 2]).toBe('.env')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('closes a corrupted header-only block by appending entries and footer', () => {
-    const { dir, cleanup } = createSandbox()
-    try {
-      writeFileSync(
-        `${dir}/.gitignore`,
-        '# existing\n# agents-mcp local (managed)\n',
-        'utf8',
-      )
-      const result = ensureIgnored(dir, [
-        '.env',
-        '.agents/.mcp-sync-state.json',
-      ])
-      expect(result.added).toEqual(['.env', '.agents/.mcp-sync-state.json'])
-
-      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
-      expect(content).toContain('# end agents-mcp local (managed)')
-      const headers = content.match(/# agents-mcp local \(managed\)/g)
-      expect(headers).toHaveLength(1)
-    } finally {
-      cleanup()
-    }
-  })
-})
-````
-
 ## File: tests/core/placeholder.test.ts
 ````typescript
 import { describe, expect, it } from 'vitest'
@@ -5307,6 +4646,447 @@ export function assertNoWritesOutsideSandbox(): void {
 }
 ````
 
+## File: tests/sources/http.test.ts
+````typescript
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { fetchJson } from '$/src/sources/http'
+
+const originalFetch = global.fetch
+
+type FetchMock = ReturnType<typeof vi.fn> & {
+  mock: {
+    calls: Array<[url: string, init?: RequestInit]>
+  }
+}
+
+function responseFactory(
+  response: unknown,
+  status = 200,
+  extra?: Record<string, string>,
+): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(extra ?? {}),
+    text: async () => JSON.stringify(response),
+    json: async () => response,
+  } as unknown as Response
+}
+
+describe('sources http', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', originalFetch)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('fetches JSON and returns parsed body', async () => {
+    const fetchMock = vi.fn(async () => responseFactory({ hello: 'world' }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchJson('https://api.example.com/data')
+
+    expect(result).toEqual({ hello: 'world' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends User-Agent header with package version', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson('https://api.example.com/data')
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = init?.headers as Record<string, string>
+    expect(headers['User-Agent']).toMatch(/^agents-mcp\/\d+\.\d+\.\d+$/)
+  })
+
+  it('sends Authorization Bearer GITHUB_TOKEN for api.github.com', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson('https://api.github.com/repos/owner/repo', {
+      env: { GITHUB_TOKEN: 'ghp_secret123' },
+    })
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = init?.headers as Record<string, string>
+    expect(headers['Authorization']).toBe('Bearer ghp_secret123')
+  })
+
+  it('sends Authorization Bearer GITHUB_TOKEN for raw.githubusercontent.com', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson(
+      'https://raw.githubusercontent.com/owner/repo/main/server.json',
+      {
+        env: { GITHUB_TOKEN: 'ghp_secret123' },
+      },
+    )
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = init?.headers as Record<string, string>
+    expect(headers['Authorization']).toBe('Bearer ghp_secret123')
+  })
+
+  it('does not send Authorization for non-GitHub URLs', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson('https://api.example.com/data', {
+      env: { GITHUB_TOKEN: 'ghp_secret123' },
+    })
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = init?.headers as Record<string, string>
+    expect(headers['Authorization']).toBeUndefined()
+  })
+
+  it('does not send Authorization when GITHUB_TOKEN is not set', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson('https://api.github.com/repos/owner/repo')
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    const headers = init?.headers as Record<string, string>
+    expect(headers['Authorization']).toBeUndefined()
+  })
+
+  it('throws on non-ok HTTP status', async () => {
+    const fetchMock = vi.fn(async () => responseFactory('Not Found', 404))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchJson('https://api.example.com/missing')).rejects.toThrow(
+      'HTTP 404',
+    )
+  })
+
+  it('retries on 5xx with exponential backoff', async () => {
+    let calls = 0
+    const fetchMock = vi.fn(async () => {
+      calls += 1
+      if (calls < 3) {
+        return responseFactory('Server Error', 500)
+      }
+      return responseFactory({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchJson('https://api.example.com/data')
+
+    expect(result).toEqual({ ok: true })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('retries on 429 respecting Retry-After header', async () => {
+    let calls = 0
+    const fetchMock = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) {
+        return responseFactory('Too Many Requests', 429, {
+          'Retry-After': '2',
+        })
+      }
+      return responseFactory({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const start = Date.now()
+    await fetchJson('https://api.example.com/data')
+    const elapsed = Date.now() - start
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(elapsed).toBeGreaterThanOrEqual(1900) // ~2s delay
+  }, 10000)
+
+  it('caps Retry-After delay at 5s', async () => {
+    let calls = 0
+    const fetchMock = vi.fn(async () => {
+      calls += 1
+      if (calls === 1) {
+        return responseFactory('Too Many Requests', 429, {
+          'Retry-After': '100',
+        })
+      }
+      return responseFactory({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const start = Date.now()
+    await fetchJson('https://api.example.com/data')
+    const elapsed = Date.now() - start
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(elapsed).toBeLessThan(6000) // capped at 5s
+  }, 10000)
+
+  it('retries on transient network errors', async () => {
+    let calls = 0
+    const fetchMock = vi.fn(async () => {
+      calls += 1
+      if (calls < 3) {
+        throw new Error('fetch failed: ECONNREFUSED')
+      }
+      return responseFactory({ ok: true })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await fetchJson('https://api.example.com/data')
+
+    expect(result).toEqual({ ok: true })
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  }, 10000)
+
+  it('gives up after max retries on persistent 5xx', async () => {
+    const fetchMock = vi.fn(async () => responseFactory('Server Error', 500))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchJson('https://api.example.com/data')).rejects.toThrow(
+      'HTTP 500',
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(3) // initial + 2 retries
+  }, 10000)
+
+  it('enforces 2 MiB response cap', async () => {
+    const bigResponse = 'x'.repeat(3 * 1024 * 1024) // 3 MiB
+    const fetchMock = vi.fn(async () => {
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: async () => bigResponse,
+        json: async () => JSON.parse(bigResponse),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchJson('https://api.example.com/big')).rejects.toThrow(
+      'too large',
+    )
+  })
+
+  it('injects fetch via opts for testability', async () => {
+    const globalFetchSpy = vi.spyOn(globalThis, 'fetch')
+    const injectedFetch = vi.fn(async () => responseFactory({ injected: true }))
+
+    const result = await fetchJson('https://api.example.com/data', {
+      fetch: injectedFetch,
+    })
+
+    expect(result).toEqual({ injected: true })
+    expect(injectedFetch).toHaveBeenCalledTimes(1)
+    // global fetch should NOT have been called
+    expect(globalFetchSpy).not.toHaveBeenCalled()
+    globalFetchSpy.mockRestore()
+  })
+
+  it('passes AbortSignal to fetch', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+      responseFactory({ ok: true }),
+    ) as unknown as FetchMock
+    vi.stubGlobal('fetch', fetchMock)
+
+    await fetchJson('https://api.example.com/data')
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(init?.signal).toBeDefined()
+  })
+})
+````
+
+## File: tests/sources/index.test.ts
+````typescript
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { resolveSource } from '$/src/sources/index'
+import { resolveDirect } from '$/src/sources/direct'
+import type { ResolvedServerPackage } from '$/src/sources/types'
+
+const originalFetch = global.fetch
+
+function responseFactory(
+  response: unknown,
+  status = 200,
+  extra?: Record<string, string>,
+): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(extra ?? {}),
+    text: async () => JSON.stringify(response),
+    json: async () => response,
+  } as unknown as Response
+}
+
+describe('sources index', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', originalFetch)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('dispatches direct flags to resolveDirect', async () => {
+    const result = await resolveSource({
+      command: 'npx',
+      arg: ['-y', '@scope/pkg'],
+      name: 'my-server',
+    })
+    expect(result.source.type).toBe('direct')
+    expect(result.suggestedName).toBe('my-server')
+  })
+
+  it('includes sse in direct-flag dispatch', async () => {
+    const result = await resolveSource({
+      sse: 'https://mcp.linear.app/sse',
+      name: 'linear',
+    })
+    expect(result.source.type).toBe('direct')
+    expect(result.suggestedName).toBe('linear')
+  })
+
+  it('routes https://github.com/owner/repo to resolveGithub', async () => {
+    const fetchMock = vi.fn(async () =>
+      responseFactory(
+        {
+          name: 'server-github',
+          registry_type: 'npm',
+          identifier: '@modelcontextprotocol/server-github',
+        },
+        200,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resolveSource({
+      source: 'https://github.com/modelcontextprotocol/server-github',
+      name: 'my-github',
+    })
+
+    expect(result.source.type).toBe('github')
+    expect(result.suggestedName).toBe('server-github')
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('routes owner/repo to resolveGithub', async () => {
+    const fetchMock = vi.fn(async () =>
+      responseFactory(
+        {
+          name: 'server-github',
+          registry_type: 'npm',
+          identifier: '@modelcontextprotocol/server-github',
+        },
+        200,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resolveSource({
+      source: 'modelcontextprotocol/server-github',
+    })
+
+    expect(result.source.type).toBe('github')
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('routes other https URLs to resolveDirect as http', async () => {
+    const result = await resolveSource({
+      source: 'https://mcp.example.com/mcp',
+      name: 'remote',
+    })
+    expect(result.source.type).toBe('direct')
+    expect(result.suggestedName).toBe('remote')
+  })
+
+  it('routes bare package name to resolveRegistry', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.includes('registry.npmjs.org')) {
+        return responseFactory('Not Found', 404)
+      }
+      return responseFactory(
+        {
+          servers: [
+            {
+              name: 'server-query',
+              packages: [{ name: 'server-query', type: 'npm' }],
+            },
+          ],
+        },
+        200,
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resolveSource({ source: 'server-query' })
+
+    expect(result.source.type).toBe('registry')
+    expect(result.suggestedName).toBe('server-query')
+  })
+
+  it('forwards env to resolvers', async () => {
+    const fetchMock = vi.fn(async () =>
+      responseFactory(
+        {
+          name: 'server-env',
+          registry_type: 'npm',
+          identifier: 'server-env',
+          environment_variables: [{ name: 'API_KEY', is_required: true }],
+        },
+        200,
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await resolveSource(
+      { source: 'owner/server-env' },
+      { env: { GITHUB_TOKEN: 'ghp_token' } },
+    )
+
+    expect(result.source.type).toBe('github')
+    expect(fetchMock).toHaveBeenCalled()
+  })
+
+  it('throws when no source specified', async () => {
+    await expect(resolveSource({})).rejects.toThrow('No source specified')
+  })
+
+  it('passes fetch injection through to resolvers', async () => {
+    const injectedFetch = vi.fn(async () =>
+      responseFactory(
+        {
+          name: 'server-github',
+          registry_type: 'npm',
+          identifier: '@modelcontextprotocol/server-github',
+        },
+        200,
+      ),
+    )
+    vi.stubGlobal('fetch', originalFetch)
+
+    await resolveSource(
+      { source: 'https://github.com/owner/repo' },
+      { fetch: injectedFetch },
+    )
+
+    expect(injectedFetch).toHaveBeenCalled()
+  })
+})
+````
+
 ## File: tests/ui/auto.test.ts
 ````typescript
 import { describe, expect, it } from 'vitest'
@@ -5497,35 +5277,6 @@ describe('createClackUi (loss-proof writes)', () => {
 })
 ````
 
-## File: tests/smoke.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import pkg from '$/package.json' with { type: 'json' }
-
-describe('smoke test', () => {
-  it('resolves root alias and package manifest', () => {
-    expect(pkg.name).toBe('agents-mcp')
-    expect(pkg.type).toBe('module')
-  })
-})
-````
-
-## File: .prettierignore
-````
-dist/
-coverage/
-node_modules/
-workflow/
-.codegraph/
-*.db*
-spec/
-docs/decisions/
-.agents/
-skills/
-repomix-output.md
-skills-lock.json
-````
-
 ## File: .prettierrc
 ````
 {
@@ -5535,6 +5286,15 @@ skills-lock.json
   "tabWidth": 2,
   "useTabs": false
 }
+````
+
+## File: index-update.sh
+````bash
+#! /usr/bin/bash
+
+repomix --style markdown
+
+codegraph sync
 ````
 
 ## File: LICENSE
@@ -5560,33 +5320,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-````
-
-## File: opencode.json
-````json
-{
-  "mcp": {
-    "sequential-thinking": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-sequential-thinking"
-      ]
-    },
-    "memory": {
-      "type": "local",
-      "command": [
-        "npx",
-        "-y",
-        "@modelcontextprotocol/server-memory"
-      ],
-      "environment": {
-        "MEMORY_FILE_PATH": "/home/alexbruno/Projetos/GitHub/agents-mcp/cli/memory.jsonl"
-      }
-    }
-  }
-}
 ````
 
 ## File: tsconfig.json
@@ -5659,6 +5392,23 @@ export default defineConfig({
     },
   },
 })
+````
+
+## File: .agents/plugins/memory/mcp.json
+````json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    }
+  }
+}
 ````
 
 ## File: .agents/skills/changelog-management/SKILL.md
@@ -6336,63 +6086,6 @@ Before handing off work or moving to `workflow/<change-slug>/REVIEW.md`:
 3. Report the exact scope of what was run (e.g., full suite vs. targeted subset, any environment limitations).
 ````
 
-## File: .github/workflows/ci.yml
-````yaml
-name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-jobs:
-  verify:
-    name: Verify (Node ${{ matrix.node-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [22, 24, 26]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run verification suite
-        run: npm run verify
-
-  windows-paths:
-    name: Windows Path & Atomic Tests (Node 22)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run typecheck
-        run: npm run typecheck
-
-      - name: Run core and adapter tests
-        run: npx vitest run tests/core tests/adapters
-````
-
 ## File: docs/decisions/0001-canonical-transports.md
 ````markdown
 # ADR-0001: Canonical transports are `stdio` and `http`
@@ -6567,6 +6260,3304 @@ A CLI `agents-mcp` gerencia e sincroniza MCPs de forma padronizada no contexto d
 - **Positive**: interoperabilidade direta com ferramentas que adotam Agent Plugins; schema único e versionado externamente; redução da superfície de manutenção da CLI.
 - **Negative / Trade-offs**: o transporte `sse` (legado HTTP+SSE) é exposto internamente na representação canônica, embora a CLI continue usando `--http` e `--command` na interface pública; ADRs-0001 e ADR-0002 são marcadas como supersedidas.
 - **Follow-up**: `docs/decisions/0001` e `docs/decisions/0002` marcadas como `Superseded by ADR-0010`; nenhum outro documento depende delas.
+````
+
+## File: src/adapters/antigravity.ts
+````typescript
+// Antigravity adapter (B3).
+//
+// Antigravity consumes mcp_config.json files written per-plugin under
+// <scopeBase>/.agents/plugins/<name>/mcp_config.json, not a single monolithic
+// agent file. Accordingly:
+//   - getConfigPath returns null (no single native config path).
+//   - compile produces Antigravity's entry format: stdio -> { command, args?,
+//     env? }; streamable-http/sse -> { serverUrl, headers? }.
+//   - applyServers is a no-op passthrough (plugin files are written by
+//     syncPluginFiles in the command layer, not by per-adapter file writes).
+//   - detect looks for any .agents/plugins/*/mcp_config.json.
+//
+// Implements the adapter contract (BLUEPRINT 9.1) + B3 spec section 2.
+
+import { join } from 'node:path'
+import { readdirSync, statSync } from 'node:fs'
+import { readTextFile } from '$/src/core/fs-atomic'
+import type { RuntimeContext, ConfigScope } from '$/src/core/context'
+import type { CanonicalServer } from '$/src/core/schema'
+import type {
+  AgentId,
+  AdapterCapabilities,
+  AgentAdapter,
+  CompileResult,
+  ExtractResult,
+  Warning,
+  AdapterContext,
+} from '$/src/adapters/types'
+import { compileAntigravityMcpConfig } from '$/src/core/plugins'
+
+export const id: AgentId = 'antigravity'
+export const displayName = 'Antigravity'
+
+export const capabilities: AdapterCapabilities = {
+  scopes: ['project', 'global'],
+  format: 'json',
+  envSyntax: 'posix',
+  nativeDefault: false,
+  nativeDisabled: false,
+  cwd: false,
+  layout: 'per-plugin' as const,
+  rootKey: 'mcpServers',
+}
+
+export function getConfigPath(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): string | null {
+  return null
+}
+
+export async function detect(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): Promise<boolean> {
+  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+  const pluginsDir = join(base, '.agents', 'plugins')
+  let entries: string[]
+  try {
+    entries = readdirSync(pluginsDir)
+  } catch {
+    return false
+  }
+  for (const entry of entries) {
+    const mcpConfigPath = join(pluginsDir, entry, 'mcp_config.json')
+    try {
+      if (statSync(mcpConfigPath).isFile()) {
+        return true
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return false
+}
+
+export function compile(server: CanonicalServer): {
+  entry: unknown | null
+  warnings: readonly Warning[]
+} {
+  const warnings: Warning[] = []
+  const config = compileAntigravityMcpConfig('server', server)
+  const entry = (config.mcpServers as Record<string, unknown>)['server']
+  return { entry: entry ?? null, warnings }
+}
+
+export function extractServers(
+  rawContent: string,
+  scope: ConfigScope,
+): ExtractResult {
+  const warnings: Warning[] = []
+  const resultServers: Record<string, CanonicalServer> = {}
+
+  let parsed: Record<string, unknown>
+  try {
+    parsed = JSON.parse(rawContent) as Record<string, unknown>
+  } catch {
+    return { servers: {}, warnings }
+  }
+
+  const mcpServers = parsed.mcpServers
+  if (
+    !mcpServers ||
+    typeof mcpServers !== 'object' ||
+    Array.isArray(mcpServers)
+  ) {
+    return { servers: {}, warnings }
+  }
+
+  for (const [name, rawEntry] of Object.entries(
+    mcpServers as Record<string, unknown>,
+  )) {
+    const entry = rawEntry as Record<string, unknown> | null
+    if (!entry || typeof entry !== 'object') {
+      continue
+    }
+
+    const command = entry.command
+    const serverUrl = entry.serverUrl
+
+    const hasCommand = typeof command === 'string' && command.length > 0
+    const hasServerUrl = typeof serverUrl === 'string' && serverUrl.length > 0
+
+    if (hasCommand) {
+      const server: CanonicalServer = {
+        type: 'stdio',
+        command,
+        args: [],
+      }
+      if (entry.args && Array.isArray(entry.args)) {
+        server.args = entry.args.filter(
+          (a): a is string => typeof a === 'string',
+        )
+      }
+      if (
+        entry.env &&
+        typeof entry.env === 'object' &&
+        !Array.isArray(entry.env)
+      ) {
+        server.env = {}
+        for (const [k, v] of Object.entries(
+          entry.env as Record<string, unknown>,
+        )) {
+          if (typeof v === 'string') {
+            server.env[k] = v
+          }
+        }
+      }
+      resultServers[name] = server
+      continue
+    }
+
+    if (hasServerUrl) {
+      const server: CanonicalServer = {
+        type: 'streamable-http',
+        url: serverUrl,
+      }
+      if (
+        entry.headers &&
+        typeof entry.headers === 'object' &&
+        !Array.isArray(entry.headers)
+      ) {
+        server.headers = {}
+        for (const [k, v] of Object.entries(
+          entry.headers as Record<string, unknown>,
+        )) {
+          if (typeof v === 'string') {
+            server.headers[k] = v
+          }
+        }
+      }
+      resultServers[name] = server
+      continue
+    }
+
+    warnings.push({
+      code: 'UNKNOWN_FIELD_DROPPED',
+      agent: 'antigravity',
+      server: name,
+      message: 'No command or serverUrl for `' + name + '`; entry dropped',
+    })
+  }
+
+  return { servers: resultServers, warnings }
+}
+
+export function applyServers(
+  existingRawContent: string | null,
+  servers: Record<string, CanonicalServer>,
+  ctx: AdapterContext,
+): CompileResult {
+  const managed = Object.keys(servers)
+  return {
+    content: existingRawContent ?? '',
+    managedNames: managed,
+    warnings: [],
+  }
+}
+````
+
+## File: src/core/fs-atomic.ts
+````typescript
+import {
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeSync as fsWriteSync,
+  fsyncSync as fsFsyncSync,
+  readFileSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
+
+/**
+ * Read a text file, returning `null` when it does not exist (ENOENT).
+ * Any other error propagates.
+ */
+export function readTextFile(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null
+    }
+    throw err
+  }
+}
+
+/**
+ * Atomic write: write to a temp file in the **same directory**, fsync, then
+ * rename over the target. On Windows, `rename` over an existing file can fail,
+ * so fall back to `copyFile` + `unlink` without removing the target first.
+ *
+ * The temp file is created with `O_EXCL` plus a random suffix to avoid
+ * symlink surprises and collisions between concurrent writers.
+ *
+ * `mode` applies to the temp file (e.g. `0o600` for `.env`); after rename the
+ * platform's umask may adjust the final mode, so callers requiring an exact
+ * mode should `chmod` the target afterwards.
+ */
+export interface WriteFileAtomicOptions {
+  mode?: number
+}
+
+export function writeFileAtomic(
+  path: string,
+  content: string,
+  options: WriteFileAtomicOptions = {},
+): void {
+  const dir = dirname(path)
+  // Ensure the parent directory exists so callers don't have to pre-create it.
+  mkdirSync(dir, { recursive: true })
+  const temp = createTempPath(dir)
+  const fd = openSync(temp, 'wx', options.mode ?? 0o644)
+  try {
+    fsWriteSync(fd, Buffer.from(content, 'utf8'))
+    fsFsyncSync(fd)
+    closeSync(fd)
+  } catch (err) {
+    try {
+      closeSync(fd)
+    } catch {
+      // ignore
+    }
+    try {
+      unlinkSync(temp)
+    } catch {
+      // ignore
+    }
+    throw err
+  }
+
+  try {
+    renameSync(temp, path)
+  } catch (renameErr) {
+    // Windows: rename over an existing file may fail. Fall back to
+    // copyFile + unlink so we never clobber the target before the copy is safe.
+    if (copyFileOverExisting(temp, path)) {
+      try {
+        unlinkSync(temp)
+      } catch {
+        // ignore
+      }
+      return
+    }
+    // Clean up the orphaned temp and rethrow the original rename error.
+    try {
+      unlinkSync(temp)
+    } catch {
+      // ignore
+    }
+    throw renameErr
+  }
+}
+
+function createTempPath(dir: string): string {
+  const random = Math.random().toString(36).slice(2, 14)
+  const timestamp = Date.now().toString(36)
+  return join(dir, `.agents-mcp-tmp-${timestamp}-${random}`)
+}
+
+function copyFileOverExisting(src: string, dest: string): boolean {
+  try {
+    copyFileSync(src, dest)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Copy `path` to `<path>.bak.<ISO timestamp>` before a `--force` operation.
+ * Returns the backup path, or `null` when the source does not exist.
+ */
+export function backupFile(path: string): string | null {
+  if (!existsSync(path)) {
+    return null
+  }
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const backup = `${path}.bak.${timestamp}`
+  copyFileSync(path, backup)
+  return backup
+}
+````
+
+## File: src/core/gitignore.ts
+````typescript
+/**
+ * Minimal, lazy `.gitignore` management for tool-owned secrets.
+ *
+ * Implements BLUEPRINT §8.6: adds a managed block only for `.env`, lazily
+ * (only when something is about to be written), never touching agent
+ * configuration files, never duplicating entries.
+ */
+
+import { execFileSync } from 'node:child_process'
+import { join } from 'node:path'
+import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import { ENV_FILE } from '$/src/config'
+
+const MANAGED_BLOCK_HEADER = '# agents-mcp local (managed)'
+const MANAGED_BLOCK_FOOTER = '# end agents-mcp local (managed)'
+
+export interface EnsureIgnoredResult {
+  added: string[]
+  warnings: string[]
+}
+
+/**
+ * Ensure `entries` are covered by `.gitignore` at `rootDir`. Adds a managed
+ * block only when at least one entry is not already covered. Entries already
+ * covered by another pattern are not duplicated.
+ */
+export function ensureIgnored(
+  rootDir: string,
+  entries: string[],
+): EnsureIgnoredResult {
+  const added: string[] = []
+  const warnings: string[] = []
+
+  const gitignorePath = join(rootDir, '.gitignore')
+  const raw = readTextFile(gitignorePath)
+  const existingLines = raw !== null ? raw.split(/\r?\n/) : []
+
+  const alreadyCovered = (entry: string): boolean => {
+    for (const line of existingLines) {
+      const trimmed = line.trim()
+      if (trimmed === '' || trimmed.startsWith('#')) continue
+      // Exact match or the entry is a prefix-anchored pattern already present.
+      if (trimmed === entry) return true
+      // A trailing-slash directory pattern covers contained files.
+      if (trimmed === entry + '/') return true
+      // Only match directory prefixes (require '/' boundary after the prefix)
+      // so `.env` does not false-positive match `.env.example`.
+      if (trimmed.endsWith('/') && entry.startsWith(trimmed)) return true
+    }
+    return false
+  }
+
+  const uncovered = entries.filter((e) => !alreadyCovered(e))
+
+  if (uncovered.length === 0) {
+    // Check git-tracked status for `.env` specifically without duplicating.
+    if (entries.includes(ENV_FILE) && isGitTracked(rootDir, ENV_FILE)) {
+      warnings.push(
+        `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it (values are still safe from new commits)`,
+      )
+    }
+    return { added, warnings }
+  }
+
+  // A trailing newline leaves a final empty element; drop it so rejoining
+  // never accumulates blank lines across repeated calls.
+  if (
+    existingLines.length > 0 &&
+    existingLines[existingLines.length - 1] === ''
+  ) {
+    existingLines.pop()
+  }
+
+  const headerIdx = existingLines.findIndex(
+    (l) => l.trim() === MANAGED_BLOCK_HEADER,
+  )
+  const footerIdx = existingLines.findIndex(
+    (l) => l.trim() === MANAGED_BLOCK_FOOTER,
+  )
+
+  const nextLines = [...existingLines]
+
+  if (headerIdx !== -1 && footerIdx !== -1) {
+    // Block complete: insert uncovered entries right before the footer.
+    nextLines.splice(footerIdx, 0, ...uncovered)
+  } else if (headerIdx !== -1) {
+    // Header only (corrupted/partial block): append entries and close it.
+    nextLines.push(...uncovered, MANAGED_BLOCK_FOOTER)
+  } else {
+    // No managed block yet: create header -> entries -> footer.
+    nextLines.push('', MANAGED_BLOCK_HEADER, ...uncovered, MANAGED_BLOCK_FOOTER)
+  }
+
+  const next = nextLines.join('\n') + '\n'
+  writeFileAtomic(gitignorePath, next)
+  added.push(...uncovered)
+
+  if (uncovered.includes(ENV_FILE) && isGitTracked(rootDir, ENV_FILE)) {
+    warnings.push(
+      `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it (values are still safe from new commits)`,
+    )
+  }
+
+  return { added, warnings }
+}
+
+/**
+ * Return `true` when `entry` is tracked by Git in `rootDir`. Any error (not a
+ * git repo, git unavailable, entry not tracked) yields `false` so the caller
+ * can proceed without git.
+ */
+export function isGitTracked(rootDir: string, entry: string): boolean {
+  try {
+    execFileSync('git', ['ls-files', '--error-unmatch', '--', entry], {
+      cwd: rootDir,
+      stdio: 'ignore',
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+````
+
+## File: src/sources/direct.ts
+````typescript
+/**
+ * Direct source resolver (§10.2).
+ *
+ * Parses CLI flags (--command, --arg, --http, --env, --header, --cwd, --name)
+ * into a `ResolvedServerPackage`.
+ */
+
+import parseArgv from 'string-argv'
+import type { ResolvedServerPackage, RequiredEnvVar } from '$/src/sources/types'
+import { SERVER_NAME_PATTERN } from '$/src/config'
+import type { CanonicalServer, StdioServer } from '$/src/core/schema'
+import { collectRequiredVars } from '$/src/core/placeholder'
+import { isSecretValue } from '$/src/core/env'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
+
+export interface DirectOptions {
+  command?: string
+  arg?: string[]
+  http?: string
+  sse?: string
+  env?: string[]
+  header?: string[]
+  cwd?: string
+  name?: string
+}
+
+export function resolveDirect(options: DirectOptions): ResolvedServerPackage {
+  let command: string | undefined
+  let args: string[] = []
+
+  if (options.command) {
+    if (options.arg && options.arg.length > 0) {
+      command = options.command
+      args = [...options.arg]
+    } else {
+      const tokens = parseArgv(options.command)
+      if (tokens.length === 0) {
+        throw new Error('--command requires a non-empty command')
+      }
+      command = tokens[0]
+      args = tokens.slice(1)
+    }
+  }
+
+  let type: 'stdio' | 'streamable-http' | 'sse' = 'stdio'
+  let url: string | undefined
+  const headers: Record<string, string> = {}
+  const env: Record<string, string> = {}
+
+  if (options.sse) {
+    type = 'sse'
+    url = options.sse
+  } else if (options.http) {
+    type = 'streamable-http'
+    url = options.http
+  }
+
+  if (options.env) {
+    for (const item of options.env) {
+      const sep = item.indexOf('=')
+      if (sep === -1) {
+        // Reference only: KEY (warn if unresolved — handled by caller)
+        env[item] = `\${${item}}`
+      } else {
+        env[item.slice(0, sep)] = item.slice(sep + 1)
+      }
+    }
+  }
+
+  if (options.header) {
+    for (const item of options.header) {
+      const sep = item.indexOf(':')
+      if (sep === -1) {
+        throw new Error(`--header must be "Name: Value", got: ${item}`)
+      }
+      headers[item.slice(0, sep).trim()] = item.slice(sep + 1).trim()
+    }
+  }
+
+  const definition: CanonicalServer =
+    type === 'stdio'
+      ? {
+          type: 'stdio',
+          command: command as string,
+          args: args.length > 0 ? args : [],
+          env: Object.keys(env).length > 0 ? env : undefined,
+        }
+      : {
+          type,
+          url: url as string,
+          headers: Object.keys(headers).length > 0 ? headers : undefined,
+        }
+
+  if (options.cwd && type === 'stdio') {
+    ;(definition as StdioServer).cwd = options.cwd
+  }
+
+  const suggestedName = options.name ?? suggestName(definition)
+
+  return {
+    suggestedName,
+    definition,
+    requiredEnv: collectRequiredVars(definition),
+    source: { type: 'direct', ref: suggestedName },
+  }
+}
+
+function suggestName(def: CanonicalServer): string {
+  if (isHttpServer(def) && def.url) {
+    try {
+      const u = new URL(def.url)
+      const base = u.hostname.replace(/[^a-z0-9]/g, '-')
+      const first = u.pathname.split('/').filter(Boolean)[0] ?? ''
+      const name = [base, first].filter(Boolean).join('-') || base
+      return sanitize(name)
+    } catch {
+      return sanitize(def.url)
+    }
+  }
+  if (isStdioServer(def) && def.command) {
+    return sanitize((def.command as string).split(/[ /]/)[0] ?? '')
+  }
+  return 'server'
+}
+
+function sanitize(name: string): string {
+  const cleaned = name.toLowerCase().replace(/[^a-z0-9._-]/g, '-')
+  if (!SERVER_NAME_PATTERN.test(cleaned)) {
+    return 'server'
+  }
+  return cleaned
+}
+````
+
+## File: src/sources/types.ts
+````typescript
+/**
+ * Source resolvers DTOs (§10).
+ *
+ * `ResolvedServerPackage` is the common output of every source resolver
+ * (direct, github, registry), ready to be turned into a canonical server by
+ * `commands/add.ts`.
+ */
+
+import type { CanonicalServer } from '$/src/core/schema'
+
+export interface RequiredEnvVar {
+  name: string
+  description?: string
+  isSecret: boolean
+}
+
+export interface ResolvedServerPackage {
+  suggestedName: string
+  definition: CanonicalServer
+  requiredEnv: RequiredEnvVar[]
+  source: { type: 'direct' | 'github' | 'registry'; ref: string }
+}
+
+/** Optional inputs shared by all source resolvers (§10.5). */
+export interface SourceResolveOptions {
+  /** Runtime environment record (e.g. process.env) used to resolve GITHUB_TOKEN for fetch. */
+  env?: Record<string, string>
+  yes?: boolean
+  /** Interactive candidate selector (TTY, `!yes`). Receives the candidates and must return one or `null` to abort. */
+  selectCandidate?: (candidates: Candidate[]) => Promise<Candidate | null>
+  /** Injectable `fetch` for tests (zero live network calls). */
+  fetch?: typeof fetch
+}
+
+/** A registry/GitHub candidate presented to the user for disambiguation. */
+export interface Candidate {
+  name: string
+  ref: string
+  type: 'npm' | 'pypi' | 'oci' | 'streamable-http' | 'sse'
+  url?: string
+}
+````
+
+## File: src/ui/prompts.ts
+````typescript
+/**
+ * UI & prompts port (§11–§12).
+ *
+ * `PromptUi` is the single abstraction for all user interaction. Commands never
+ * import `@clack/prompts` directly; they go through this port. Two
+ * implementations exist:
+ *
+ * - `createClackUi()` — interactive TTY, backed by `@clack/prompts`.
+ * - `createAutoUi()` — non-interactive (`--yes` / `CI=true` / tests), backed by
+ *   supplied defaults.
+ */
+
+export interface Option<T> {
+  label: string
+  value: T
+  hint?: string
+}
+
+export interface Spinner {
+  start(): void
+  stop(message?: string): void
+}
+
+export interface PromptUi {
+  intro(message: string): void
+  outro(message: string): void
+  note(message: string, title?: string): void
+  warn(message: string): void
+  error(message: string): void
+  confirm(opts: { message: string; initialValue: boolean }): Promise<boolean>
+  select<T>(opts: {
+    message: string
+    options: Option<T>[]
+    initialValue?: T
+  }): Promise<T>
+  multiselect<T>(opts: {
+    message: string
+    options: Option<T>[]
+    initialValues?: T[]
+  }): Promise<T[]>
+  text(opts: {
+    message: string
+    placeholder?: string
+    defaultValue?: string
+    validate?: (v: string) => string | undefined
+  }): Promise<string>
+  password(opts: { message: string }): Promise<string>
+  spinner(message: string): Spinner
+}
+
+/**
+ * Interactive UI backed by `@clack/prompts`. Only used on a TTY.
+ *
+ * `import { createClackUi }` is intentionally lazy: the clack dependency is
+ * only pulled in when this module is loaded, and commands never reference it
+ * directly.
+ */
+/**
+ * Shape of the dynamically loaded `@clack/prompts` module surface we touch.
+ * Kept inline (not imported at module scope) so `@clack/prompts` stays off the
+ * module graph for the non-interactive path.
+ */
+type ClackModule = {
+  intro(message: string): void
+  outro(message: string): void
+  note(message: string, title?: string): void
+  log: {
+    warn(message: string): void
+    error(message: string): void
+  }
+  isCancel(value: unknown): boolean
+  confirm(opts: { message: string; initialValue?: boolean }): Promise<unknown>
+  select(opts: {
+    message: string
+    options: Array<{ label: string; value: unknown; hint?: string }>
+    initialValue?: unknown
+  }): Promise<unknown>
+  multiselect(opts: {
+    message: string
+    options: Array<{ label: string; value: unknown; hint?: string }>
+    initialValues?: unknown[]
+  }): Promise<unknown[]>
+  text(opts: {
+    message: string
+    placeholder?: string
+    defaultValue?: string
+    validate?: (v: string) => string | undefined
+  }): Promise<unknown>
+  password(opts: { message: string }): Promise<unknown>
+  spinner(message: string): { start(): void; stop(message?: string): void }
+}
+
+export function createClackUi(): PromptUi {
+  // Dynamic import keeps `@clack/prompts` out of the module graph for the
+  // non-interactive path and avoids loading clack in non-TTY contexts. We use
+  // `await import()` (ESM) instead of `require()` because `dist/index.js` is an
+  // ESM bundle and `require` is not defined in ES module scope.
+  async function loadClack(): Promise<ClackModule> {
+    return (await import('@clack/prompts')) as unknown as ClackModule
+  }
+
+  async function assertNotCancel<T>(result: T): Promise<T> {
+    const clack = await loadClack()
+    if (clack.isCancel(result)) {
+      process.exit(130)
+    }
+    return result
+  }
+
+  // Preload clack once per UI instance. The `.catch` swallows import rejection
+  // so we never leave an unhandled rejection. Write methods fall back to a
+  // synchronous console write until (and unless) clack resolves, then use clack
+  // — never both, never duplicated.
+  let clack: ClackModule | null = null
+  void loadClack()
+    .then((c) => {
+      clack = c
+    })
+    .catch(() => {})
+
+  return {
+    intro(message: string) {
+      if (clack) {
+        clack.intro(message)
+      } else {
+        console.log(message)
+      }
+    },
+    outro(message: string) {
+      if (clack) {
+        clack.outro(message)
+      } else {
+        console.log(message)
+      }
+    },
+    note(message: string, title?: string) {
+      if (clack) {
+        clack.note(message, title)
+      } else {
+        console.log(title ? `${title}: ${message}` : message)
+      }
+    },
+    warn(message: string) {
+      if (clack) {
+        clack.log.warn(message)
+      } else {
+        console.warn(message)
+      }
+    },
+    error(message: string) {
+      if (clack) {
+        clack.log.error(message)
+      } else {
+        console.error(message)
+      }
+    },
+    confirm(opts: {
+      message: string
+      initialValue: boolean
+    }): Promise<boolean> {
+      return (async () => {
+        const clack = await loadClack()
+        const result = await clack.confirm({
+          message: opts.message,
+          initialValue: opts.initialValue,
+        })
+        return (await assertNotCancel(result as unknown)) as boolean
+      })()
+    },
+    async select<T>(opts: {
+      message: string
+      options: Option<T>[]
+      initialValue?: T
+    }): Promise<T> {
+      const clack = await loadClack()
+      const result = await clack.select({
+        message: opts.message,
+        options: opts.options as unknown as Array<{
+          label: string
+          value: unknown
+          hint?: string
+        }>,
+        initialValue: opts.initialValue as unknown,
+      })
+      return (await assertNotCancel(result as unknown)) as T
+    },
+    async multiselect<T>(opts: {
+      message: string
+      options: Option<T>[]
+      initialValues?: T[]
+    }): Promise<T[]> {
+      const clack = await loadClack()
+      const result = await clack.multiselect({
+        message: opts.message,
+        options: opts.options as unknown as Array<{
+          label: string
+          value: unknown
+          hint?: string
+        }>,
+        initialValues: (opts.initialValues ?? []) as unknown[],
+      })
+      return (await assertNotCancel(result as unknown)) as T[]
+    },
+    async text(opts: {
+      message: string
+      placeholder?: string
+      defaultValue?: string
+      validate?: (v: string) => string | undefined
+    }): Promise<string> {
+      const clack = await loadClack()
+      const result = await clack.text({
+        message: opts.message,
+        placeholder: opts.placeholder,
+        defaultValue: opts.defaultValue,
+        validate: opts.validate,
+      })
+      return (await assertNotCancel(result as unknown)) as string
+    },
+    async password(opts: { message: string }): Promise<string> {
+      const clack = await loadClack()
+      const result = await clack.password({ message: opts.message })
+      return (await assertNotCancel(result as unknown)) as string
+    },
+    spinner(message: string): Spinner {
+      let spin: { start(): void; stop(message?: string): void } | null = null
+      let started = false
+      let stopped = false
+      return {
+        start() {
+          if (started) return
+          started = true
+          void loadClack().then((c) => {
+            if (stopped) return // stop() already ran: do not start an orphan spinner
+            spin = c.spinner(message)
+            spin.start()
+          })
+        },
+        stop(message?: string) {
+          stopped = true
+          if (clack && spin) {
+            spin.stop(message)
+            return
+          }
+          if (message !== undefined) {
+            console.log(message)
+          }
+        },
+      }
+    },
+  }
+}
+````
+
+## File: tests/adapters/detect.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import {
+  detectAgents,
+  resolveTargets,
+  resolveTargetsAsync,
+  validateAgentFlag,
+  adapters,
+} from '$/src/adapters/index'
+import type { AgentId } from '$/src/adapters/types'
+import { createRuntimeContext } from '$/src/core/context'
+
+const ctx = createRuntimeContext({
+  cwd: '/tmp/proj',
+  homeDir: '/tmp/home',
+  env: {},
+  isTTY: false,
+})
+
+describe('adapters index', () => {
+  it('validateAgentFlag accepts valid ids', () => {
+    expect(validateAgentFlag(['claude-code'])).toEqual(['claude-code'])
+    expect(validateAgentFlag(['cursor', 'vscode'])).toEqual([
+      'cursor',
+      'vscode',
+    ])
+  })
+
+  it('validateAgentFlag throws on unknown ids', () => {
+    expect(() => validateAgentFlag(['not-an-agent'])).toThrow(
+      'Unknown agent id(s) in --agents: not-an-agent',
+    )
+  })
+
+  it('resolveTargets uses flag first', () => {
+    const state = {
+      version: 1 as const,
+      scope: 'project' as const,
+      targets: [],
+      agents: {},
+      managedPlugins: [],
+    }
+    expect(resolveTargets({ flag: ['cursor'], state, ctx })).toEqual(['cursor'])
+  })
+
+  it('resolveTargets falls back to state targets', () => {
+    const state = {
+      version: 1 as const,
+      scope: 'project' as const,
+      targets: ['vscode'] as AgentId[],
+      agents: {},
+      managedPlugins: [],
+    }
+    expect(resolveTargets({ flag: undefined, state, ctx })).toEqual(['vscode'])
+  })
+
+  it('resolveTargets returns empty when nothing resolvable', () => {
+    const state = {
+      version: 1 as const,
+      scope: 'project' as const,
+      targets: [],
+      agents: {},
+      managedPlugins: [],
+    }
+    expect(resolveTargets({ flag: undefined, state, ctx })).toEqual([])
+  })
+
+  it('resolveTargetsAsync falls back to detection', async () => {
+    const state = {
+      version: 1 as const,
+      scope: 'project' as const,
+      targets: [],
+      agents: {},
+      managedPlugins: [],
+    }
+    const result = await resolveTargetsAsync({
+      flag: undefined,
+      state,
+      ctx,
+    })
+    expect(Array.isArray(result)).toBe(true)
+  })
+
+  it('adapters has all seven agents', () => {
+    expect(adapters).toHaveLength(7)
+    expect(adapters.map((a) => a.id)).toEqual([
+      'claude-code',
+      'cursor',
+      'vscode',
+      'opencode',
+      'zed',
+      'windsurf',
+      'antigravity',
+    ])
+  })
+})
+````
+
+## File: tests/commands/basic.test.ts
+````typescript
+import { describe, expect, it, vi } from 'vitest'
+import { runSync } from '$/src/commands/sync'
+import { persistCanonicalConfig } from '$/src/commands/util'
+import { createRuntimeContext } from '$/src/core/context'
+import { createSandbox } from '$/tests/helpers/sandbox'
+
+describe('commands runSync', () => {
+  it('runSync with no targets exits 1 with hint', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      // Create a canonical config first so runSync doesn't return early
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {},
+      })
+
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called')
+      })
+      try {
+        await expect(
+          runSync({
+            scope: 'project',
+            ctx,
+            flag: undefined,
+            dryRun: false,
+            yes: true,
+          } as Parameters<typeof runSync>[0]),
+        ).rejects.toThrow('process.exit called')
+        expect(exitSpy).toHaveBeenCalledWith(1)
+      } finally {
+        exitSpy.mockRestore()
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('runSync with no canonical config returns early', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: true,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+      expect(result.targets).toEqual([])
+      expect(result.written).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+})
+````
+
+## File: tests/commands/doctor.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import { runDoctor } from '$/src/commands/doctor.command'
+import { runSync } from '$/src/commands/sync'
+import { createRuntimeContext } from '$/src/core/context'
+import { createSandbox } from '$/tests/helpers/sandbox'
+import { persistCanonicalConfig } from '$/src/commands/util'
+import { writeFileAtomic } from '$/src/core/fs-atomic'
+import { writeFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+
+describe('doctor', () => {
+  it('schema error: missing canonical config', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      expect(result.errors).toBeGreaterThan(0)
+      expect(result.results[0]!.code).toBe('SCHEMA')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('env error: missing required env var', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              env: { MISSING_VAR: '${MISSING_VAR}' },
+            },
+          },
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const envErrors = result.results.filter((r) => r.code === 'ENV')
+      expect(envErrors.length).toBeGreaterThan(0)
+      expect(result.errors).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('env: dotenv resolves placeholder, no error', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(join(ctx.cwd, '.env'), 'MY_TOKEN=abc123\n')
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              env: { MY_TOKEN: '${MY_TOKEN}' },
+            },
+          },
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const envErrors = result.results.filter((r) => r.code === 'ENV')
+      expect(envErrors.length).toBe(0)
+      expect(result.errors).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('env: fallback placeholder resolves, no error', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              env: { MY_TOKEN: '${MISSING_VAR:-fallback}' },
+            },
+          },
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const envErrors = result.results.filter((r) => r.code === 'ENV')
+      expect(envErrors.length).toBe(0)
+      expect(result.errors).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('runtime error: missing stdio binary', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            nonexistent: {
+              type: 'stdio',
+              command: 'nonexistent-binary-xyz',
+            },
+          },
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const runtimeErrors = result.results.filter((r) => r.code === 'RUNTIME')
+      expect(runtimeErrors.length).toBeGreaterThan(0)
+      expect(result.errors).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('drift: reformatting native file does not trigger drift', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', 'pkg'],
+            },
+          },
+        }),
+      )
+
+      // First sync to create native file + state
+      await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as any)
+      // Reformat the native file (different formatting, same content)
+      const nativePath = join(ctx.cwd, '.mcp.json')
+      writeFileAtomic(
+        nativePath,
+        JSON.stringify(
+          {
+            mcpServers: {
+              test: {
+                type: 'stdio',
+                command: 'npx',
+                args: ['-y', 'pkg'],
+              },
+            },
+          },
+          null,
+          2,
+        ),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        strict: false,
+      })
+      const driftWarnings = result.results.filter((r) => r.code === 'DRIFT')
+      expect(driftWarnings.length).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('drift: removing managed entry on disk is reported as drift', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', 'pkg'],
+            },
+          },
+        }),
+      )
+
+      // First sync to create state
+      await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as any)
+
+      // Remove the native file
+      rmSync(join(ctx.cwd, '.mcp.json'), { force: true })
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        strict: false,
+      })
+      const driftWarnings = result.results.filter((r) => r.code === 'DRIFT')
+      expect(driftWarnings.length).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('warnings do not fail unless --strict', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            test: {
+              type: 'stdio',
+              command: 'npx',
+              env: { MISSING_VAR: '${MISSING_VAR}' },
+            },
+          },
+        }),
+      )
+
+      const nonStrict = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      // MISSING_VAR is not in .env, so it's an error even without --strict
+      expect(nonStrict.errors).toBeGreaterThan(0)
+
+      const strict = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: true,
+      })
+      expect(strict.errors).toBeGreaterThan(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('state error: corrupt lock (.agents/mcp-lock.json) nao faz fallback ao legacy', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {},
+        }),
+      )
+      // Lock novo corrompido: deve virar aviso de estado vazio, sem ler o legacy.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        '{ not valid json',
+      )
+      // Legacy tambem presente (valido) mas deve ser ignorado porque o lock novo existe.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+          agents: {},
+          managedPlugins: [],
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const stateErrors = result.results.filter((r) => r.code === 'STATE')
+      expect(stateErrors.length).toBeGreaterThan(0)
+      expect(result.errors).toBeGreaterThan(0)
+      // Nenhum aviso de importacao de legacy (o lock novo venceu, mesmo corrompido).
+      const notices = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'warning',
+      )
+      expect(notices.some((n) => n.message.includes('.mcp-sync-state'))).toBe(
+        false,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('state warning: apenas legacy (.mcp-sync-state.json) e importado com aviso STATE (nao e erro)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {},
+        }),
+      )
+      // Apenas o arquivo legacy existe, valido. Nao ha lock novo.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+          agents: {},
+          managedPlugins: [],
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const stateWarnings = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'warning',
+      )
+      expect(stateWarnings.length).toBeGreaterThan(0)
+      expect(
+        stateWarnings.some((w) => w.message.includes('.mcp-sync-state')),
+      ).toBe(true)
+      expect(
+        stateWarnings.some((w) => w.message.includes('mcp-lock.json')),
+      ).toBe(true)
+      // Nao deve ser um erro: sem strict nao falha.
+      const stateErrors = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'error',
+      )
+      expect(stateErrors.length).toBe(0)
+      expect(result.errors).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+})
+````
+
+## File: tests/core/gitignore.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { ensureIgnored } from '$/src/core/gitignore'
+import { createSandbox } from '$/tests/helpers/sandbox'
+
+describe('gitignore.ensureIgnored', () => {
+  it('creates .gitignore with the managed block when missing', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      expect(result.added).toEqual(['.env', 'secrets.local'])
+      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
+      expect(content).toContain('# agents-mcp local (managed)')
+      expect(content).toContain('.env')
+      expect(content).toContain('secrets.local')
+      expect(content).toContain('# end agents-mcp local (managed)')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('does not duplicate entries already covered', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      writeFileSync(
+        `${dir}/.gitignore`,
+        '# existing\n.env\n.node_modules\n',
+        'utf8',
+      )
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      // `.env` already covered; only secrets.local is added.
+      expect(result.added).toEqual(['secrets.local'])
+      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
+      const managedBlocks = content.match(/# agents-mcp local \(managed\)/g)
+      expect(managedBlocks).toHaveLength(1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('returns empty added when everything is already covered', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      writeFileSync(
+        `${dir}/.gitignore`,
+        '# agents-mcp local (managed)\n.env\nsecrets.local\n# end agents-mcp local (managed)\n',
+        'utf8',
+      )
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      expect(result.added).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('never touches agent configuration files', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      writeFileSync(`${dir}/.mcp.json`, '{}', 'utf8')
+      writeFileSync(`${dir}/opencode.json`, '{}', 'utf8')
+      ensureIgnored(dir, ['.env'])
+      expect(readFileSync(`${dir}/.mcp.json`, 'utf8')).toBe('{}')
+      expect(readFileSync(`${dir}/opencode.json`, 'utf8')).toBe('{}')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('repeated calls keep all entries between header and footer, idempotent', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      const first = ensureIgnored(dir, ['secrets.local'])
+      const second = ensureIgnored(dir, ['.env'])
+      expect(first.added).toEqual(['secrets.local'])
+      expect(second.added).toEqual(['.env'])
+
+      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
+      const header = '# agents-mcp local (managed)'
+      const footer = '# end agents-mcp local (managed)'
+      expect(content.split(header).length - 1).toBe(1)
+      expect(content.split(footer).length - 1).toBe(1)
+
+      const headerIdx = content.indexOf(header)
+      const footerIdx = content.indexOf(footer)
+      expect(headerIdx).toBeGreaterThanOrEqual(0)
+      expect(footerIdx).toBeGreaterThan(headerIdx)
+      expect(content.slice(headerIdx, footerIdx)).toContain('secrets.local')
+      expect(content.slice(headerIdx, footerIdx)).toContain('.env')
+
+      // No accumulated blank lines: exactly one trailing newline.
+      expect(content.endsWith('\n')).toBe(true)
+      expect(content.endsWith('\n\n')).toBe(false)
+
+      // Idempotent: a third call adds nothing.
+      const third = ensureIgnored(dir, ['secrets.local', '.env'])
+      expect(third.added).toEqual([])
+      const again = readFileSync(`${dir}/.gitignore`, 'utf8')
+      expect(again).toBe(content)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('inserts new entries immediately before the footer when block exists', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      writeFileSync(
+        `${dir}/.gitignore`,
+        '# existing\n# agents-mcp local (managed)\n.env\n# end agents-mcp local (managed)\n',
+        'utf8',
+      )
+      const result = ensureIgnored(dir, ['secrets.local'])
+      expect(result.added).toEqual(['secrets.local'])
+
+      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
+      const lines = content.split(/\r?\n/)
+      const footerIdx = lines.findIndex(
+        (l) => l.trim() === '# end agents-mcp local (managed)',
+      )
+      expect(lines[footerIdx - 1]).toBe('secrets.local')
+      expect(lines[footerIdx - 2]).toBe('.env')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('closes a corrupted header-only block by appending entries and footer', () => {
+    const { dir, cleanup } = createSandbox()
+    try {
+      writeFileSync(
+        `${dir}/.gitignore`,
+        '# existing\n# agents-mcp local (managed)\n',
+        'utf8',
+      )
+      const result = ensureIgnored(dir, ['.env', 'secrets.local'])
+      expect(result.added).toEqual(['.env', 'secrets.local'])
+
+      const content = readFileSync(`${dir}/.gitignore`, 'utf8')
+      expect(content).toContain('# end agents-mcp local (managed)')
+      const headers = content.match(/# agents-mcp local \(managed\)/g)
+      expect(headers).toHaveLength(1)
+    } finally {
+      cleanup()
+    }
+  })
+})
+````
+
+## File: tests/e2e/e2e.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
+import { runSync } from '$/src/commands/sync'
+import { runDoctor } from '$/src/commands/doctor.command'
+import { persistCanonicalConfig } from '$/src/commands/util'
+import { createSandbox } from '$/tests/helpers/sandbox'
+import type { AgentId } from '$/src/adapters/types'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+
+const ALL_AGENTS: AgentId[] = [
+  'claude-code',
+  'cursor',
+  'vscode',
+  'opencode',
+  'zed',
+  'windsurf',
+]
+
+const CANONICAL_CONFIG = {
+  $schema: DEFAULT_SCHEMA_URL,
+  mcpServers: {
+    github: {
+      type: 'stdio',
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-github'],
+      env: {
+        GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}',
+      },
+    },
+    postgres: {
+      type: 'stdio',
+      command: 'uvx',
+      args: ['mcp-server-postgres', '${DATABASE_URL}'],
+    },
+    linear: {
+      type: 'streamable-http',
+      url: 'https://mcp.linear.app/mcp',
+      headers: {
+        Authorization: 'Bearer ${LINEAR_API_KEY}',
+      },
+    },
+  },
+}
+
+/**
+ * Create mock binaries in the sandbox so doctor's runtime check passes.
+ * Also sets env vars in ctx.env so doctor's env check passes.
+ * Placeholder names in canonical config: GITHUB_TOKEN, DATABASE_URL, LINEAR_API_KEY.
+ */
+function createMockBinaries(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+): void {
+  const binDir = `${ctx.cwd}/.bin`
+  mkdirSync(binDir, { recursive: true })
+  writeFileSync(`${binDir}/npx`, '#!/usr/bin/env node\nconsole.log("mock")\n', {
+    mode: 0o755,
+  })
+  writeFileSync(`${binDir}/uvx`, '#!/usr/bin/env node\nconsole.log("mock")\n', {
+    mode: 0o755,
+  })
+  // Add bin dir to PATH
+  ctx.env.PATH = `${binDir}:${ctx.env.PATH}`
+  process.env.PATH = `${binDir}:${process.env.PATH}`
+  // Define env vars in ctx.env (doctor reads ctx.env via resolveVar)
+  ctx.env.GITHUB_TOKEN = 'fake_token'
+  ctx.env.DATABASE_URL = 'postgres://user:pass@localhost/db'
+  ctx.env.LINEAR_API_KEY = 'fake_linear_key'
+  // Also set in process.env for completeness
+  process.env.GITHUB_PERSONAL_ACCESS_TOKEN = 'fake_token'
+  process.env.DATABASE_URL = 'postgres://user:pass@localhost/db'
+  process.env.LINEAR_API_KEY = 'fake_linear_key'
+}
+
+/**
+ * Run the full E2E flow: init → sync → doctor.
+ */
+async function runFullFlow(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+  scope: 'project' | 'global',
+  agents: AgentId[] = ALL_AGENTS,
+) {
+  // 1. init - create canonical config with one server
+  persistCanonicalConfig('project', ctx, {
+    $schema: CANONICAL_CONFIG.$schema,
+    mcpServers: {
+      github: CANONICAL_CONFIG.mcpServers.github,
+    },
+  })
+
+  // 2. sync with targets
+  const syncResult = await runSync({
+    scope,
+    ctx,
+    flag: agents,
+    dryRun: false,
+    yes: true,
+  } as Parameters<typeof runSync>[0])
+  expect(syncResult.targets).toEqual(agents)
+  expect(syncResult.written.length).toBeGreaterThan(0)
+
+  // 3. Verify native config file was written
+  const projectConfigPath = `${ctx.cwd}/.mcp.json`
+  if (scope === 'project') {
+    expect(existsSync(projectConfigPath)).toBe(true)
+    const content = readFileSync(projectConfigPath, 'utf8')
+    expect(content).toContain('mcpServers')
+    expect(content).toContain('github')
+  }
+
+  // 4. sync again - should be byte-idempotent
+  const syncResult2 = await runSync({
+    scope,
+    ctx,
+    flag: agents,
+    dryRun: false,
+    yes: true,
+  } as Parameters<typeof runSync>[0])
+  expect(syncResult2.written.length).toBeGreaterThan(0)
+
+  // 5. doctor - should pass
+  const doctorResult = await runDoctor({
+    scope,
+    ctx,
+    flag: agents,
+    dryRun: false,
+    strict: false,
+  } as Parameters<typeof runDoctor>[0])
+  expect(doctorResult.errors).toBe(0)
+
+  // 6. Remove all servers from canonical config
+  persistCanonicalConfig(scope, ctx, {
+    $schema: CANONICAL_CONFIG.$schema,
+    mcpServers: {},
+  })
+
+  // 7. doctor after removal - should still pass (no servers to check)
+  const finalDoctor = await runDoctor({
+    scope,
+    ctx,
+    flag: agents,
+    dryRun: false,
+    strict: false,
+  } as Parameters<typeof runDoctor>[0])
+  expect(finalDoctor.errors).toBe(0)
+}
+
+describe('E2E: agents-mcp full flow', () => {
+  it('project scope: init → sync → doctor', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      await runFullFlow(ctx, 'project', ['claude-code', 'cursor', 'vscode'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('global scope: fresh-repo flow in --yes mode', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      // For global scope, create canonical config in home/.agents
+      const fs = await import('node:fs')
+      fs.mkdirSync(`${ctx.homeDir}/.agents`, { recursive: true })
+      persistCanonicalConfig('global', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+
+      await runFullFlow(ctx, 'global', ['claude-code', 'cursor'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('--dry-run writes nothing (project scope)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: true,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+
+      // dry-run should not write any native files
+      expect(result.written).toEqual([])
+
+      // Native file should not exist
+      const fs = await import('node:fs')
+      expect(fs.existsSync(`${ctx.cwd}/.mcp.json`)).toBe(false)
+      expect(fs.existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('all six agents: init → sync → doctor', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: CANONICAL_CONFIG.mcpServers,
+      })
+
+      // sync with all six agents
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ALL_AGENTS,
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+      expect(result.targets).toEqual(ALL_AGENTS)
+      expect(result.written.length).toBeGreaterThan(0)
+
+      // doctor
+      const doctorResult = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: ALL_AGENTS,
+        dryRun: false,
+        strict: false,
+      } as Parameters<typeof runDoctor>[0])
+      expect(doctorResult.errors).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('fresh clone: mcp.json + diretorio de plugin pre-existente (sem lock) -> sync adota o plugin e sai com 0', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+      // Diretorio de plugin pre-existente com um sentinel (sem lock).
+      const pluginDir = `${ctx.cwd}/.agents/plugins/github`
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinel = `${pluginDir}/sentinel.txt`
+      writeFileSync(sentinel, 'FRESH-CLONE-KEEP')
+
+      let exitCode: number | undefined
+      const savedExit = process.exit
+      process.exit = ((code: number) => {
+        exitCode = code
+      }) as unknown as NodeJS.Process['exit']
+      try {
+        const result = await runSync({
+          scope: 'project',
+          ctx,
+          flag: ['claude-code'],
+          dryRun: false,
+          yes: true,
+        } as Parameters<typeof runSync>[0])
+        expect(result.errors).toEqual([])
+      } finally {
+        process.exit = savedExit
+      }
+      expect(exitCode).toBeUndefined() // sincronizacao bem-sucedida => nao chama exit (exit 0)
+
+      // Sentinel preservado, arquivos gerenciados sobrescritos (adocao).
+      expect(readFileSync(sentinel, 'utf8')).toBe('FRESH-CLONE-KEEP')
+      expect(
+        JSON.parse(readFileSync(`${pluginDir}/plugin.json`, 'utf8')).name,
+      ).toBe('github')
+      expect(existsSync(`${pluginDir}/mcp.json`)).toBe(true)
+
+      // Lock criado e registra o plugin como gerenciado.
+      const lock = `${ctx.cwd}/.agents/mcp-lock.json`
+      expect(existsSync(lock)).toBe(true)
+      const stateContent = readFileSync(lock, 'utf8')
+      expect(stateContent).toContain('github')
+
+      // sync nao cria nem toca .gitignore com o nome do lock.
+      const gitignore = `${ctx.cwd}/.gitignore`
+      if (existsSync(gitignore)) {
+        expect(readFileSync(gitignore, 'utf8')).not.toContain('mcp-lock')
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('plain sync nao cria .gitignore contendo o nome do lock', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+      expect(result.errors).toEqual([])
+
+      const gitignore = `${ctx.cwd}/.gitignore`
+      expect(existsSync(gitignore)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+})
+````
+
+## File: tests/helpers/sandbox.ts
+````typescript
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createRuntimeContext, type RuntimeContext } from '$/src/core/context'
+
+/**
+ * Create a temp sandbox with `cwd`, `homeDir`, and `XDG_CONFIG_HOME`/`APPDATA`
+ * overridden so no test ever touches real user configuration.
+ *
+ * Every path returned is under `os.tmpdir()`. Call `cleanup()` at the end of
+ * each test (or in `afterEach`).
+ */
+export function createSandbox(): {
+  dir: string
+  ctx: RuntimeContext
+  cleanup: () => void
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'agents-mcp-sandbox-'))
+  const projectDir = join(dir, 'project')
+  const homeDir = join(dir, 'home')
+  const env = {
+    ...process.env,
+    XDG_CONFIG_HOME: join(homeDir, '.config'),
+    APPDATA: join(homeDir, 'AppData', 'Roaming'),
+  }
+  const ctx = createRuntimeContext({
+    cwd: projectDir,
+    homeDir,
+    env,
+    isTTY: false,
+  })
+  return {
+    dir,
+    ctx,
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  }
+}
+````
+
+## File: tests/sources/direct.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import { resolveDirect } from '$/src/sources/direct'
+import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer, isHttpServer } from '$/src/core/schema'
+
+function asStdio(server: CanonicalServer) {
+  return server as Extract<CanonicalServer, { type: 'stdio' }>
+}
+
+function asHttp(server: CanonicalServer) {
+  return server as Extract<
+    CanonicalServer,
+    { type: 'streamable-http' } | { type: 'sse' }
+  >
+}
+
+describe('sources direct', () => {
+  it('parses --command with --arg', () => {
+    const result = resolveDirect({
+      command: 'npx',
+      arg: ['-y', '@scope/pkg'],
+    })
+    const s = asStdio(result.definition)
+    expect(isStdioServer(s)).toBe(true)
+    expect(s.command).toBe('npx')
+    expect(s.args).toEqual(['-y', '@scope/pkg'])
+  })
+
+  it('parses --command with whitespace tokenization', () => {
+    const result = resolveDirect({
+      command: 'npx -y @scope/pkg',
+    })
+    const s = asStdio(result.definition)
+    expect(s.command).toBe('npx')
+    expect(s.args).toEqual(['-y', '@scope/pkg'])
+  })
+
+  it('parses --http as streamable-http', () => {
+    const result = resolveDirect({
+      http: 'https://mcp.linear.app/mcp',
+    })
+    const s = asHttp(result.definition)
+    expect(isHttpServer(s)).toBe(true)
+    expect(s.type).toBe('streamable-http')
+    expect(s.url).toBe('https://mcp.linear.app/mcp')
+  })
+
+  it('parses --sse as sse', () => {
+    const result = resolveDirect({
+      sse: 'https://mcp.linear.app/sse',
+    })
+    const s = asHttp(result.definition)
+    expect(isHttpServer(s)).toBe(true)
+    expect(s.type).toBe('sse')
+    expect(s.url).toBe('https://mcp.linear.app/sse')
+  })
+
+  it('parses --env KEY=VALUE', () => {
+    const result = resolveDirect({
+      command: 'npx',
+      env: ['GITHUB_TOKEN=${GITHUB_TOKEN}'],
+    })
+    const s = asStdio(result.definition)
+    expect(isStdioServer(s)).toBe(true)
+    expect(s.env).toEqual({ GITHUB_TOKEN: '${GITHUB_TOKEN}' })
+    expect(result.requiredEnv.map((v) => v.name)).toContain('GITHUB_TOKEN')
+  })
+
+  it('parses --header', () => {
+    const result = resolveDirect({
+      http: 'https://api.example.com/mcp',
+      header: ['Authorization: Bearer token'],
+    })
+    const s = asHttp(result.definition)
+    expect(isHttpServer(s)).toBe(true)
+    expect(s.headers).toEqual({
+      Authorization: 'Bearer token',
+    })
+  })
+
+  it('suggests name from URL', () => {
+    const result = resolveDirect({
+      http: 'https://mcp.linear.app/mcp',
+    })
+    expect(result.suggestedName).toContain('linear')
+  })
+
+  it('suggests name from command', () => {
+    const result = resolveDirect({
+      command: 'npx -y @scope/pkg',
+    })
+    expect(result.suggestedName).toBe('npx')
+  })
+})
+````
+
+## File: tests/smoke.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import pkg from '$/package.json' with { type: 'json' }
+
+describe('smoke test', () => {
+  it('resolves root alias and package manifest', () => {
+    expect(pkg.name).toBe('@agents-config/mcp')
+    expect(pkg.type).toBe('module')
+  })
+})
+````
+
+## File: .prettierignore
+````
+dist/
+coverage/
+node_modules/
+workflow/
+.codegraph/
+*.db*
+spec/
+docs/decisions/
+.agents/
+skills/
+opencode.json
+repomix-output.md
+skills-lock.json
+````
+
+## File: .agents/skills/product-owner/SKILL.md
+````markdown
+---
+name: product-owner
+description: >-
+  Product Owner role grounded in Scrum and Kanban practices to discover,
+  prioritize, and frame product features, improvements, and bug fixes in
+  `workflow/BACKLOG.md`, and validate final delivery in `workflow/<change-slug>/VALIDATION.md`.
+  Use this skill whenever asked to act as a Product Owner, manage a product
+  backlog, frame business/user requirements before technical specification, or
+  validate delivered value in coordination with `spec-driven-workflow` and
+  `architect-worker`.
+---
+
+# Product Owner Role
+
+Own the **why**, **who**, and **what value** of product changes. Bridge user needs and business goals with engineering execution through `workflow/BACKLOG.md` (the only root file in `workflow/`) and `workflow/<change-slug>/VALIDATION.md` (`spec-driven-workflow`), collaborating with the **Architect** and **Worker** (`architect-worker`).
+
+## Agile Foundations (Scrum & Kanban)
+
+Combine Scrum's value-driven product ownership with Kanban's upstream flow discipline:
+
+- **Scrum**:
+  - **Value Maximization & Product Goal**: Prioritize work that delivers the highest user and business impact toward the Product Goal.
+  - **Product Backlog & Refinement**: Maintain an ordered mini-backlog of evolutions, features, and bug fixes in `workflow/BACKLOG.md`, refining top items until they are clear and actionable.
+  - **INVEST & Behavioral Acceptance**: Frame demands with clear user perspective (User Stories / Jobs-to-be-Done) and observable product acceptance expectations—independent of implementation details.
+  - **Sprint / Release Value Validation**: Verify the delivered increment against original product intent before closing the cycle.
+- **Kanban**:
+  - **Upstream vs. Downstream Separation**: Operate in **Upstream** (discovery, triage, prioritization, shaping) before work is pulled into **Downstream** engineering (`SPEC.md` -> `PLAN.md` -> `TASKS.md` -> Implementation -> `REVIEW.md`).
+  - **Classes of Service**: Explicitly classify urgency and flow priority:
+    - `Expedite`: Critical production bugs, security issues, or blocking incidents.
+    - `Fixed Date`: Time-bound commitments or external deadlines.
+    - `Standard`: Regular features, enhancements, and non-urgent bug fixes.
+    - `Intangible`: Technical enablers or preventative improvements with long-term value.
+  - **Definition of Ready (DoR)**: Only move an item from `Refining` to `Ready` for the Architect when problem, value, scope boundaries, and product acceptance expectations are unambiguous.
+
+## Role Activation
+
+1. **Explicit Role Assignment**: Adopt the Product Owner role when requested (e.g., *"Act as Product Owner"*, *"Define this feature as a PO"*, or *"Validate this delivery"*).
+2. **Role Persistence**: Maintain the Product Owner perspective throughout the session unless the user instructs a role switch.
+3. **Collaboration Mode**: When working alongside `architect-worker`, hand off `Ready` items to the **Architect** via `workflow/BACKLOG.md` and receive completed deliveries back via `workflow/<change-slug>/VALIDATION.md`.
+
+## Responsibilities
+
+### 1. Maintain the Product Backlog & Frame Demands (`workflow/BACKLOG.md`)
+
+- Initialize `workflow/BACKLOG.md` using [BACKLOG.md](../spec-driven-workflow/resources/BACKLOG.md) (and check whether `workflow/` is in `.gitignore` per `spec-driven-workflow`, asking the user before adding it if missing).
+- Keep an ordered **Product Backlog** table for software evolutions, new features, enhancements, and bug reports (`Idea` -> `Refining` -> `Ready` -> `In Downstream` -> `Done`).
+- When preparing a demand for engineering, complete the **Active Demand Brief** section:
+  - Articulate the **User Problem & Business Value**.
+  - Write a clear **User Story / Job-to-be-Done** (or **Bug Impact & Observed Behavior** for bug fixes).
+  - Attach any screenshots (including annotated UI bug captures) or supporting evidence in `workflow/assets/` and link them in `workflow/BACKLOG.md` (e.g., `./assets/<filename>`).
+  - Define **Product Acceptance Expectations** (what a user or stakeholder must be able to do or observe).
+  - State **Out of Scope** items explicitly to prevent scope creep.
+  - Verify the **Definition of Ready (DoR)** checklist before handing off to the Architect.
+
+### 2. Clarify Ambiguities During Downstream Execution
+
+- If the Architect or Worker surfaces a product ambiguity or trade-off (e.g., in `SPEC.md` Open Questions or `REVIEW.md`), decide from a **user value and priority** perspective and update `workflow/BACKLOG.md` accordingly.
+
+### 3. Validate Completed Deliveries (`workflow/<change-slug>/VALIDATION.md`)
+
+- Once the Architect finishes `REVIEW.md` and prepares `workflow/<change-slug>/VALIDATION.md`, inspect the **Delivery Summary**, **Backlog Value Mapping**, and **How to Validate** scenarios.
+- Verify that the delivered increment satisfies the original product intent and acceptance expectations in `workflow/BACKLOG.md`.
+- Update `workflow/<change-slug>/VALIDATION.md` status:
+  - **`Approved`**: Complete the sign-off checklist so the Architect/user can close the cycle and delete `workflow/<change-slug>/` (while preserving and updating `workflow/BACKLOG.md` for ongoing backlog items).
+  - **`Changes Requested`**: Record clear product-level gaps in `workflow/<change-slug>/VALIDATION.md` (without prescribing code) so the Architect can plan follow-up adjustments.
+- Log any newly discovered opportunities or deferred enhancements back into the `workflow/BACKLOG.md` backlog.
+
+## Guardrails
+
+- **Never prescribe technical implementation**: Do not specify file paths, database schemas, frameworks, class designs, or code changes. Leave *how* to the Architect (`SPEC.md`/`PLAN.md`) and Worker.
+- **Never write or modify production code or test suites**.
+- **Only create or edit product-governance artifacts**: `workflow/BACKLOG.md`, `workflow/<change-slug>/VALIDATION.md` (validation notes and sign-off), `workflow/assets/` (backlog-level screenshots or evidence), and `.gitignore` (only after user confirmation if `workflow/` is missing).
+- **Never commit `workflow/`**: Ensure `workflow/` remains untracked by Git per `spec-driven-workflow`.
+
+## Handoff Lifecycle
+
+```text
+[Product Owner] 0. Discover & Frame  -> Curates backlog & writes Ready brief in workflow/BACKLOG.md
+       │
+       ▼
+[Architect]     1. Specify & Plan    -> Translates BACKLOG.md into workflow/<change-slug>/SPEC.md, PLAN.md (+ TASKS.md)
+       │
+       ▼
+[Worker]        2. Implement & Verify-> Builds & tests against workflow/<change-slug>/PLAN.md / TASKS.md
+       │
+       ▼
+[Architect]     3. Review & Handoff  -> Approves REVIEW.md, writes workflow/<change-slug>/VALIDATION.md
+       │
+       ▼
+[Product Owner] 4. Validate Value    -> Reviews workflow/<change-slug>/VALIDATION.md against BACKLOG.md
+       │
+       ├── If Changes Requested ──────► [Architect] refines SPEC.md/PLAN.md for Worker
+       │
+       ▼
+[PO / Architect]5. Sign-Off & Cleanup-> Marks Approved, confirms with user, deletes workflow/<change-slug>/, updates BACKLOG.md
+```
+````
+
+## File: .agents/skills/spec-driven-workflow/resources/PLAN.md
+````markdown
+# Execution Plan: <Short Title>
+
+- **Spec**: [SPEC.md](./SPEC.md)
+- **Status**: Draft | Ready | In Progress | Done
+
+## Technical Approach
+
+Summarize the chosen architecture, key design decisions, and any trade-offs.
+
+## Affected Areas
+
+- `path/to/module_a` — <what changes and why>
+- `path/to/module_b` — <what changes and why>
+
+## Execution Steps
+
+1. **<Step 1 Title>**
+   - Details of what to implement or modify.
+   - Verification: <how to confirm this step works>
+2. **<Step 2 Title>**
+   - Details of what to implement or modify.
+   - Verification: <how to confirm this step works>
+
+## Verification Strategy
+
+- Automated tests to add or update (unit, integration, e2e).
+- Commands to run (`test`, `lint`, `build`, `typecheck`).
+
+## Risks & Rollback
+
+- Potential failure modes and how to mitigate or revert safely.
+
+## Supporting Assets (Optional)
+
+- [<Short description>](./assets/<filename>) — <Architecture diagram, trace, or supporting evidence stored in `workflow/<change-slug>/assets/`>
+````
+
+## File: .agents/skills/spec-driven-workflow/resources/SPEC.md
+````markdown
+# Specification: <Short Title>
+
+- **Type**: Feature | Bug Fix | Refactor | Chore
+- **Status**: Draft | Approved | In Progress | Done
+- **Owner**: <author or agent>
+
+## Context & Problem Statement
+
+Describe the current state, why this change is needed, and (for bug fixes) reproduction steps along with expected vs. actual behavior.
+
+## Goals
+
+- <Measurable outcome 1>
+- <Measurable outcome 2>
+
+## Non-Goals
+
+- <Explicitly out-of-scope item 1>
+
+## Requirements
+
+### Functional Requirements
+
+1. <Requirement 1>
+2. <Requirement 2>
+
+### Non-Functional Requirements & Constraints
+
+- Performance, security, compatibility, or architectural constraints.
+
+## Acceptance Criteria
+
+- [ ] <Objective, testable criterion 1>
+- [ ] <Objective, testable criterion 2>
+
+## Open Questions
+
+- [ ] <Unresolved question, if any>
+
+## Supporting Assets (Optional)
+
+- [<Short description>](./assets/<filename>) — <Supporting screenshot, diagram, or evidence stored in `workflow/<change-slug>/assets/`>
+````
+
+## File: .agents/skills/spec-driven-workflow/resources/VALIDATION.md
+````markdown
+# Delivery Validation: <Short Title>
+
+- **Backlog**: [BACKLOG.md](../BACKLOG.md)
+- **Spec**: [SPEC.md](./SPEC.md)
+- **Review**: [REVIEW.md](./REVIEW.md)
+- **Prepared By**: <Architect / Lead Engineer>
+- **Validated By**: <Product Owner>
+- **Status**: Pending Validation | Changes Requested | Approved
+
+## Delivery Summary
+
+Plain-language overview of what was built or fixed, written for product and stakeholder review rather than code-level inspection.
+
+## Backlog Value Mapping
+
+| Backlog ID | Product Expectation | Delivery Status | Notes |
+| :--- | :--- | :--- | :--- |
+| B1 | <Original expectation from BACKLOG.md> | Delivered \| Partial \| Deferred | <Summary of how it was met> |
+
+## How to Validate
+
+Observable user flows, commands, UI paths, or scenarios the Product Owner can check to confirm the expected behavior:
+
+1. **<Scenario 1>**: <Steps to observe and expected outcome>
+2. **<Scenario 2>**: <Steps to observe and expected outcome>
+
+## Known Limitations & Follow-Ups
+
+- <Any deferred scope, edge cases, or recommended next items for the `BACKLOG.md` backlog>
+
+## Product Owner Sign-Off
+
+- [ ] Delivered behavior matches the product intent and user value in `BACKLOG.md`.
+- [ ] Product acceptance expectations are satisfied.
+- [ ] Ready to close this cycle and clean up `workflow/<change-slug>/` (while updating `../BACKLOG.md` as needed).
+
+### Validation Notes / Requested Adjustments
+
+- <Feedback from the Product Owner if `Changes Requested`, or sign-off note if `Approved`>
+
+### Supporting Assets (Optional)
+
+- [<Short description>](./assets/<filename>) — <Validation screenshot, recording, or evidence stored in `workflow/<change-slug>/assets/`>
+````
+
+## File: .github/workflows/ci.yml
+````yaml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Verify (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24, 26]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run verification suite
+        run: npm run verify
+
+  windows-paths:
+    name: Windows Path & Atomic Tests (Node 22)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run core and adapter tests
+        run: npx vitest run tests/core tests/adapters
+````
+
+## File: spec/BLUEPRINT.md
+````markdown
+# Technical Blueprint: `agents-mcp` (`v0.1.0`)
+
+> **Audience:** AI coding agents (Worker) and human contributors.
+> **Role of this document:** architecture, contracts, and non-negotiable decisions.
+> The format itself is specified in [`SPEC.md`](./SPEC.md); per-agent translation
+> in [`MATRIX.md`](./MATRIX.md); the rationale for each hard decision in
+> [`docs/decisions/`](../docs/decisions/).
+
+---
+
+## 1. Vision & Design Principles
+
+`agents-mcp` is a **configuration compiler**, not a runtime. It owns three edges:
+
+1. **Core (single source of truth):** `.agents/mcp.json` (project) and
+   `~/.agents/mcp.json` (global).
+2. **Input edges (`src/sources/`, `import`):** normalize existing agent files, MCP
+   `server.json` manifests, GitHub repositories, npm packages, and CLI flags into
+   the canonical model.
+3. **Output edges (`src/adapters/`):** project the canonical model into each
+   agent's native file, translating schema and env syntax while preserving
+   everything the compiler does not own.
+
+Principles, in priority order:
+
+1. **Never lose user data.** No deletion of native files, no whole-file rewrites,
+   no silent field dropping.
+2. **Deterministic.** Same input → byte-identical output. The published schema is
+   reproducible on any machine and in CI.
+3. **Local-first.** No network required for `init`, `sync`, `remove`, `list`,
+   `doctor`. Network is only used by `add`/`import` when resolving external
+   sources.
+4. **Secrets stay symbolic.** Canonical and native files contain `${VAR}`
+   placeholders; real values live only in `.env`.
+5. **Testability by construction.** Paths, platform, environment, TTY, and fetch
+   are injected; adapters and compilers are pure functions over data.
+6. **Zero runtime dependencies in the published package.** Single-file ESM
+   bundle; everything inlined at build time.
+
+---
+
+## 2. Tech Stack & Toolchain
+
+| Concern | Choice | Notes |
+| :--- | :--- | :--- |
+| Language | TypeScript `7.x` (strict) | Native compiler (`tsc --noEmit`) for type checking only. |
+| Runtime floor | **Node.js `>= 22`** | Current LTS baseline; `@types/node@^22` so the type check cannot use APIs above the floor. |
+| Module system | ESM (`"type": "module"`), `module`/`moduleResolution` = `preserve`/`bundler` | Source is never executed as-is; only bundled output ships. |
+| Bundler | `tsup@^9` (esbuild) | See §2.1. `dts: false` — this is a CLI, no type declarations are published. |
+| CLI parser | `citty@^0.2` | Sub-commands + global flags. |
+| Prompts | `@clack/prompts@^1.9` | Always behind `src/ui/prompts.ts`. |
+| Schema | `zod@^4.6` | Native `z.toJSONSchema()`. |
+| JSONC | `jsonc-parser@^3.3` | `parseTree` + `modify` + `applyEdits`. |
+| Argv splitting | `string-argv@^0.4` | Only for `--stdio "cmd args"` convenience. |
+| Tests | `vitest@^5` | Node environment, real temp filesystem, mocked `fetch`. |
+| Schema tests | `ajv@^8` + `ajv-formats@^3` (dev) | Validate the generated Draft 2020-12 document and fixtures. |
+| Packaging | `tsx` + `npm-run-all2` (dev) | `npm run dist` builds, packages, publishes. |
+| Formatting | `prettier@^3` | `format:check` runs in CI. |
+
+### 2.1 Why `tsup` (and not Vite or raw esbuild)
+
+All three end up using esbuild/Rollup-class bundling; the difference is the amount
+of glue we own.
+
+- **Vite** is browser-first. CLI/library bundling means library mode (Rollup),
+  externalization rules, `ssr` targets, and a dev server we never use. It is the
+  heaviest option for a single-file CLI with no assets.
+- **Raw `esbuild`** is viable and gives total control, but we would hand-write the
+  ~40-line build script for `banner` (shebang), `clean`, `target`, `platform`,
+  single-file output, tree shaking, and externals. That script is a permanent
+  maintenance surface.
+- **`tsup`** is a thin, purpose-built wrapper over esbuild that already provides
+  `banner`, `clean`, `format`, `target`, `platform`, `treeshake`, `splitting`, and
+  a TypeScript config file. Zero bespoke build code, identical output.
+
+**Decision:** use `tsup` with the configuration below. If `tsup` ever blocks us
+(for example on a future Node/TypeScript release), the escape hatch is a
+`scripts/build.ts` that calls `esbuild.build()` directly with the same options —
+the output contract stays identical.
+
+```ts
+// tsup.config.ts
+export default defineConfig({
+  entry: ['src/index.ts'],
+  outDir: 'dist',
+  format: ['esm'],
+  platform: 'node',
+  target: 'node22',
+  dts: false,
+  clean: true,
+  sourcemap: false,
+  splitting: false,
+  treeshake: true,
+  banner: { js: '#!/usr/bin/env node' },
+})
+```
+
+Build output contract (verified in CI and in `T11`):
+
+- exactly one runtime file: `dist/index.js`;
+- starts with the shebang;
+- contains no bare `import`/`require` of an external package (everything inlined);
+- `node dist/index.js --help` exits `0`.
+
+---
+
+## 3. Repository Layout
+
+```text
+agents-mcp/
+├── docs/
+│   └── decisions/                    # ADRs (published)
+├── scripts/
+├── spec/
+│   ├── SPEC.md                       # published format specification
+│   ├── MATRIX.md                     # published per-agent translation matrix
+│   └── BLUEPRINT.md                  # this document
+├── src/
+│   ├── config.ts                     # constants (site, version, state, aliases)
+│   ├── index.ts                      # citty entrypoint
+│   ├── core/
+│   │   ├── schema.ts                 # Zod schemas + validateConfig()
+│   │   ├── fs-atomic.ts              # temp+rename, backup, JSONC read/write
+│   │   ├── store.ts                  # canonical file read/write
+│   │   ├── state.ts                  # sync state (targets + managed names)
+│   │   ├── placeholder.ts            # parse/translate `${VAR}` syntax
+│   │   ├── env.ts                    # `.env` parse, resolution, secret extraction
+│   │   └── gitignore.ts              # minimal `.env` / state protection
+│   ├── adapters/
+│   │   ├── types.ts                  # AgentAdapter contract
+│   │   ├── shared.ts                 # JSONC helpers + env translation
+│   │   ├── claude-code.ts
+│   │   ├── cursor.ts
+│   │   ├── vscode.ts
+│   │   ├── opencode.ts
+│   │   ├── windsurf.ts
+│   │   ├── zed.ts
+│   │   └── index.ts                  # registry + detection
+│   ├── sources/
+│   │   ├── types.ts                  # ResolvedServerPackage
+│   │   ├── direct.ts
+│   │   ├── github.ts
+│   │   ├── registry.ts
+│   │   └── index.ts                  # resolution order
+│   ├── commands/
+│   │   ├── init.ts
+│   │   ├── import.ts
+│   │   ├── add.ts
+│   │   ├── sync.ts
+│   │   ├── remove.ts
+│   │   ├── list.ts
+│   │   └── doctor.ts
+│   └── ui/
+│       ├── prompts.ts                # PromptUi port
+│       └── auto.ts                   # non-interactive implementation
+├── tests/
+│   ├── core/
+│   ├── adapters/
+│   ├── sources/
+│   ├── commands/
+│   ├── schema/
+│   └── helpers/
+├── package.json
+├── package.ts                        # dist/ packaging script
+├── tsconfig.json
+├── tsup.config.ts
+└── vitest.config.ts
+```
+
+---
+
+## 4. Configuration Constants (`src/config.ts`)
+
+All constants live in one dependency-free module. Nothing here reads
+`process.env`; the schema URL must be reproducible on any machine.
+
+```ts
+export const AGENT_PLUGINS_MCP_SCHEMA_URL =
+  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+export const AGENT_PLUGINS_MCP_SPEC_URL =
+  'https://agent-plugins.org/plugin-authors/mcp-servers'
+export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
+export const SCHEMA_DRAFT = 'draft-07'
+
+export const AGENTS_DIR = '.agents'
+export const CONFIG_FILE = 'mcp.json'
+export const STATE_FILE = 'mcp-lock.json'
+export const LEGACY_STATE_FILE = '.mcp-sync-state.json'
+export const STATE_VERSION = 1
+export const ENV_FILE = '.env'
+export const ENV_EXAMPLE_FILE = '.env.example'
+
+export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
+
+/** Deterministic order for conflict resolution and reporting. */
+export const AGENT_ORDER = [
+  'claude-code', 'cursor', 'vscode', 'opencode', 'zed', 'windsurf',
+] as const
+```
+
+Rules:
+
+- The URL keeps the `v` prefix (`/schema/v0.1.0/...`), matching the README, the
+  spec text, and the published Agent Plugins schema URI.
+- `AGENTS_MCP_SITE_URL` is intentionally **not** supported. Determinism wins.
+
+---
+
+## 5. Canonical Schema (`src/core/schema.ts`)
+
+### 5.1 Zod 4 definitions
+
+```ts
+export const AgentIdSchema = z.enum([
+  'claude-code', 'cursor', 'vscode', 'opencode', 'windsurf', 'zed',
+])
+
+/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
+const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
+
+/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
+const CWD_PATTERN =
+  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
+
+export const StdioServerSchema = z.strictObject({
+  type: z.literal('stdio'),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  env: z
+    .record(z.string(), z.string())
+    .optional()
+    .refine(
+      (env) =>
+        !env ||
+        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
+      {
+        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
+      },
+    ),
+  cwd: z.string().regex(CWD_PATTERN).optional(),
+})
+
+export const StreamableHttpServerSchema = z.strictObject({
+  type: z.literal('streamable-http'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const SseServerSchema = z.strictObject({
+  type: z.literal('sse'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const CanonicalServerSchema = z.discriminatedUnion('type', [
+  StdioServerSchema,
+  StreamableHttpServerSchema,
+  SseServerSchema,
+])
+
+export const CanonicalMcpConfigSchema = z.strictObject({
+  $schema: z.literal(DEFAULT_SCHEMA_URL),
+  mcpServers: z.record(z.string(), CanonicalServerSchema),
+})
+```
+
+Decisions:
+
+- **`z.strictObject()` everywhere.** Unknown keys are rejected at read time instead
+  of silently disappearing on the next `sync`.
+- **`z.url()`** (Zod 4 top-level format), not `z.string().url()`.
+- **Three transports.** `type` is `'stdio' | 'streamable-http' | 'sse'` (ADR-0010).
+- **`$schema` is fixed.** `$schema: z.literal(DEFAULT_SCHEMA_URL)` enforces the
+  official Agent Plugins MCP 1.0.0 URI; `validateConfig()` warns on mismatch.
+- **No `.refine()`/`.transform()` in this file.** `z.toJSONSchema()` throws by
+  default on unrepresentable schemas. Extras that cannot be expressed in JSON
+  Schema live in a separate `validateConfig()` function:
+  - warn when `$schema !== DEFAULT_SCHEMA_URL` (do not fail).
+- **No `disabled`/`targets` on server objects.** These extensions were removed
+  to match the official Agent Plugins MCP 1.0.0 schema (`additionalProperties:
+  false`).
+
+### 5.3 Defaults and write-back policy
+
+- `.parse()` applies defaults for compilation; **do not materialize defaults when
+  writing the canonical file.** A user who omits `args` keeps omitting it, so
+  `scan`, `import`, and `add` produce minimal diffs and `sync` stays idempotent.
+- Server names are the canonical identity. Renaming means remove + add.
+
+---
+
+## 6. Import Convention & `tsconfig.json`
+
+The project uses one alias, `$`, mapped to the repository root.
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": { "$/*": ["./*"] },
+    "types": ["node"],
+    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "scripts", "tests", "*.ts"]
+}
+```
+
+**Import rule (enforced in review):**
+
+- If the path climbs **zero or one** directory level, use a relative import:
+  `./schema`, `../config`, `../core/env`.
+- If it climbs **two or more** levels, use the alias: `$/package.json`,
+  `$/src/core/schema` (from `tests/` or `scripts/`).
+- **Never** append `.js`/`.ts` to a module specifier. Sources are only consumed by
+  bundlers/transpilers; the shipped artifact is a single file.
+- JSON import requires `with { type: 'json' }`.
+
+Tooling consequences:
+
+- `tsup`/esbuild reads `paths` from `tsconfig.json` automatically.
+- `tsx` supports `paths` (used by `scripts/*`).
+- **Vitest does not read `paths`** → `vitest.config.ts` MUST declare
+  `resolve.alias = { '$': rootDir }`.
+- `tsc --noEmit` is the first gate in `T1`; if TypeScript 7 rejects any option
+  above, fall back to TypeScript `5.9` and record it as a new ADR.
+
+---
+
+## 7. Runtime Context & Path Resolution
+
+No module may call `os.homedir()`, `process.platform`, `process.cwd()`,
+`process.env`, or `process.stdout.isTTY` at import time or inside adapters.
+Everything comes through an injected context.
+
+```ts
+export interface RuntimeContext {
+  readonly cwd: string
+  readonly homeDir: string
+  readonly platform: NodeJS.Platform
+  readonly env: NodeJS.ProcessEnv
+  readonly isTTY: boolean
+}
+
+export function createRuntimeContext(overrides?: Partial<RuntimeContext>): RuntimeContext
+```
+
+- `createRuntimeContext()` is called exactly once in `src/index.ts` (and once per
+  test) and passed down.
+- Global paths respect `XDG_CONFIG_HOME` on Linux/macOS and `APPDATA` on Windows,
+  falling back to the documented defaults (see `MATRIX.md` §1.1).
+- VS Code probes `Code`, `Code - Insiders`, `VSCodium` in that order.
+- This is what makes Windows path behavior testable on Linux CI (ADR-0004).
+
+---
+
+## 8. Core Modules
+
+### 8.1 `core/fs-atomic.ts`
+
+- `readTextFile(path): string | null` — `null` for `ENOENT`.
+- `writeFileAtomic(path, content, { mode })` — write to a temp file **in the same
+  directory**, `fsync`, then `rename`; on Windows retry `rename` after
+  `rm`-less fallback (`copyFile` + `unlink`) because `rename` over an existing file
+  can fail.
+- `backupFile(path)` — copy to `<path>.bak.<ISO timestamp>` before `--force`
+  operations.
+- `writeFileAtomic` must be safe against symlink surprises: `O_EXCL` on the temp
+  file, random suffix.
+- `.env` is written with mode `0o600`.
+
+### 8.2 `core/store.ts`
+
+Canonical file access only:
+
+- `getConfigPath(scope, ctx)` → `<cwd>/.agents/mcp.json` |
+  `<homeDir>/.agents/mcp.json`.
+- `readConfig(scope, ctx)` → `{ config, raw } | null`.
+- `writeConfig(scope, ctx, config)` → serializes `$schema` + `mcpServers` (minimal,
+  defaults not materialized), atomic write.
+- `loadValidatedConfig(scope, ctx)` → `{ config, warnings }`; throws
+  `ConfigValidationError` with a readable path (`mcpServers.github.url`).
+- Values are read with `jsonc-parser` even for `.json` files (tolerant of comments
+  and trailing commas).
+
+### 8.3 `core/state.ts`
+
+```ts
+interface SyncState {
+  version: 1
+  scope: 'project' | 'global'
+  targets: AgentId[]
+  agents: Record<AgentId, {
+    path: string
+    names: string[]
+    updatedAt: string // ISO-8601
+  }>
+}
+```
+
+Location: `<state dir>/mcp-lock.json`, where the state dir is `<cwd>/.agents`
+or `<homeDir>/.agents`. A legacy file at `.agents/.mcp-sync-state.json` (or
+`~/.agents/.mcp-sync-state.json`) is read as a fallback. Rules:
+
+- Missing file → empty state, no warning.
+- Corrupt/unknown-version file → warn, treat as empty, and rewrite on next
+  successful `sync`.
+- Lock precedence: new lock file → legacy file → empty state. Using the legacy
+  file emits a non-fatal notice (not an error). A corrupt new lock never falls
+  back to the legacy file.
+- `targets` is the persisted agent selection. It is the second source of truth for
+  `sync` (after `--agents`, before auto-detection).
+- `names` per agent is the authoritative `previousManagedNames` set.
+- `import` seeds `names` for every agent it read, even with `--no-sync`.
+- `remove` and `sync` prune names no longer present in the canonical file.
+- State is always written atomically; schema and `STATE_VERSION` stay `1`.
+- The lock is **not** auto-added to `.gitignore`; implementers MAY version it.
+  Only `.env` is auto-protected.
+
+### 8.4 `core/placeholder.ts`
+
+Single implementation shared by adapters, `add`, `doctor`:
+
+```ts
+const PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g
+
+interface Placeholder { raw: string; name: string; fallback?: string; start: number; end: number }
+
+parsePlaceholders(value: string): Placeholder[]
+translate(value: string, syntax: EnvSyntax, opts: { nativeDefault: boolean }):
+  { value: string; warnings: PlaceholderWarning[] }
+collectRequiredVars(server: CanonicalServer): RequiredVar[]
+```
+
+`EnvSyntax = 'posix' | 'env-colon' | 'brace-env'` (`${VAR}`, `${env:VAR}`,
+`{env:VAR}`). Translation is purely syntactic and idempotent. `translate()` never
+substitutes values.
+
+### 8.5 `core/env.ts`
+
+- `parseDotenv(content)` — line-based, `KEY=VALUE`, comments, optional quotes,
+  duplicate keys → last wins, no variable expansion.
+- `readDotenv(scope, ctx)` — `<cwd>/.env` for project, `<homeDir>/.agents/.env`
+  for global.
+- `resolveVar(name, { dotenv, processEnv, fallback })` — precedence: dotenv →
+  processEnv → fallback. Empty string counts as unset for fallback purposes.
+- `planSecretExtraction(server, { policy })` → `{ server, writes, warnings }` where
+  `writes` are `{ key, value, description? }`. Never touches disk.
+- `appendToDotenv(path, writes)` — creates the file if missing (mode `0600` after
+  ensuring `.env` is git-ignored), never overwrites an existing key; warns on a
+  key that exists with a different value.
+- `syncEnvExample(path, keys)` — append missing `KEY=` entries only; preserve
+  order, comments, and existing lines; never write values.
+
+### 8.6 `core/gitignore.ts`
+
+Minimal, lazy, and only for tool-owned secrets:
+
+- `ensureIgnored(rootDir, entries)` adds a managed block only when something is
+  about to be written:
+
+  ```gitignore
+  # agents-mcp local (managed)
+  .env
+  ```
+
+- Called by `env.appendToDotenv` only (never by `state.writeState`, `init`, or
+  `sync` on their own). `writeState` never touches `.gitignore`.
+- Never touches agent configuration files. Never ignores shared settings.
+- If an entry is already covered by another pattern, do not duplicate it.
+- If `.env` is already tracked by Git, warn with
+  `git rm --cached .env` and continue (the value is still safe from new commits).
+
+---
+
+## 9. Adapter Layer
+
+### 9.1 Contract (`src/adapters/types.ts`)
+
+```ts
+export type ConfigScope = 'project' | 'global'
+export type EnvSyntax = 'posix' | 'env-colon' | 'brace-env'
+
+export type WarningCode =
+  | 'DEFAULT_DROPPED' | 'CWD_UNSUPPORTED' | 'TARGETS_NOT_NATIVE'
+  | 'SCOPE_UNSUPPORTED' | 'TRANSPORT_INFERRED' | 'UNKNOWN_FIELD_DROPPED'
+  | 'AMBIGUOUS_ENTRY' | 'UNKNOWN_PLACEHOLDER' | 'DISABLE_UNSUPPORTED'
+  | 'MANUAL_ENTRY_PRESERVED'
+
+export interface Warning {
+  code: WarningCode
+  agent: AgentId
+  server?: string
+  field?: string
+  message: string
+}
+
+export interface AdapterCapabilities {
+  readonly scopes: readonly ConfigScope[]
+  readonly format: 'json' | 'jsonc'
+  readonly envSyntax: EnvSyntax
+  readonly nativeDefault: boolean
+  readonly nativeDisabled: boolean
+  readonly cwd: boolean
+}
+
+export interface AdapterContext extends RuntimeContext {
+  readonly scope: ConfigScope
+  readonly previousManagedNames: ReadonlySet<string>
+}
+
+export interface CompileResult {
+  readonly content: string
+  readonly managedNames: readonly string[]
+  readonly warnings: readonly Warning[]
+}
+
+export interface ExtractResult {
+  readonly servers: Record<string, CanonicalServer>
+  readonly warnings: readonly Warning[]
+}
+
+export interface AgentAdapter {
+  readonly id: AgentId
+  readonly displayName: string
+  readonly capabilities: AdapterCapabilities
+
+  getConfigPath(scope: ConfigScope, ctx: RuntimeContext): string | null
+  detect(scope: ConfigScope, ctx: RuntimeContext): Promise<boolean>
+
+  /** Pure: canonical server -> native object (null when not applicable). */
+  compile(server: CanonicalServer): { entry: unknown | null; warnings: readonly Warning[] }
+
+  extractServers(rawContent: string, scope: ConfigScope): ExtractResult
+  applyServers(existingRawContent: string | null, servers: Record<string, CanonicalServer>, ctx: AdapterContext): CompileResult
+}
+```
+
+Why `compile()` is separate: `doctor` needs the expected native **object** to
+compare semantically with what is on disk. Comparing serialized text produces
+false positives whenever the user reformats a file.
+
+### 9.2 Shared helpers (`src/adapters/shared.ts`)
+
+- `applyServerEntries(existing, rootKey, entries, { managed, previous, format })` —
+  single implementation of `jsonc-parser` `modify()` + `applyEdits()`:
+  - create the root key only if needed;
+  - write each managed entry in one batch, applying edits in descending offset
+    order (the classic multi-edit footgun);
+  - delete names in `previous` that are no longer produced;
+  - never touch sibling keys.
+- `readEntry(parsed, path)` — tolerant nested lookup (`context_servers.x.command.path`).
+- `makeWarnings(agent, code, message, meta)` — small factory.
+- All functions are pure with respect to the filesystem; file I/O stays in the
+  command layer.
+
+### 9.3 JSONC rules
+
+- Read with `parseTree`/`parse`; on syntax errors, **abort** the write for that
+  file, report `InvalidConfigError`, and do not modify the file.
+- Preserve comments, trailing commas, CRLF, and BOM.
+- If the file is empty or whitespace only, treat it as `{}`.
+- Format only the inserted/replaced node (`formattingOptions: { tabSize: 2,
+  insertSpaces: true }`); preserve everything else byte-for-byte.
+- `~/.claude.json` and `.zed/settings.json` are large multi-purpose files: never
+  re-serialize the whole document.
+
+### 9.4 Behavior matrix
+
+The normative per-agent mapping is in [`MATRIX.md`](./MATRIX.md). Adapter
+implementation must satisfy:
+
+- `previousManagedNames` cleanup without touching manual entries;
+- scope support (`windsurf` is global-only) reported through
+  `capabilities.scopes`;
+- URL-only or otherwise unqualified native input is imported as `http` with
+  `TRANSPORT_INFERRED`;
+- `cwd` is not emitted (`CWD_UNSUPPORTED`);
+- `:-default` is dropped outside `claude-code` (`DEFAULT_DROPPED`);
+- `detect()` uses file/directory existence only (no `PATH` probing — that belongs
+  to `doctor`).
+### 9.5 Registry (`src/adapters/index.ts`)
+
+- `adapters: readonly AgentAdapter[]` in `AGENT_ORDER`.
+- `getAdapter(id)`, `getAdapters(ids?)`.
+- `detectAgents(ctx)` → agents whose config path exists or whose directory exists
+  (project) / whose global path exists (global).
+- `resolveTargets({ flag, state, ctx })` — precedence: `--agents` → `state.targets`
+  → detection. Unknown ids are a usage error.
+
+---
+
+## 10. Source Resolvers (`src/sources/`)
+
+### 10.1 DTO
+
+```ts
+export interface RequiredEnvVar {
+  name: string
+  description?: string
+  isSecret: boolean
+}
+
+export interface ResolvedServerPackage {
+  suggestedName: string
+  definition: CanonicalServer       // placeholders already in `${VAR}` form
+  requiredEnv: RequiredEnvVar[]
+  source: { type: 'direct' | 'github' | 'registry'; ref: string }
+}
+```
+
+### 10.2 `direct.ts`
+
+- `--stdio <command>` + repeatable `--arg <token>`.
+- If `--arg` is absent and the `--stdio` value contains whitespace, tokenize with
+  `string-argv`; reject empty argv or an empty first token.
+- `--http <url>` (or a bare `http(s)://` source) → `type: "streamable-http"`.
+- `--env KEY=VALUE` → value is written to `.env` (via `core/env.ts`) and the
+  canonical entry uses `${KEY}`. `--env KEY` → reference only; warns when
+  unresolved.
+- `--header "Name: Value"` (repeatable) → `headers`; split on the first `:`.
+- `--cwd` → canonical `cwd` (preserved only; see `MATRIX.md`).
+- `--name` overrides `suggestedName`. Suggested name for URLs is derived from the
+  hostname + first path segment, sanitized to `SERVER_NAME_PATTERN`.
+
+### 10.3 `github.ts`
+
+1. Accept `owner/repo`, `https://github.com/owner/repo`, and an optional `#ref`.
+2. Try `https://raw.githubusercontent.com/<owner>/<repo>/<ref|main>/server.json`;
+   fall back to `master` when the ref is not explicit.
+3. If neither exists, resolve the default branch through
+   `https://api.github.com/repos/<owner>/<repo>` (only then), then read
+   `server.json`, then `package.json`.
+4. `server.json` parsing (fixture-driven):
+   - accept both `registry_type`/`registryType` and `identifier`/`name`;
+   - preference `npm` → `npx -y <id>[@<version>]`, `pypi` → `uvx <id>[==<version>]`,
+     `oci` → `docker run -i --rm <id>`;
+   - `environment_variables[]` with `is_required: true` become `requiredEnv`,
+     honoring `is_secret`.
+5. `package.json` fallback: `bin` (string or object) selects `<name>` for
+   `npx -y`; no `bin` → actionable error ("repository is not an MCP server").
+6. HTTP policy: `AbortSignal.timeout(10_000)`, one retry on `429`/`5xx` with
+   backoff, `User-Agent: agents-mcp/<version>`, response cap 2 MiB, optional
+   `GITHUB_TOKEN` (dotenv → env) for rate limits. Never execute fetched content.
+7. Validation with Zod; malformed payloads produce a specific error, never a
+   partial server entry.
+
+### 10.4 `registry.ts`
+
+- `@scope/name` or a bare package name that exists on npm → query
+  `https://registry.npmjs.org/<url-encoded-name>`.
+- Otherwise query
+  `https://registry.modelcontextprotocol.io/v0/servers?search=<query>&limit=10`.
+- Multiple results: interactive selection; under `--yes`, prefer an exact name
+  match, else fail with the candidate list.
+- Registry payloads are pinned by fixtures. 404 / 5xx / malformed JSON each get a
+  distinct message.
+
+### 10.5 Resolution order (`sources/index.ts`)
+
+Explicit flags → remote URL → `owner/repo` → registry/npm. The resolver never
+writes files; `commands/add.ts` owns persistence.
+
+---
+
+## 11. Commands
+
+Global flags, available on every command: `--global`/`-g`, `--yes`/`-y`,
+`--agents <csv>`, `--dry-run`.
+
+`--yes` and `CI=true` imply the non-interactive `AutoUi`. When both a value and a
+default are needed, the default wins and the decision is printed.
+
+| Command | Behavior |
+| :--- | :--- |
+| `init` | Create `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents (multi-select; `--agents` bypasses), persist `targets` in state. Existing file → exit `1` unless `--force` (which writes a `.bak.<timestamp>` first). Never touches `.gitignore`. In non-interactive mode, targets come from `--agents`, else from detection; if neither yields an agent, exit `1` with a hint to pass `--agents` (never assume all six). |
+| `import` | Scan every adapter for the active scope, extract, normalize, dedupe/conflict-resolve, apply the secret policy, merge into canonical (existing entries win unless `--force`), seed state names for all scanned agents, then `sync` unless `--no-sync`. Native files are never deleted. |
+| `add <source>` | Resolve source, prompt/accept `--name`, resolve/Create env vars, write canonical, then `sync` unless `--no-sync`. Same name + same normalized definition → exit `0`, no write (idempotent). Same name + different definition → exit `1` with a diff; `--force` overwrites; interactive offers rename. |
+| `sync` | Validate canonical; targets = flag → state → detection; compile per adapter; write; update state; print summary. No targets → exit `1` with a hint (never a silent no-op). Idempotent: a second run produces no byte changes. |
+| `remove <name>` | Name must exist, else exit `1`. Remove from canonical, then `sync` unless `--no-sync`. |
+| `list` | Read-only table: name, type, command/URL, and per-agent sync status. `--all` includes the global file and marks shadowed entries (project wins). |
+| `doctor` | Schema, env resolution (all string fields), stdio binaries (`PATH` + `PATHEXT`, skip shell builtins), semantic drift per managed entry, unsupported-scope warnings, `.env`-tracked warning, state sanity. Exit `1` on errors; `--strict` promotes warnings. |
+
+Exit codes: `0` success, `1` validation/runtime failure, `2` usage error, `130`
+interrupted.
+
+Conflict policy on `import` (deterministic, `--yes`-safe): compare normalized
+definitions; equal → merge silently; different → interactive pick, or under
+`--yes` keep the entry from the earliest agent in `AGENT_ORDER` and warn with the
+losing agents listed.
+
+`--dry-run` must print the exact intended writes (path + JSON) and touch nothing,
+including state.
+
+---
+
+## 12. UI & Prompts (`src/ui/`)
+
+```ts
+export interface PromptUi {
+  intro(message: string): void
+  outro(message: string): void
+  note(message: string, title?: string): void
+  warn(message: string): void
+  error(message: string): void
+  confirm(opts: { message: string; initialValue: boolean }): Promise<boolean>
+  select<T>(opts: { message: string; options: Option<T>[]; initialValue?: T }): Promise<T>
+  multiselect<T>(opts: { message: string; options: Option<T>[]; initialValues?: T[] }): Promise<T[]>
+  text(opts: { message: string; placeholder?: string; defaultValue?: string; validate?: (v: string) => string | undefined }): Promise<string>
+  password(opts: { message: string }): Promise<string>
+  spinner(message: string): { start(): void; stop(message?: string): void }
+}
+```
+
+- `createClackUi()` for TTY; `createAutoUi({ defaults, log })` for `--yes`/CI and
+  tests. No command may import `@clack/prompts` directly.
+- Ctrl-C exits `130` with a clean message.
+- Secrets are masked in prompts and never echoed in `note`/`warn`/`error`.
+
+---
+
+## 13. Secret Hygiene
+
+Detection (during `import` and literal `add` values):
+
+- **Keys:** `/(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|CREDENTIAL|PRIVATE_KEY|AUTH|DSN)(?:_|$)/i`.
+- **Values:** URL credentials (`scheme://user:pass@`), known prefixes (`ghp_`,
+  `github_pat_`, `sk-`, `xox[baprs]-`), or high-entropy strings ≥ 20 chars.
+- Fields scanned: `env` values, `headers` values, `args` items, `url`.
+- A value already wrapped in `${...}` is never flagged.
+
+Policy:
+
+- Interactive: propose extraction per finding, with a derived uppercase key
+  (`<SERVER>_<KEY>`, sanitized and collision-checked).
+- `--yes`/CI: **warn only**; write nothing to `.env` unless `--extract-secrets` is
+  passed.
+- Before any `.env` write: ensure `.env` is git-ignored, create with mode `0600`,
+  never overwrite an existing key.
+- `.env.example` gets `KEY=` only.
+- Canonical file and native files receive `${KEY}`, never the value.
+- No secret value in logs, errors, or dry-run output (mask as `***`).
+
+---
+
+## 14. Doctor
+
+Checks, in order, each producing a structured result:
+
+1. **Schema:** `CanonicalMcpConfigSchema` + `validateConfig()` warnings.
+2. **Env:** every placeholder in `env`, `headers`, `args`, `url`; missing required
+   variable (no fallback) = error.
+3. **Runtime:** for each `stdio` server, resolve `command` in `PATH` (respecting
+   `PATHEXT` on Windows); absolute paths must exist and be executable. `npx`/`uvx`
+   presence is checked, not the package itself.
+4. **Drift:** for each target agent and each name in state, compare
+   `adapter.compile(server)` with the parsed on-disk entry (deep equality after
+   normalization); missing/extra/changed = drift. Ignore formatting and unmanaged
+   entries.
+5. **State:** unreadable/corrupt state, targets pointing at unsupported scopes.
+6. **Hygiene:** `.env` tracked by Git; placeholders without fallback that resolve
+   nowhere.
+
+Exit `1` if any error; `0` if only warnings; `--strict` makes warnings fatal.
+All results are returned as data and rendered by the command (future `--json`).
+
+---
+
+## 15. Packaging & Release
+
+Publishing happens **only** from `dist/`. The repository root is never published.
+
+The build pipeline is finalized together with the implementation (`T1`/`T11`); the contract below is mandatory regardless of the concrete script names.
+
+`package.json` (root) scripts required at minimum:
+
+- `build` → single-file bundle;
+- `typecheck` → `tsc --noEmit`;
+- `test` / `test:watch` → Vitest;
+- `format` / `format:check` → Prettier;
+- `verify` → typecheck + format check + tests + build;
+- `dist:build` → full `verify`;
+- `dist:package` → `tsx package.ts`;
+- `dist:publish` → `npm publish ./dist`;
+- `dist` → build → package → publish, in order;
+- `prepublishOnly` → refuse publishing from the repository root.
+
+`package.ts` requirements:
+
+- create `dist/` if missing;
+- derive `dist/package.json` from the root manifest, removing `scripts`, `devDependencies`, **and `dependencies`** (everything is bundled);
+- expose exactly one binary: `bin: { "agents-mcp": "./index.js" }`, with `main`/`exports` pointing at `./index.js`, explicit `files`, and `engines.node: ">=22"`;
+- copy `LICENSE` and `README.md`; copy `CHANGELOG.md` when present (the changelog is maintained by the `changelog-management` skill) and warn instead of failing when it is absent;
+- write the manifest with a trailing newline.
+
+Constraints:
+
+- **Exactly one binary:** `agents-mcp`.
+- No runtime `dependencies` in the published manifest.
+- `npm run dist` runs build → package → publish in that order. Publishing is always manual and happens after a version bump.
+- `dist:build` runs the full `verify` suite, so CI catches drift before publication.
+
+---
+
+## 16. Testing & CI
+
+### 16.1 Test layout
+
+| Path | Coverage |
+| :--- | :--- |
+| `tests/core/schema.test.ts` | positive/negative fixtures, strictness, defaults, name pattern |
+| `tests/core/placeholder.test.ts` | grammar, fallbacks, all three env syntaxes, idempotence |
+| `tests/core/env.test.ts` | `.env` parsing, precedence (dotenv wins), secret heuristics, `.env.example`, no overwrite |
+| `tests/core/store.test.ts` | atomic write, minimal serialization, invalid JSONC abort |
+| `tests/core/state.test.ts` | targets persistence, corrupt state, pruning |
+| `tests/core/gitignore.test.ts` | lazy managed block, no duplicate entries, no agent files |
+| `tests/adapters/contract.test.ts` | table-driven contract across all 6 adapters |
+| `tests/adapters/<agent>.test.ts` | compile/extract/apply, JSONC preservation, previousManagedNames, CRLF/BOM |
+| `tests/sources/*.test.ts` | direct parsing, GitHub chain, registry, mocked `fetch`, fixtures |
+| `tests/commands/*.test.ts` | integration in temp dirs: `init → add → sync → list → remove`, `import`, `doctor` |
+| `tests/helpers/sandbox.ts` | temp `cwd`/`homeDir`/`XDG_CONFIG_HOME`, guard that fails if not under `os.tmpdir()` |
+
+Rules:
+
+- Use the **real filesystem** inside the sandbox; mock only `fetch` and, when
+  needed, `process.env`/`PATH`.
+- Never mock `node:fs` or `node:os`; inject `RuntimeContext` instead.
+- Every mutating test asserts it never left the sandbox (guard).
+- Adapter round-trip tests are table-driven from `MATRIX.md` to prevent drift.
+
+### 16.2 CI (`.github/workflows/ci.yml`)
+
+- `verify`: Ubuntu, Node `22`, `24`, `26` → `npm ci` + `npm run verify`.
+- `windows-paths`: Windows, Node `22` → `typecheck` + `tests/core` +
+  `tests/adapters` (path resolution and atomic-rename behavior).
+- No test may hit the network; everything is mocked or fixture-driven.
+
+Coverage (optional, enabled from day one): `@vitest/coverage-v8`, thresholds 80%
+lines/functions and 75% branches over `src/core` and `src/adapters`.
+
+---
+
+## 17. Risks & Mitigations
+
+| Risk | Mitigation |
+| :--- | :--- |
+| Corrupting `~/.claude.json` or `.zed/settings.json` | JSONC AST edits only; abort on parse error; atomic writes; `.bak` before `--force`; tests with real fixture files. |
+| Secret leakage | Symbolic placeholders end-to-end; `.env` git-ignored before write; `0600`; masked logs; warn-only in CI. |
+| Stale generated schema | Schema is derived from Zod at build time; no committed artifact to drift. |
+| Node/TS version drift | `engines >=22`, `@types/node@^22`, CI matrix; TS 7 is the only type checker, bundling does not depend on it. |
+| Windows path/rename differences | Injected platform, XDG/APPDATA resolution, Windows CI job, rename fallback. |
+| `jsonc-parser` multi-edit offset bugs | One shared helper, descending edits, dedicated tests. |
+| False-positive drift | Semantic comparison via `compile()`, never text diff. |
+| Network flakiness in `add` | Timeouts, one retry, fixtures in tests, no network in `verify`. |
+| Overwriting user MCP entries | Manage only names present in state; manual entries are preserved and reported. |
+| `zod` upgrade breaking schema output | Pinned major range; `verify` runs `typecheck` + `build`. |
+
+---
+
+## 18. Definition of Done (`v0.1.0`)
+
+- All six adapters implement the contract and pass round-trip, JSONC,
+  `previousManagedNames`, and warning tests.
+- All seven commands work in project and global scopes, interactively (via the
+  prompt port) and non-interactively (`--yes`), with `--dry-run` honored.
+- `sync` is idempotent byte-for-byte; `remove` propagates without touching manual
+  entries; `import` never deletes native files.
+- `doctor` detects all five failure classes and exits `1` on errors.
+- `npm run verify` and `npm run build` are green; `node dist/index.js --help`
+  works; `dist/package.json` has one `bin`, no dependencies, and `engines >=22`.
+- No secret value can reach a canonical or native file through any command.
+- README, `SPEC.md`, `MATRIX.md`, and this blueprint describe exactly what the code
+  does.
+
+---
+
+## 19. Architecture Decision Records
+
+| ADR | Decision |
+| :--- | :--- |
+| [0001](../docs/decisions/0001-canonical-transports.md) | Canonical transports are `stdio` and `http`. **Superseded by ADR-0010**. |
+| [0002](../docs/decisions/0002-schema-source-and-versioning.md) | Zod 4 is the single schema source; Draft 2020-12 output; fixed `$id` URL. **Superseded by ADR-0010**. |
+| [0003](../docs/decisions/0003-bundler-tsup.md) | `tsup` (esbuild) single-file ESM bundle, no `.d.ts`. |
+| [0004](../docs/decisions/0004-runtime-context-and-pure-compilers.md) | Injected runtime context and pure native compilers. |
+| [0005](../docs/decisions/0005-local-sync-state.md) | Local sync state + persisted targets. |
+| [0006](../docs/decisions/0006-non-destructive-compilation.md) | Native files are preserved in place. |
+| [0007](../docs/decisions/0007-env-and-secrets.md) | `.env` precedence and safe secret extraction. |
+| [0008](../docs/decisions/0008-packaging-and-runtime-floor.md) | Node `>=22`, publish from `dist/` only, single binary. |
+| [0009](../docs/decisions/0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`. |
+| [0010](../docs/decisions/0010-adopt-agent-plugins-mcp-schema.md) | Adopt Agent Plugins MCP 1.0.0 as the normative basis. |
+| [0011](../docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md) | Plugin ownership via `managedPlugins` and safe, non-recursive cleanup. |
+| [0012](../docs/decisions/0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`). |
+| [0013](../docs/decisions/0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets`. |
+| [0014](../docs/decisions/0014-mcp-lock-and-authoritative-sync.md) | `.agents/mcp-lock.json` and authoritative `sync` from `.agents/mcp.json`. |
 ````
 
 ## File: src/adapters/claude-code.ts
@@ -7201,294 +10192,6 @@ export function applyServers(
   )
 
   return { content, managedNames: managed, warnings }
-}
-````
-
-## File: src/adapters/index.ts
-````typescript
-/**
- * Adapter registry (§9.5): all six adapters in `AGENT_ORDER`, plus lookup,
- * detection, and target resolution.
- *
- * `resolveTargets` implements the precedence: `--agents` flag → persisted
- * `state.targets` → auto-detection. Unknown ids are a usage error.
- */
-
-import { z } from 'zod'
-import type { AgentIdSchema } from '$/src/core/schema'
-import { AGENT_ORDER } from '$/src/config'
-import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import type { SyncState } from '$/src/core/state'
-import type {
-  AgentAdapter,
-  AdapterCapabilities,
-  AdapterContext,
-  CompileResult,
-  ExtractResult,
-  Warning,
-  WarningCode,
-  EnvSyntax,
-} from '$/src/adapters/types'
-import { makeWarning } from '$/src/adapters/types'
-import * as claudeCode from '$/src/adapters/claude-code'
-import * as cursor from '$/src/adapters/cursor'
-import * as vscode from '$/src/adapters/vscode'
-import * as opencode from '$/src/adapters/opencode'
-import * as zed from '$/src/adapters/zed'
-import * as windsurf from '$/src/adapters/windsurf'
-import * as antigravity from '$/src/adapters/antigravity'
-
-export type AgentId = z.infer<typeof AgentIdSchema>
-
-/** Re-export the adapter contract types and warning factory. */
-export type {
-  AgentAdapter,
-  AdapterCapabilities,
-  AdapterContext,
-  CompileResult,
-  ExtractResult,
-  Warning,
-  WarningCode,
-  EnvSyntax,
-}
-export { makeWarning }
-
-function buildAdapter(
-  id: AgentId,
-  displayName: string,
-  capabilities: AdapterCapabilities,
-  getConfigPath: (scope: ConfigScope, ctx: RuntimeContext) => string | null,
-  detect: (scope: ConfigScope, ctx: RuntimeContext) => Promise<boolean>,
-  compile: AgentAdapter['compile'],
-  extractServers: AgentAdapter['extractServers'],
-  applyServers: AgentAdapter['applyServers'],
-): AgentAdapter {
-  return {
-    id,
-    displayName,
-    capabilities,
-    getConfigPath,
-    detect,
-    compile,
-    extractServers,
-    applyServers,
-  }
-}
-
-/**
- * Validate `--agents` flag values against known agent ids. Throws a usage
- * error for unknown ids. Shared by `resolveTargets` and `resolveTargetsAsync`.
- */
-export function validateAgentFlag(flag: readonly string[]): AgentId[] {
-  const valid = new Set(AGENT_ORDER)
-  const unknown = flag.filter((id) => !valid.has(id as AgentId))
-  if (unknown.length > 0) {
-    throw new Error(
-      `Unknown agent id(s) in --agents: ${unknown.join(', ')}. Valid: ${AGENT_ORDER.join(', ')}`,
-    )
-  }
-  return flag as AgentId[]
-}
-
-/** All six adapters, in deterministic `AGENT_ORDER`. */
-export const adapters: readonly AgentAdapter[] = [
-  buildAdapter(
-    claudeCode.id,
-    claudeCode.displayName,
-    claudeCode.capabilities,
-    claudeCode.getConfigPath,
-    claudeCode.detect,
-    claudeCode.compile,
-    claudeCode.extractServers,
-    claudeCode.applyServers,
-  ),
-  buildAdapter(
-    cursor.id,
-    cursor.displayName,
-    cursor.capabilities,
-    cursor.getConfigPath,
-    cursor.detect,
-    cursor.compile,
-    cursor.extractServers,
-    cursor.applyServers,
-  ),
-  buildAdapter(
-    vscode.id,
-    vscode.displayName,
-    vscode.capabilities,
-    vscode.getConfigPath,
-    vscode.detect,
-    vscode.compile,
-    vscode.extractServers,
-    vscode.applyServers,
-  ),
-  buildAdapter(
-    opencode.id,
-    opencode.displayName,
-    opencode.capabilities,
-    opencode.getConfigPath,
-    opencode.detect,
-    opencode.compile,
-    opencode.extractServers,
-    opencode.applyServers,
-  ),
-  buildAdapter(
-    zed.id,
-    zed.displayName,
-    zed.capabilities,
-    zed.getConfigPath,
-    zed.detect,
-    zed.compile,
-    zed.extractServers,
-    zed.applyServers,
-  ),
-  buildAdapter(
-    windsurf.id,
-    windsurf.displayName,
-    windsurf.capabilities,
-    windsurf.getConfigPath,
-    windsurf.detect,
-    windsurf.compile,
-    windsurf.extractServers,
-    windsurf.applyServers,
-  ),
-  buildAdapter(
-    antigravity.id,
-    antigravity.displayName,
-    antigravity.capabilities,
-    antigravity.getConfigPath,
-    antigravity.detect,
-    antigravity.compile,
-    antigravity.extractServers,
-    antigravity.applyServers,
-  ),
-] as const
-
-/** Map of agent id → adapter, in `AGENT_ORDER`. */
-export const adapterMap: ReadonlyMap<AgentId, AgentAdapter> = new Map(
-  adapters.map((a) => [a.id, a]),
-)
-
-/** Lookup an adapter by id. Throws a usage error for unknown ids. */
-export function getAdapter(id: string): AgentAdapter {
-  const adapter = adapterMap.get(id as AgentId)
-  if (!adapter) {
-    const valid = Array.from(adapterMap.keys()).join(', ')
-    throw new Error(
-      `Unknown agent id \`${id}\`. Valid agent ids: ${valid}. Pass --agents to select.`,
-    )
-  }
-  return adapter
-}
-
-export function getAdapters(ids?: readonly string[]): AgentAdapter[] {
-  if (!ids || ids.length === 0) {
-    return [...adapters]
-  }
-  return ids.map((id) => getAdapter(id))
-}
-
-/**
- * Detect which agents are configured for `scope`. For project scope, an agent
- * counts as detected when its config path exists or its containing directory
- * exists; for global scope, when its config path exists.
- */
-export async function detectAgents(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): Promise<AgentId[]> {
-  const detected: AgentId[] = []
-  const { statSync } = await import('node:fs')
-  const { dirname } = await import('node:path')
-
-  for (const adapter of adapters) {
-    // Gate on declared scope support, not on getConfigPath() === null.
-    // antigravity returns null for getConfigPath (per-plugin storage) but still
-    // supports project/global scope and must be detectable via detect().
-    if (!adapter.capabilities.scopes.includes(scope)) {
-      continue
-    }
-
-    let found = false
-    try {
-      found = await adapter.detect(scope, ctx)
-    } catch {
-      found = false
-    }
-
-    if (!found && scope === 'project') {
-      const path = adapter.getConfigPath(scope, ctx)
-      // Only fall back to directory-existence when the adapter has a single
-      // native config path; per-plugin adapters (antigravity) are handled by
-      // detect() itself.
-      if (path !== null) {
-        // Only fall back to directory-existence when the config's parent dir is
-        // not cwd itself (otherwise every project "has" claude-code/opencode).
-        const parent = dirname(path)
-        if (parent !== ctx.cwd) {
-          try {
-            found = statSync(parent).isDirectory()
-          } catch {
-            found = false
-          }
-        }
-      }
-    }
-
-    if (found) {
-      detected.push(adapter.id)
-    }
-  }
-
-  return detected
-}
-
-/**
- * Resolve the target agents with precedence: `--agents` flag → persisted
- * `state.targets` → auto-detection. Unknown ids are a usage error.
- * Returns an empty array when nothing is resolvable (caller decides whether
- * that is an error).
- */
-export function resolveTargets({
-  flag,
-  state,
-  ctx,
-}: {
-  flag: readonly string[] | undefined
-  state: SyncState
-  ctx: RuntimeContext
-}): AgentId[] {
-  if (flag && flag.length > 0) {
-    return validateAgentFlag(flag)
-  }
-
-  if (state.targets && state.targets.length > 0) {
-    return [...state.targets]
-  }
-
-  return []
-}
-
-/**
- * Async variant of resolveTargets that falls back to detection when neither
- * flag nor state targets are available.
- */
-export async function resolveTargetsAsync({
-  flag,
-  state,
-  ctx,
-}: {
-  flag: readonly string[] | undefined
-  state: SyncState
-  ctx: RuntimeContext
-}): Promise<AgentId[]> {
-  if (flag && flag.length > 0) {
-    return validateAgentFlag(flag)
-  }
-  if (state.targets && state.targets.length > 0) {
-    return [...state.targets]
-  }
-  return detectAgents(state.scope, ctx)
 }
 ````
 
@@ -9285,1160 +11988,6 @@ export async function collectInteractiveAddOptions({
 }
 ````
 
-## File: src/commands/doctor.command.ts
-````typescript
-/**
- * `doctor` command (§11).
- *
- * Runs six checks in order (§14):
- *   1. Schema — canonical config validity + validateConfig() warnings
- *   2. Env — every placeholder in env/headers/args/url; missing required var = error
- *   3. Runtime — stdio binaries resolved in PATH (respecting PATHEXT on Windows);
- *      absolute paths must exist and be executable
- *   4. Drift — adapter.compile(server) vs parsed on-disk entry (deep equality)
- *   5. State — corrupt/unreadable state; targets pointing at unsupported scopes
- *   6. Hygiene — `.env` tracked by Git; literal/plaintext secret findings
- *
- * Exit `1` if any error; `0` if only warnings; `--strict` makes warnings fatal.
- */
-
-import { defineCommand } from 'citty'
-import { existsSync, statSync } from 'node:fs'
-import { join } from 'node:path'
-import { parse } from 'jsonc-parser'
-import {
-  createUiAndCtx,
-  configPath,
-  isDryRun,
-  parseAgentsFlag,
-} from '$/src/commands/util'
-import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
-import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
-import type { LoadValidatedConfigResult } from '$/src/core/store'
-import { loadState } from '$/src/core/state'
-import { parsePlaceholders, SECRET_KEY_RE } from '$/src/core/placeholder'
-import { readDotenv, resolveVar } from '$/src/core/env'
-import { readTextFile } from '$/src/core/fs-atomic'
-import { isGitTracked } from '$/src/core/gitignore'
-import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import type { CanonicalServer } from '$/src/core/schema'
-import { isStdioServer } from '$/src/core/schema'
-
-export interface DoctorResult {
-  code: string
-  severity: 'error' | 'warning'
-  message: string
-  agent?: string
-  server?: string
-  field?: string
-}
-
-export interface DoctorSummary {
-  errors: number
-  warnings: number
-  results: DoctorResult[]
-}
-
-export interface DoctorOptions {
-  scope: ConfigScope
-  ctx: RuntimeContext
-  flag: readonly string[] | undefined
-  dryRun: boolean
-  strict: boolean
-}
-
-/** Run all six doctor checks and return structured results. */
-export async function runDoctor(
-  options: DoctorOptions,
-): Promise<DoctorSummary> {
-  const { scope, ctx, flag, dryRun, strict } = options
-  const { ui } = createUiAndCtx({ yes: strict })
-
-  const results: DoctorResult[] = []
-
-  // 1. Schema check — wrap loadValidatedConfig in try/catch so an invalid
-  //    .agents/mcp.json yields a structured SCHEMA error instead of crashing.
-  let validated: LoadValidatedConfigResult | undefined
-  try {
-    const result = loadValidatedConfig(scope, ctx)
-    if (result) {
-      validated = result
-    }
-  } catch (err) {
-    if (err instanceof ConfigValidationError) {
-      results.push({
-        code: 'SCHEMA',
-        severity: 'error',
-        message: `Invalid canonical config at ${configPath(scope, ctx)}: ${err.issues
-          .map((i) => `${i.path || 'root'} — ${i.message}`)
-          .join('; ')}`,
-      })
-      renderResults(ui, results, strict)
-      const errors = results.filter((r) => r.severity === 'error').length
-      const warnings = results.filter((r) => r.severity === 'warning').length
-      return { errors, warnings, results }
-    }
-    throw err
-  }
-
-  if (!validated) {
-    results.push({
-      code: 'SCHEMA',
-      severity: 'error',
-      message: `No canonical config at ${configPath(scope, ctx)}. Run 'agents-mcp init' first.`,
-    })
-    renderResults(ui, results, strict)
-    const errors = results.filter((r) => r.severity === 'error').length
-    const warnings = results.filter((r) => r.severity === 'warning').length
-    return { errors, warnings, results }
-  }
-
-  const { config, warnings: configWarnings } = validated
-  for (const w of configWarnings) {
-    results.push({
-      code: 'SCHEMA',
-      severity: 'warning',
-      message: w,
-    })
-  }
-  // Schema structure is valid by virtue of loadValidatedConfig parsing.
-  const servers = config.mcpServers
-
-  // Resolve targets for drift/state checks.
-  const stateResult = loadState(scope, ctx)
-  const state = stateResult.state
-  const targets = await resolveTargetsAsync({ flag, state, ctx })
-
-  // 2. Env check — every placeholder in env/headers/args/url; missing required
-  //    var without fallback = error, reported once under ENV (not duplicated
-  //    under HYGIENE). Never assign server name to result.agent.
-  const dotenvVars = readDotenv(scope, ctx).vars
-  const reportedEnvVars = new Set<string>()
-  for (const [name, server] of Object.entries(servers)) {
-    for (const field of placeholderFields(server)) {
-      const phs = parsePlaceholders(field.value)
-      for (const ph of phs) {
-        const resolved = resolveVar(ph.name, {
-          dotenv: dotenvVars,
-          processEnv: ctx.env,
-        })
-        if (resolved.source === 'unset' && ph.fallback === undefined) {
-          const key = `${name}::${field.name}::${ph.name}`
-          if (reportedEnvVars.has(key)) continue
-          reportedEnvVars.add(key)
-          results.push({
-            code: 'ENV',
-            severity: 'error',
-            message: `Required env var \`${ph.name}\` is not set (no fallback) for server \`${name}\` field \`${field.name}\``,
-            server: name,
-            field: field.name,
-          })
-        }
-      }
-    }
-  }
-
-  // 3. Runtime check — stdio binaries.
-  for (const server of Object.values(servers)) {
-    if (!isStdioServer(server)) continue
-    const cmd = server.command
-    if (isAbsolutePath(cmd, ctx.platform)) {
-      if (!existsSync(cmd) || !isExecutable(cmd, ctx.platform)) {
-        results.push({
-          code: 'RUNTIME',
-          severity: 'error',
-          message: `Binary \`${cmd}\` does not exist or is not executable`,
-        })
-      }
-    } else {
-      const resolved = which(cmd, ctx.env, ctx.platform)
-      if (!resolved) {
-        results.push({
-          code: 'RUNTIME',
-          severity: 'error',
-          message: `Binary \`${cmd}\` not found in PATH`,
-        })
-      }
-    }
-  }
-
-  // 4. Drift check — compile per adapter vs parsed on-disk entry.
-  for (const agentId of targets) {
-    const adapter = getAdapter(agentId)
-    const nativePath = adapter.getConfigPath(scope, ctx)
-    if (nativePath === null) continue
-    const existing = readTextFile(nativePath)
-
-    // (a) Extra/orphan managed server names on disk in native files.
-    const onDiskNames = new Set<string>()
-    if (existing !== null) {
-      const parsed = parseNativeEntryWhole(
-        existing,
-        adapter.capabilities.rootKey,
-      )
-      if (parsed !== null) {
-        for (const name of Object.keys(parsed)) {
-          onDiskNames.add(name)
-        }
-      }
-    }
-    const canonicalNames = new Set(Object.keys(servers))
-    for (const diskName of onDiskNames) {
-      if (!canonicalNames.has(diskName)) {
-        results.push({
-          code: 'DRIFT',
-          severity: 'warning',
-          message: `Orphan server \`${diskName}\` on disk in ${nativePath} but not in canonical config`,
-          agent: agentId,
-          server: diskName,
-        })
-      }
-    }
-
-    for (const [name, server] of Object.entries(servers)) {
-      const { entry } = adapter.compile(server)
-      if (existing === null) {
-        results.push({
-          code: 'DRIFT',
-          severity: 'warning',
-          message: `Managed server \`${name}\` missing from ${nativePath}`,
-          agent: agentId,
-          server: name,
-        })
-        continue
-      }
-      const parsed = parseNativeEntry(
-        existing,
-        name,
-        adapter.capabilities.rootKey,
-      )
-      if (parsed === null) {
-        results.push({
-          code: 'DRIFT',
-          severity: 'warning',
-          message: `Managed server \`${name}\` missing from ${nativePath}`,
-          agent: agentId,
-          server: name,
-        })
-        continue
-      }
-      if (!deepEqual(normalizeEntry(entry), normalizeEntry(parsed))) {
-        results.push({
-          code: 'DRIFT',
-          severity: 'warning',
-          message: `Managed server \`${name}\` drifted on disk for ${agentId}`,
-          agent: agentId,
-          server: name,
-        })
-      }
-    }
-
-    // (b) Plugin files in .agents/plugins/<name>/ for canonical servers.
-    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-    const pluginsDir = join(base, '.agents', 'plugins')
-    const includeAntigravity =
-      adapter.capabilities.layout === 'per-plugin' || agentId === 'antigravity'
-    for (const name of canonicalNames) {
-      const pluginDir = join(pluginsDir, name)
-      const pluginJson = join(pluginDir, 'plugin.json')
-      const mcpJson = join(pluginDir, 'mcp.json')
-      const mcpConfigJson = join(pluginDir, 'mcp_config.json')
-
-      let missing: string[] = []
-      if (!existsSync(pluginJson)) missing.push('plugin.json')
-      if (!existsSync(mcpJson)) missing.push('mcp.json')
-      if (includeAntigravity && !existsSync(mcpConfigJson)) {
-        missing.push('mcp_config.json')
-      }
-
-      if (missing.length > 0) {
-        results.push({
-          code: 'DRIFT',
-          severity: 'warning',
-          message: `Plugin \`${name}\` missing ${missing.join(', ')} in ${pluginDir}`,
-          agent: agentId,
-          server: name,
-        })
-      }
-    }
-  }
-
-  // 5. State check — corrupt state; targets pointing at unsupported scopes.
-  //    Gate on `adapter.capabilities.scopes.includes(scope)` so antigravity
-  //    (per-plugin layout, no single config path) is not a false positive.
-  for (const w of stateResult.warnings) {
-    results.push({
-      code: 'STATE',
-      severity: 'error',
-      message: w,
-    })
-  }
-  for (const agentId of targets) {
-    const adapter = getAdapter(agentId)
-    if (!adapter.capabilities.scopes.includes(scope)) {
-      results.push({
-        code: 'STATE',
-        severity: 'warning',
-        message: `Target \`${agentId}\` does not support ${scope} scope`,
-        agent: agentId,
-      })
-    }
-  }
-
-  // 6. Hygiene — .env tracked by Git; literal/plaintext secret findings.
-  //    Missing env vars are reported only under ENV (check #2), never here.
-  if (isGitTracked(ctx.cwd, '.env')) {
-    results.push({
-      code: 'HYGIENE',
-      severity: 'warning',
-      message: `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it`,
-    })
-  }
-  for (const [name, server] of Object.entries(servers)) {
-    for (const field of placeholderFields(server)) {
-      const phs = parsePlaceholders(field.value)
-      // A literal (non-placeholder) value under a secret-like key is a
-      // plaintext secret finding: it should use \`${VAR}\` instead.
-      if (phs.length === 0 && SECRET_KEY_RE.test(field.name)) {
-        results.push({
-          code: 'HYGIENE',
-          severity: 'warning',
-          message: `Plaintext secret in server \`${name}\` field \`${field.name}\`: use \${VAR} instead of a literal value`,
-          server: name,
-          field: field.name,
-        })
-      }
-    }
-  }
-
-  renderResults(ui, results, strict)
-
-  const errors = results.filter((r) => r.severity === 'error').length
-  const warnings = results.filter((r) => r.severity === 'warning').length
-  return { errors, warnings, results }
-}
-
-/** Render results through the UI. */
-function renderResults(
-  ui: ReturnType<typeof createUiAndCtx>['ui'],
-  results: DoctorResult[],
-  strict: boolean,
-): void {
-  if (results.length === 0) {
-    ui.note('doctor: no issues found')
-    return
-  }
-  for (const r of results) {
-    const prefix = r.severity === 'error' ? 'error' : 'warn'
-    const parts = [r.code]
-    if (r.server) parts.push(`\`${r.server}\``)
-    if (r.field) parts.push(`\`${r.field}\``)
-    ui[prefix](`${parts.join(' ')}: ${r.message}`)
-  }
-  const errs = results.filter((r) => r.severity === 'error').length
-  const warns = results.filter((r) => r.severity === 'warning').length
-  ui.note(
-    `doctor: ${errs} error(s), ${warns} warning(s)${strict ? ' (strict mode)' : ''}`,
-  )
-}
-
-/** Check if a path is absolute. */
-function isAbsolutePath(p: string, platform: NodeJS.Platform): boolean {
-  return (
-    p.startsWith('/') || (platform === 'win32' && /^[a-zA-Z]:[\\/]/.test(p))
-  )
-}
-
-/** Check if a file is executable. */
-function isExecutable(p: string, platform: NodeJS.Platform): boolean {
-  try {
-    if (platform === 'win32') return true
-    const stat = existsSync(p) ? statSync(p) : null
-    return Boolean(stat?.isFile() && (stat.mode & 0o111) !== 0)
-  } catch {
-    return false
-  }
-}
-
-/** Resolve a command in PATH (respecting PATHEXT on Windows). */
-function which(
-  cmd: string,
-  env: NodeJS.ProcessEnv,
-  platform: NodeJS.Platform,
-): string | null {
-  const pathEnv = env.PATH || env.Path || env.path || ''
-  const pathExt =
-    platform === 'win32'
-      ? env.PATHEXT || env.Pathext || env.pathext || '.exe;.cmd;.bat;.ps1'
-      : ''
-  const exts = pathExt.split(';').filter(Boolean)
-
-  for (const dir of pathEnv
-    .split(platform === 'win32' ? ';' : ':')
-    .filter(Boolean)) {
-    const candidates =
-      exts.length > 0
-        ? exts.map((e) => join(dir, `${cmd}${e}`))
-        : [join(dir, cmd)]
-    for (const cand of candidates) {
-      try {
-        if (
-          existsSync(cand) &&
-          (platform === 'win32' || isExecutable(cand, platform))
-        ) {
-          return cand
-        }
-      } catch {
-        // ignore
-      }
-    }
-  }
-  return null
-}
-
-/** Fields that can contain placeholders. */
-function placeholderFields(
-  server: CanonicalServer,
-): Array<{ name: string; value: string }> {
-  const fields: Array<{ name: string; value: string }> = []
-  if (isStdioServer(server)) {
-    fields.push({ name: 'command', value: server.command })
-    for (const [i, arg] of (server.args ?? []).entries()) {
-      fields.push({ name: `args[${i}]`, value: arg })
-    }
-    if (server.env) {
-      for (const [k, v] of Object.entries(server.env)) {
-        fields.push({ name: `env.${k}`, value: v })
-      }
-    }
-  } else {
-    fields.push({ name: 'url', value: server.url })
-    if (server.headers) {
-      for (const [k, v] of Object.entries(server.headers)) {
-        fields.push({ name: `headers.${k}`, value: v })
-      }
-    }
-  }
-  return fields
-}
-
-/** Parse the whole native file object under `rootKey` (best-effort JSONC). */
-function parseNativeEntryWhole(
-  content: string,
-  rootKey: string | undefined,
-): Record<string, unknown> | null {
-  if (!rootKey) return null
-  try {
-    const errors: { error: number; offset: number; length: number }[] = []
-    const parsed = parse(content, errors) as Record<string, unknown>
-    if (errors.length > 0) return null
-    const rootVal = parsed[rootKey]
-    if (rootVal && typeof rootVal === 'object' && !Array.isArray(rootVal)) {
-      return rootVal as Record<string, unknown>
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-/** Parse a native file entry for a server name under `rootKey` only. */
-function parseNativeEntry(
-  content: string,
-  name: string,
-  rootKey: string | undefined,
-): Record<string, unknown> | null {
-  if (!rootKey) return null
-  const whole = parseNativeEntryWhole(content, rootKey)
-  if (!whole) return null
-  const entry = whole[name]
-  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
-    return entry as Record<string, unknown>
-  }
-  return null
-}
-
-/** Normalize an entry for drift comparison (strip formatting differences, sort keys). */
-function normalizeEntry(entry: unknown): unknown {
-  if (entry === null || entry === undefined) return entry
-  if (Array.isArray(entry)) return entry.map(normalizeEntry)
-  if (typeof entry === 'object') {
-    const normalized: Record<string, unknown> = {}
-    const keys = Object.keys(entry as Record<string, unknown>).sort()
-    for (const k of keys) {
-      normalized[k] = normalizeEntry((entry as Record<string, unknown>)[k])
-    }
-    return normalized
-  }
-  return entry
-}
-
-/** Deep equality check (key-order invariant via sorted-key normalization). */
-function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(normalizeEntry(a)) === JSON.stringify(normalizeEntry(b))
-}
-
-export const doctorCommand = defineCommand({
-  meta: {
-    name: 'doctor',
-    description: 'Audit schema validity, env vars, runtime binaries, and drift',
-  },
-  args: {
-    strict: {
-      type: 'boolean',
-      alias: 's',
-      description: 'Promote warnings to errors (exit 1)',
-    },
-    global: {
-      type: 'boolean',
-      alias: 'g',
-      description: 'Operate on the global agent configuration',
-    },
-    agents: {
-      type: 'string',
-      description:
-        'Comma-separated target agents (e.g. claude-code,antigravity)',
-    },
-  },
-  run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
-    const dryRun = isDryRun(args)
-    const flag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
-
-    const summary = await runDoctor({
-      scope,
-      ctx,
-      flag,
-      dryRun,
-      strict: args.strict === true,
-    })
-
-    if (summary.errors > 0 || (summary.warnings > 0 && args.strict === true)) {
-      process.exit(1)
-    }
-  },
-})
-````
-
-## File: src/commands/import.command.ts
-````typescript
-/**
- * `import` command (§11).
- *
- * Scan every adapter for the active scope, extract, normalize, deduplicate /
- * conflict-resolve, apply the secret policy, merge into canonical (existing
- * entries win unless `--force`), seed state names for all scanned agents, then
- * `sync` unless `--no-sync`. Native files are never deleted.
- */
-
-import { defineCommand } from 'citty'
-import { join } from 'node:path'
-import { readdirSync, statSync } from 'node:fs'
-import {
-  createUiAndCtx,
-  configPath,
-  persistCanonicalConfig,
-  persistSyncState,
-  isDryRun,
-  isNoSyncFlag,
-  parseAgentsFlag,
-  formatConfigValidationError,
-  formatDryRunActions,
-} from '$/src/commands/util'
-import { runSync } from '$/src/commands/sync'
-import { resolveTargetsAsync, adapters } from '$/src/adapters/index'
-import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
-import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
-import { loadState, type SyncState } from '$/src/core/state'
-import {
-  planSecretExtraction,
-  applySecretExtraction,
-  appendToDotenv,
-  syncEnvExample,
-} from '$/src/core/env'
-import { readTextFile } from '$/src/core/fs-atomic'
-import type { AgentId } from '$/src/adapters/types'
-import type { CanonicalServer } from '$/src/core/schema'
-import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import * as antigravity from '$/src/adapters/antigravity'
-
-export const importCommand = defineCommand({
-  meta: {
-    name: 'import',
-    description: 'Consolidate existing agent MCP configs into .agents/mcp.json',
-  },
-  args: {
-    'no-sync': {
-      type: 'boolean',
-      description: 'Import into canonical without running sync afterwards',
-    },
-    force: {
-      type: 'boolean',
-      alias: 'f',
-      description: 'Overwrite conflicting canonical entries',
-    },
-    'extract-secrets': {
-      type: 'boolean',
-      description: 'Write detected secrets to .env (warn-only by default)',
-    },
-  },
-  run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
-    const path = configPath(scope, ctx)
-    const dryRun = isDryRun(args)
-    const noSync = isNoSyncFlag(args, rawArgs)
-    const force = args.force === true
-    const extractSecrets = args['extract-secrets'] === true
-    const yes = args.yes === true
-    const agentsFlag = parseAgentsFlag(args, rawArgs)
-
-    // Load + validate canonical config. A missing config is tolerated (import
-    // creates it); an invalid one is reported as a structured error.
-    let validated
-    try {
-      validated = loadValidatedConfig(scope, ctx)
-    } catch (err) {
-      if (err instanceof ConfigValidationError) {
-        ui.error(formatConfigValidationError(err))
-        process.exit(1)
-      }
-      throw err
-    }
-    let canonical: Record<string, CanonicalServer> = {}
-    let schemaUrl = DEFAULT_SCHEMA_URL
-    if (validated) {
-      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
-      canonical = {
-        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
-      }
-    }
-
-    const stateResult = loadState(scope, ctx)
-    const state = stateResult.state
-
-    const allWarnings: string[] = []
-    // name -> [{agentId, server}] so cross-agent conflicts can be detected.
-    const candidates: Map<
-      string,
-      Array<{ agentId: AgentId; server: CanonicalServer }>
-    > = new Map()
-    const extractedByAgent: Record<AgentId, string[]> = {} as Record<
-      AgentId,
-      string[]
-    >
-    const scannedAgents: AgentId[] = []
-    // Planned file operations for the --dry-run preview.
-    const plannedWrites: { type: 'write' | 'remove'; path: string }[] = []
-
-    function addCandidate(
-      agentId: AgentId,
-      name: string,
-      server: CanonicalServer,
-    ): void {
-      const arr = candidates.get(name) ?? []
-      arr.push({ agentId, server })
-      candidates.set(name, arr)
-    }
-
-    // 1. Scan every non-antigravity adapter (single native config file).
-    for (const adapter of adapters) {
-      // antigravity is per-plugin: handled separately below.
-      if (adapter.id === 'antigravity') continue
-
-      const nativePath = adapter.getConfigPath(scope, ctx)
-      if (nativePath === null) continue
-      const exists = await adapter.detect(scope, ctx)
-      if (!exists) continue
-      scannedAgents.push(adapter.id as AgentId)
-
-      const existing = readTextFile(nativePath)
-      if (existing === null) continue
-
-      const { servers, warnings } = adapter.extractServers(existing, scope)
-      allWarnings.push(...warnings.map((w) => w.message))
-      for (const [name, server] of Object.entries(servers)) {
-        addCandidate(adapter.id as AgentId, name, server)
-      }
-    }
-
-    // 1b. Antigravity (layout === 'per-plugin'): scan
-    // <base>/.agents/plugins/*/mcp_config.json and call antigravity.extractServers().
-    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-    const pluginsDir = join(base, '.agents', 'plugins')
-    let antigravityEntries: string[] = []
-    try {
-      antigravityEntries = readdirSync(pluginsDir)
-    } catch {
-      antigravityEntries = []
-    }
-    for (const entry of antigravityEntries) {
-      const mcpConfigPath = join(pluginsDir, entry, 'mcp_config.json')
-      let isFile = false
-      try {
-        isFile = statSync(mcpConfigPath).isFile()
-      } catch {
-        isFile = false
-      }
-      if (!isFile) continue
-      const existing = readTextFile(mcpConfigPath)
-      if (existing === null) continue
-      const { servers, warnings } = antigravity.extractServers(existing, scope)
-      allWarnings.push(...warnings.map((w) => w.message))
-      for (const [name, server] of Object.entries(servers)) {
-        addCandidate('antigravity', name, server)
-      }
-      scannedAgents.push('antigravity')
-    }
-
-    // 2. Resolve cross-agent server conflicts.
-    const extracted: Record<string, CanonicalServer> = {}
-    for (const [name, defs] of candidates) {
-      const uniqueServers = [
-        ...new Map(
-          defs.map((d) => [JSON.stringify(d.server), d] as const),
-        ).values(),
-      ]
-      if (uniqueServers.length === 1) {
-        const winner = uniqueServers[0]!
-        extracted[name] = winner.server
-        extractedByAgent[winner.agentId] = [
-          ...(extractedByAgent[winner.agentId] ?? []),
-          name,
-        ]
-        continue
-      }
-
-      // Conflict: multiple agents define the same server differently.
-      defs.sort(
-        (a, b) =>
-          AGENT_ORDER.indexOf(a.agentId) - AGENT_ORDER.indexOf(b.agentId),
-      )
-      const winner = defs[0]!
-      const losers = defs.slice(1).map((d) => d.agentId)
-
-      if (yes || !ctx.isTTY) {
-        // Non-interactive (--yes / CI): deterministic AGENT_ORDER winner +
-        // warning naming both agents and the server.
-        allWarnings.push(
-          `Server \`${name}\` is defined by multiple agents (${losers.join(
-            ', ',
-          )}, ${winner.agentId}) with differing definitions; keeping ${winner.agentId}'s definition (AGENT_ORDER).`,
-        )
-        extracted[name] = winner.server
-        extractedByAgent[winner.agentId] = [
-          ...(extractedByAgent[winner.agentId] ?? []),
-          name,
-        ]
-      } else {
-        // Interactive TTY: prompt the user to choose which definition wins (or skip).
-        const options: Array<{
-          label: string
-          value: AgentId | '__skip__'
-        }> = defs.map((d) => ({
-          label: `${d.agentId}: ${JSON.stringify(d.server)}`,
-          value: d.agentId,
-        }))
-        options.push({ label: 'Skip this server', value: '__skip__' })
-        const chosen = await ui.select<AgentId | '__skip__'>({
-          message: `Conflict for server \`${name}\`: multiple agents define it differently. Choose which definition wins:`,
-          options,
-        })
-        if (chosen === '__skip__') {
-          continue
-        }
-        const pick = defs.find((d) => d.agentId === chosen)
-        if (!pick) continue
-        extracted[name] = pick.server
-        extractedByAgent[chosen] = [...(extractedByAgent[chosen] ?? []), name]
-      }
-    }
-
-    // Secret policy: plan extraction and optionally write to .env + .env.example.
-    const allWrites: Array<{ key: string; value: string }> = []
-    const allKeys: string[] = []
-    const extractedCanonical: Record<string, CanonicalServer> = {}
-    for (const [name, server] of Object.entries(extracted)) {
-      const { writes, replacements, warnings } = planSecretExtraction(
-        name,
-        server,
-        { policy: extractSecrets ? 'extract' : 'warn' },
-      )
-      allWarnings.push(...warnings)
-      for (const w of writes) {
-        allWrites.push(w)
-        allKeys.push(w.key)
-      }
-      extractedCanonical[name] = extractSecrets
-        ? applySecretExtraction(server, { writes, replacements, warnings })
-        : server
-    }
-    canonical = { ...canonical, ...extractedCanonical }
-
-    if (!dryRun && extractSecrets && allWrites.length > 0) {
-      // Project: <cwd>/.env ; Global: <homeDir>/.agents/.env
-      const dotenvPath =
-        scope === 'project'
-          ? join(ctx.cwd, '.env')
-          : join(ctx.homeDir, '.agents', '.env')
-      const examplePath =
-        scope === 'project'
-          ? join(ctx.cwd, '.env.example')
-          : join(ctx.homeDir, '.agents', '.env.example')
-      appendToDotenv(dotenvPath, allWrites)
-      syncEnvExample(examplePath, allKeys)
-    }
-
-    // Persist canonical config (B7: tolerate zero resolvable targets — still
-    // persist .agents/mcp.json and plugins, warn, hint sync instead of exit 1).
-    plannedWrites.push({ type: 'write', path })
-    if (!dryRun) {
-      persistCanonicalConfig(scope, ctx, {
-        $schema: schemaUrl,
-        mcpServers: canonical,
-      })
-
-      const nextState: SyncState = {
-        ...state,
-        scope,
-        targets: state.targets,
-        agents: { ...state.agents },
-      }
-      for (const agentId of scannedAgents) {
-        // Store the adapter's native path (not the canonical path).
-        const nativePath =
-          agentId === 'antigravity'
-            ? join(base, '.agents', 'plugins')
-            : (adapters
-                .find((a) => a.id === agentId)!
-                .getConfigPath(scope, ctx) ?? path)
-        nextState.agents[agentId] = {
-          path: nativePath,
-          names: extractedByAgent[agentId] ?? [],
-          updatedAt: new Date().toISOString(),
-        }
-      }
-      persistSyncState(scope, ctx, nextState)
-    }
-
-    if (!noSync && !dryRun) {
-      await runSync({
-        scope,
-        ctx,
-        flag: agentsFlag,
-        dryRun: false,
-        yes,
-        allowEmptyTargets: true,
-      })
-    } else if (!noSync && dryRun) {
-      await runSync({
-        scope,
-        ctx,
-        flag: agentsFlag,
-        dryRun: true,
-        yes,
-        allowEmptyTargets: true,
-      })
-    }
-
-    // Dry-run preview of planned file operations (zero disk writes).
-    if (dryRun && plannedWrites.length > 0) {
-      ui.note(formatDryRunActions(plannedWrites))
-    }
-
-    ui.note(
-      `Imported ${Object.keys(extracted).length} server(s) from ${scannedAgents.length} agent(s)`,
-    )
-    for (const w of allWarnings) {
-      ui.warn(w)
-    }
-  },
-})
-````
-
-## File: src/commands/init.command.ts
-````typescript
-/**
- * `init` command (§11).
- *
- * Scaffold `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents
- * (multi-select; `--agents` bypasses), persist `targets` in state. Existing
- * file → exit `1` unless `--force` (writes a `.bak.<timestamp>` first). Never
- * touches `.gitignore`. Non-interactive targets come from `--agents` or
- * detection; none → allow empty targets with a guidance hint (B7) instead of
- * `exit 1`.
- */
-
-import { defineCommand } from 'citty'
-import { existsSync } from 'node:fs'
-import {
-  createUiAndCtx,
-  configPath,
-  persistSyncState,
-  persistCanonicalConfig,
-  isDryRun,
-  parseAgentsFlag,
-  formatDryRunActions,
-} from '$/src/commands/util'
-import {
-  resolveTargetsAsync,
-  detectAgents,
-  adapters,
-} from '$/src/adapters/index'
-import { backupFile } from '$/src/core/fs-atomic'
-import { loadState } from '$/src/core/state'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
-import type { AgentId } from '$/src/adapters/types'
-import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-export const initCommand = defineCommand({
-  meta: {
-    name: 'init',
-    description: 'Scaffold .agents/mcp.json and select target agents',
-  },
-  args: {
-    force: {
-      type: 'boolean',
-      alias: 'f',
-      description:
-        'Overwrite an existing canonical config (writes a .bak first)',
-    },
-  },
-  run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
-    const path = configPath(scope, ctx)
-    const dryRun = isDryRun(args)
-    const force = args.force === true
-    const agentsFlag = parseAgentsFlag(args, rawArgs)
-
-    if (existsSync(path) && !force) {
-      ui.error(
-        `Canonical config already exists at ${path}. Use --force to overwrite.`,
-      )
-      process.exit(1)
-    }
-
-    if (existsSync(path) && force && !dryRun) {
-      backupFile(path)
-    }
-
-    const stateResult = loadState(scope, ctx)
-    const state = stateResult.state
-
-    let targets: AgentId[]
-    if (agentsFlag) {
-      targets = await resolveTargetsAsync({ flag: agentsFlag, state, ctx })
-    } else if (args.yes === true || !ctx.isTTY || ctx.env.CI === 'true') {
-      targets = await resolveTargetsAsync({ flag: undefined, state, ctx })
-    } else {
-      // Interactive: multi-select agents, pre-select detected agents (B7).
-      const detected = await detectAgents(scope, ctx)
-      const options = adapters.map((a) => ({
-        label: a.displayName,
-        value: a.id,
-      }))
-      const selected = await ui.multiselect<AgentId>({
-        message: 'Select target agents',
-        options,
-        initialValues: detected,
-      })
-      targets = selected
-    }
-
-    const plannedWrites: { type: 'write' | 'remove'; path: string }[] = []
-    plannedWrites.push({ type: 'write', path })
-
-    if (targets.length === 0) {
-      ui.warn(
-        'No target agents configured or detected. Continuing with an empty target list; run `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`) to sync later.',
-      )
-    }
-
-    if (!dryRun) {
-      persistCanonicalConfig(scope, ctx, {
-        $schema: DEFAULT_SCHEMA_URL,
-        mcpServers: {},
-      })
-      const nextState = {
-        ...state,
-        scope,
-        targets,
-        agents: { ...state.agents },
-      }
-      persistSyncState(scope, ctx, nextState)
-    }
-
-    // Dry-run preview of planned file operations (zero disk writes).
-    if (dryRun && plannedWrites.length > 0) {
-      ui.note(formatDryRunActions(plannedWrites))
-    }
-
-    ui.note(`Initialized ${scope} canonical config at ${path}`)
-    ui.note(`Targets: ${targets.join(', ') || '(none)'}`)
-  },
-})
-````
-
-## File: src/commands/list.command.ts
-````typescript
-/**
- * `list` command (§11).
- *
- * Read-only table: name, type, command/URL, per-agent sync status. `--all`
- * includes the global scope and marks shadowed entries (project wins).
- */
-
-import { defineCommand } from 'citty'
-import {
-  createUiAndCtx,
-  configPath,
-  isDryRun,
-  loadCanonicalOrExit,
-} from '$/src/commands/util'
-import { loadState } from '$/src/core/state'
-import type { ConfigScope } from '$/src/core/context'
-import type { AgentId } from '$/src/adapters/types'
-
-export const listCommand = defineCommand({
-  meta: {
-    name: 'list',
-    description: 'Inspect configured servers, targets, and sync state',
-  },
-  args: {
-    all: {
-      type: 'boolean',
-      alias: 'a',
-      description: 'Include global scope and mark shadowed entries',
-    },
-    global: {
-      type: 'boolean',
-      alias: 'g',
-      description: 'Operate on the global scope only',
-    },
-  },
-  run: async ({ args }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const includeAll = args.all === true
-    const scopes: ConfigScope[] = includeAll
-      ? ['project', 'global']
-      : args.global === true
-        ? ['global']
-        : ['project']
-
-    // Collect all server names from project scope first (for shadow detection).
-    const projectNames = new Set<string>()
-    const scopeData: Array<{
-      scope: ConfigScope
-      servers: Record<string, unknown>
-      state: Awaited<ReturnType<typeof loadState>>['state']
-    }> = []
-
-    for (const scope of scopes) {
-      const config = loadCanonicalOrExit(scope, ctx, ui)
-      const stateResult = loadState(scope, ctx)
-      const state = stateResult.state
-      const servers = config.mcpServers ?? {}
-      scopeData.push({ scope, servers, state })
-      if (scope === 'project') {
-        for (const name of Object.keys(servers)) {
-          projectNames.add(name)
-        }
-      }
-    }
-
-    for (const { scope, servers, state } of scopeData) {
-      const names = Object.keys(servers) as string[]
-
-      for (const name of names) {
-        const server = servers[name] as {
-          type?: string
-          command?: string
-          url?: string
-        }
-        const type = server.type ?? (server.url ? 'streamable-http' : 'stdio')
-        const displayType =
-          type === 'stdio'
-            ? 'command'
-            : type === 'streamable-http'
-              ? 'http'
-              : type
-        const isHttp = type === 'streamable-http' || type === 'sse'
-        const target = isHttp ? (server.url ?? '') : (server.command ?? '')
-
-        // Per-agent sync status: list which agents have this server synced.
-        const syncedAgents: string[] = []
-        for (const agentId of Object.keys(state.agents)) {
-          const agent = state.agents[agentId as AgentId]
-          if (agent?.names.includes(name)) {
-            syncedAgents.push(agentId)
-          }
-        }
-        const syncStatus =
-          syncedAgents.length > 0
-            ? `synced (${syncedAgents.join(', ')})`
-            : 'not-synced'
-
-        const shadowed =
-          includeAll && scope === 'global' && projectNames.has(name)
-            ? ' (shadowed)'
-            : ''
-
-        ui.note(
-          `${name.padEnd(14)} ${displayType.padEnd(8)} ${target.padEnd(24)} ${syncStatus}${shadowed}`,
-        )
-      }
-    }
-
-    const totalNames = new Set(scopeData.flatMap((d) => Object.keys(d.servers)))
-      .size
-    if (totalNames === 0) {
-      ui.note('No servers configured.')
-    }
-  },
-})
-````
-
-## File: src/commands/sync.command.ts
-````typescript
-/**
- * `sync` command definition for citty (§11).
- *
- * Reuses `runSync` from `./sync` and wires citty args into `SyncOptions`.
- */
-
-import { defineCommand } from 'citty'
-import { runSync, type SyncOptions } from './sync'
-import { createUiAndCtx, parseAgentsFlag } from '$/src/commands/util'
-
-export const syncCommand = defineCommand({
-  meta: {
-    name: 'sync',
-    description:
-      'Compile .agents/mcp.json into all targeted agent config files',
-  },
-  args: {},
-  run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = args.global ? 'global' : 'project'
-    const flag = parseAgentsFlag(args, rawArgs)
-    const dryRun = args['dry-run'] === true
-
-    const summary = await runSync({
-      scope,
-      ctx,
-      flag,
-      dryRun,
-      yes: args.yes === true,
-    })
-
-    if (summary.errors.length > 0 && !dryRun) {
-      process.exit(1)
-    }
-  },
-})
-````
-
 ## File: src/core/env.ts
 ````typescript
 /**
@@ -10453,7 +12002,7 @@ export const syncCommand = defineCommand({
 import { basename, dirname, join } from 'node:path'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import { AGENTS_DIR, ENV_FILE, STATE_FILE } from '$/src/config'
+import { AGENTS_DIR, ENV_FILE } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
 import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { SECRET_KEY_RE, derivedKey } from '$/src/core/placeholder'
@@ -10839,7 +12388,8 @@ function deepCloneServer(server: CanonicalServer): CanonicalServer {
 /**
  * Append `writes` to the `.env` at `path`, creating it with mode `0600` when
  * missing. Never overwrites an existing key; warns when a key exists with a
- * different value. Ensures `.env` (and the sync state) are git-ignored first.
+ * different value. Ensures `.env` (and only `.env`) is git-ignored first;
+ * the sync state file is never added to `.gitignore`.
  */
 export function appendToDotenv(
   path: string,
@@ -10853,7 +12403,7 @@ export function appendToDotenv(
   // ~/.agents/.env (parent dir is .agents), project scope writes to <cwd>/.env.
   const isProjectScope = basename(rootDir) !== AGENTS_DIR
   if (isProjectScope) {
-    ensureIgnored(rootDir, [ENV_FILE, `${AGENTS_DIR}/${STATE_FILE}`])
+    ensureIgnored(rootDir, [ENV_FILE])
   }
 
   let existing: Record<string, string> = {}
@@ -10938,134 +12488,6 @@ export function syncEnvExample(
   }
 
   return { added, warnings }
-}
-````
-
-## File: src/core/fs-atomic.ts
-````typescript
-import {
-  closeSync,
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  renameSync,
-  unlinkSync,
-  writeSync as fsWriteSync,
-  fsyncSync as fsFsyncSync,
-  readFileSync,
-} from 'node:fs'
-import { dirname, join } from 'node:path'
-
-/**
- * Read a text file, returning `null` when it does not exist (ENOENT).
- * Any other error propagates.
- */
-export function readTextFile(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf8')
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null
-    }
-    throw err
-  }
-}
-
-/**
- * Atomic write: write to a temp file in the **same directory**, fsync, then
- * rename over the target. On Windows, `rename` over an existing file can fail,
- * so fall back to `copyFile` + `unlink` without removing the target first.
- *
- * The temp file is created with `O_EXCL` plus a random suffix to avoid
- * symlink surprises and collisions between concurrent writers.
- *
- * `mode` applies to the temp file (e.g. `0o600` for `.env`); after rename the
- * platform's umask may adjust the final mode, so callers requiring an exact
- * mode should `chmod` the target afterwards.
- */
-export interface WriteFileAtomicOptions {
-  mode?: number
-}
-
-export function writeFileAtomic(
-  path: string,
-  content: string,
-  options: WriteFileAtomicOptions = {},
-): void {
-  const dir = dirname(path)
-  // Ensure the parent directory exists so callers don't have to pre-create it.
-  mkdirSync(dir, { recursive: true })
-  const temp = createTempPath(dir)
-  const fd = openSync(temp, 'wx', options.mode ?? 0o644)
-  try {
-    fsWriteSync(fd, Buffer.from(content, 'utf8'))
-    fsFsyncSync(fd)
-    closeSync(fd)
-  } catch (err) {
-    try {
-      closeSync(fd)
-    } catch {
-      // ignore
-    }
-    try {
-      unlinkSync(temp)
-    } catch {
-      // ignore
-    }
-    throw err
-  }
-
-  try {
-    renameSync(temp, path)
-  } catch (renameErr) {
-    // Windows: rename over an existing file may fail. Fall back to
-    // copyFile + unlink so we never clobber the target before the copy is safe.
-    if (copyFileOverExisting(temp, path)) {
-      try {
-        unlinkSync(temp)
-      } catch {
-        // ignore
-      }
-      return
-    }
-    // Clean up the orphaned temp and rethrow the original rename error.
-    try {
-      unlinkSync(temp)
-    } catch {
-      // ignore
-    }
-    throw renameErr
-  }
-}
-
-function createTempPath(dir: string): string {
-  const random = Math.random().toString(36).slice(2, 14)
-  const timestamp = Date.now().toString(36)
-  return join(dir, `.agents-mcp-tmp-${timestamp}-${random}`)
-}
-
-function copyFileOverExisting(src: string, dest: string): boolean {
-  try {
-    copyFileSync(src, dest)
-    return true
-  } catch {
-    return false
-  }
-}
-
-/**
- * Copy `path` to `<path>.bak.<ISO timestamp>` before a `--force` operation.
- * Returns the backup path, or `null` when the source does not exist.
- */
-export function backupFile(path: string): string | null {
-  if (!existsSync(path)) {
-    return null
-  }
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-  const backup = `${path}.bak.${timestamp}`
-  copyFileSync(path, backup)
-  return backup
 }
 ````
 
@@ -11632,139 +13054,108 @@ export function readPluginManifest(
 }
 ````
 
-## File: src/sources/direct.ts
+## File: src/core/schema.ts
 ````typescript
+import { z } from 'zod'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+
+export const AgentIdSchema = z.enum([
+  'claude-code',
+  'cursor',
+  'vscode',
+  'opencode',
+  'windsurf',
+  'zed',
+  'antigravity',
+])
+
+/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
+const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
+
+/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
+const CWD_PATTERN =
+  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
+
+export const StdioServerSchema = z.strictObject({
+  type: z.literal('stdio'),
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  env: z
+    .record(z.string(), z.string())
+    .optional()
+    .refine(
+      (env) =>
+        !env ||
+        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
+      {
+        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
+      },
+    ),
+  cwd: z.string().regex(CWD_PATTERN).optional(),
+})
+
+export const StreamableHttpServerSchema = z.strictObject({
+  type: z.literal('streamable-http'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const SseServerSchema = z.strictObject({
+  type: z.literal('sse'),
+  url: z.string().min(1),
+  headers: z.record(z.string(), z.string()).optional(),
+})
+
+export const CanonicalServerSchema = z.discriminatedUnion('type', [
+  StdioServerSchema,
+  StreamableHttpServerSchema,
+  SseServerSchema,
+])
+
+export const CanonicalMcpConfigSchema = z.strictObject({
+  $schema: z.literal(DEFAULT_SCHEMA_URL),
+  mcpServers: z.record(z.string(), CanonicalServerSchema),
+})
+
+export type CanonicalMcpConfig = z.infer<typeof CanonicalMcpConfigSchema>
+export type CanonicalServer = z.infer<typeof CanonicalServerSchema>
+
+export type StdioServer = z.infer<typeof StdioServerSchema>
+export type StreamableHttpServer = z.infer<typeof StreamableHttpServerSchema>
+export type SseServer = z.infer<typeof SseServerSchema>
+
 /**
- * Direct source resolver (§10.2).
- *
- * Parses CLI flags (--command, --arg, --http, --env, --header, --cwd, --name)
- * into a `ResolvedServerPackage`.
+ * Type guards over the canonical `type` discriminator.
  */
-
-import parseArgv from 'string-argv'
-import type { ResolvedServerPackage, RequiredEnvVar } from '$/src/sources/types'
-import { SERVER_NAME_PATTERN } from '$/src/config'
-import type { CanonicalServer, StdioServer } from '$/src/core/schema'
-import { collectRequiredVars } from '$/src/core/placeholder'
-import { isSecretValue } from '$/src/core/env'
-import { isStdioServer, isHttpServer } from '$/src/core/schema'
-
-export interface DirectOptions {
-  command?: string
-  arg?: string[]
-  http?: string
-  sse?: string
-  env?: string[]
-  header?: string[]
-  cwd?: string
-  name?: string
+export function isStdioServer(server: CanonicalServer): server is StdioServer {
+  return server.type === 'stdio'
 }
 
-export function resolveDirect(options: DirectOptions): ResolvedServerPackage {
-  let command: string | undefined
-  let args: string[] = []
-
-  if (options.command) {
-    if (options.arg && options.arg.length > 0) {
-      command = options.command
-      args = [...options.arg]
-    } else {
-      const tokens = parseArgv(options.command)
-      if (tokens.length === 0) {
-        throw new Error('--command requires a non-empty command')
-      }
-      command = tokens[0]
-      args = tokens.slice(1)
-    }
-  }
-
-  let type: 'stdio' | 'streamable-http' | 'sse' = 'stdio'
-  let url: string | undefined
-  const headers: Record<string, string> = {}
-  const env: Record<string, string> = {}
-
-  if (options.sse) {
-    type = 'sse'
-    url = options.sse
-  } else if (options.http) {
-    type = 'streamable-http'
-    url = options.http
-  }
-
-  if (options.env) {
-    for (const item of options.env) {
-      const sep = item.indexOf('=')
-      if (sep === -1) {
-        // Reference only: KEY (warn if unresolved — handled by caller)
-        env[item] = `\${${item}}`
-      } else {
-        env[item.slice(0, sep)] = item.slice(sep + 1)
-      }
-    }
-  }
-
-  if (options.header) {
-    for (const item of options.header) {
-      const sep = item.indexOf(':')
-      if (sep === -1) {
-        throw new Error(`--header must be "Name: Value", got: ${item}`)
-      }
-      headers[item.slice(0, sep).trim()] = item.slice(sep + 1).trim()
-    }
-  }
-
-  const definition: CanonicalServer =
-    type === 'stdio'
-      ? {
-          type: 'stdio',
-          command: command as string,
-          args: args.length > 0 ? args : [],
-          env: Object.keys(env).length > 0 ? env : undefined,
-        }
-      : {
-          type,
-          url: url as string,
-          headers: Object.keys(headers).length > 0 ? headers : undefined,
-        }
-
-  if (options.cwd && type === 'stdio') {
-    ;(definition as StdioServer).cwd = options.cwd
-  }
-
-  const suggestedName = options.name ?? suggestName(definition)
-
-  return {
-    suggestedName,
-    definition,
-    requiredEnv: collectRequiredVars(definition),
-    source: { type: 'direct', ref: suggestedName },
-  }
+export function isHttpServer(
+  server: CanonicalServer,
+): server is StreamableHttpServer | SseServer {
+  return server.type === 'streamable-http' || server.type === 'sse'
 }
 
-function suggestName(def: CanonicalServer): string {
-  if (isHttpServer(def) && def.url) {
-    try {
-      const u = new URL(def.url)
-      const base = u.hostname.replace(/[^a-z0-9]/g, '-')
-      const first = u.pathname.split('/').filter(Boolean)[0] ?? ''
-      const name = [base, first].filter(Boolean).join('-') || base
-      return sanitize(name)
-    } catch {
-      return sanitize(def.url)
-    }
-  }
-  if (isStdioServer(def) && def.command) {
-    return sanitize((def.command as string).split(/[ /]/)[0] ?? '')
-  }
-  return 'server'
-}
+/**
+ * Non-JSON-Schema checks that cannot be expressed in the generated Draft 2020-12
+ * document. Never fails; returns warnings only.
+ */
+export function validateConfig(config: unknown): { warnings: string[] } {
+  const warnings: string[] = []
 
-function sanitize(name: string): string {
-  const cleaned = name.toLowerCase().replace(/[^a-z0-9._-]/g, '-')
-  if (!SERVER_NAME_PATTERN.test(cleaned)) {
-    return 'server'
+  if (typeof config === 'object' && config !== null && '$schema' in config) {
+    const schemaUrl = (config as { $schema?: unknown }).$schema
+    if (typeof schemaUrl !== 'string' || schemaUrl !== DEFAULT_SCHEMA_URL) {
+      warnings.push(
+        `$schema mismatch: expected ${DEFAULT_SCHEMA_URL}, got ${String(schemaUrl)}`,
+      )
+    }
+  } else {
+    warnings.push(`Missing required \$schema; expected ${DEFAULT_SCHEMA_URL}`)
   }
-  return cleaned
+
+  return { warnings }
 }
 ````
 
@@ -12415,259 +13806,35 @@ async function searchMcpRegistry(
 }
 ````
 
-## File: src/ui/prompts.ts
+## File: src/config.ts
 ````typescript
-/**
- * UI & prompts port (§11–§12).
- *
- * `PromptUi` is the single abstraction for all user interaction. Commands never
- * import `@clack/prompts` directly; they go through this port. Two
- * implementations exist:
- *
- * - `createClackUi()` — interactive TTY, backed by `@clack/prompts`.
- * - `createAutoUi()` — non-interactive (`--yes` / `CI=true` / tests), backed by
- *   supplied defaults.
- */
+export const AGENT_PLUGINS_MCP_SCHEMA_URL =
+  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+export const AGENT_PLUGINS_MCP_SPEC_URL =
+  'https://agent-plugins.org/plugin-authors/mcp-servers'
+export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
+export const SCHEMA_DRAFT = 'draft-2020-12'
 
-export interface Option<T> {
-  label: string
-  value: T
-  hint?: string
-}
+export const AGENTS_DIR = '.agents'
+export const CONFIG_FILE = 'mcp.json'
+export const STATE_FILE = 'mcp-lock.json'
+export const LEGACY_STATE_FILE = '.mcp-sync-state.json'
+export const STATE_VERSION = 1
+export const ENV_FILE = '.env'
+export const ENV_EXAMPLE_FILE = '.env.example'
 
-export interface Spinner {
-  start(): void
-  stop(message?: string): void
-}
+export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
 
-export interface PromptUi {
-  intro(message: string): void
-  outro(message: string): void
-  note(message: string, title?: string): void
-  warn(message: string): void
-  error(message: string): void
-  confirm(opts: { message: string; initialValue: boolean }): Promise<boolean>
-  select<T>(opts: {
-    message: string
-    options: Option<T>[]
-    initialValue?: T
-  }): Promise<T>
-  multiselect<T>(opts: {
-    message: string
-    options: Option<T>[]
-    initialValues?: T[]
-  }): Promise<T[]>
-  text(opts: {
-    message: string
-    placeholder?: string
-    defaultValue?: string
-    validate?: (v: string) => string | undefined
-  }): Promise<string>
-  password(opts: { message: string }): Promise<string>
-  spinner(message: string): Spinner
-}
-
-/**
- * Interactive UI backed by `@clack/prompts`. Only used on a TTY.
- *
- * `import { createClackUi }` is intentionally lazy: the clack dependency is
- * only pulled in when this module is loaded, and commands never reference it
- * directly.
- */
-/**
- * Shape of the dynamically loaded `@clack/prompts` module surface we touch.
- * Kept inline (not imported at module scope) so `@clack/prompts` stays off the
- * module graph for the non-interactive path.
- */
-type ClackModule = {
-  intro(message: string): void
-  outro(message: string): void
-  note(message: string, title?: string): void
-  log: {
-    warn(message: string): void
-    error(message: string): void
-  }
-  isCancel(value: unknown): boolean
-  confirm(opts: { message: string; initialValue?: boolean }): Promise<unknown>
-  select(opts: {
-    message: string
-    options: Array<{ label: string; value: unknown; hint?: string }>
-    initialValue?: unknown
-  }): Promise<unknown>
-  multiselect(opts: {
-    message: string
-    options: Array<{ label: string; value: unknown; hint?: string }>
-    initialValues?: unknown[]
-  }): Promise<unknown[]>
-  text(opts: {
-    message: string
-    placeholder?: string
-    defaultValue?: string
-    validate?: (v: string) => string | undefined
-  }): Promise<unknown>
-  password(opts: { message: string }): Promise<unknown>
-  spinner(message: string): { start(): void; stop(message?: string): void }
-}
-
-export function createClackUi(): PromptUi {
-  // Dynamic import keeps `@clack/prompts` out of the module graph for the
-  // non-interactive path and avoids loading clack in non-TTY contexts. We use
-  // `await import()` (ESM) instead of `require()` because `dist/index.js` is an
-  // ESM bundle and `require` is not defined in ES module scope.
-  async function loadClack(): Promise<ClackModule> {
-    return (await import('@clack/prompts')) as unknown as ClackModule
-  }
-
-  async function assertNotCancel<T>(result: T): Promise<T> {
-    const clack = await loadClack()
-    if (clack.isCancel(result)) {
-      process.exit(130)
-    }
-    return result
-  }
-
-  // Preload clack once per UI instance. The `.catch` swallows import rejection
-  // so we never leave an unhandled rejection. Write methods fall back to a
-  // synchronous console write until (and unless) clack resolves, then use clack
-  // — never both, never duplicated.
-  let clack: ClackModule | null = null
-  void loadClack()
-    .then((c) => {
-      clack = c
-    })
-    .catch(() => {})
-
-  return {
-    intro(message: string) {
-      if (clack) {
-        clack.intro(message)
-      } else {
-        console.log(message)
-      }
-    },
-    outro(message: string) {
-      if (clack) {
-        clack.outro(message)
-      } else {
-        console.log(message)
-      }
-    },
-    note(message: string, title?: string) {
-      if (clack) {
-        clack.note(message, title)
-      } else {
-        console.log(title ? `${title}: ${message}` : message)
-      }
-    },
-    warn(message: string) {
-      if (clack) {
-        clack.log.warn(message)
-      } else {
-        console.warn(message)
-      }
-    },
-    error(message: string) {
-      if (clack) {
-        clack.log.error(message)
-      } else {
-        console.error(message)
-      }
-    },
-    confirm(opts: {
-      message: string
-      initialValue: boolean
-    }): Promise<boolean> {
-      return (async () => {
-        const clack = await loadClack()
-        const result = await clack.confirm({
-          message: opts.message,
-          initialValue: opts.initialValue,
-        })
-        return (await assertNotCancel(result as unknown)) as boolean
-      })()
-    },
-    async select<T>(opts: {
-      message: string
-      options: Option<T>[]
-      initialValue?: T
-    }): Promise<T> {
-      const clack = await loadClack()
-      const result = await clack.select({
-        message: opts.message,
-        options: opts.options as unknown as Array<{
-          label: string
-          value: unknown
-          hint?: string
-        }>,
-        initialValue: opts.initialValue as unknown,
-      })
-      return (await assertNotCancel(result as unknown)) as T
-    },
-    async multiselect<T>(opts: {
-      message: string
-      options: Option<T>[]
-      initialValues?: T[]
-    }): Promise<T[]> {
-      const clack = await loadClack()
-      const result = await clack.multiselect({
-        message: opts.message,
-        options: opts.options as unknown as Array<{
-          label: string
-          value: unknown
-          hint?: string
-        }>,
-        initialValues: (opts.initialValues ?? []) as unknown[],
-      })
-      return (await assertNotCancel(result as unknown)) as T[]
-    },
-    async text(opts: {
-      message: string
-      placeholder?: string
-      defaultValue?: string
-      validate?: (v: string) => string | undefined
-    }): Promise<string> {
-      const clack = await loadClack()
-      const result = await clack.text({
-        message: opts.message,
-        placeholder: opts.placeholder,
-        defaultValue: opts.defaultValue,
-        validate: opts.validate,
-      })
-      return (await assertNotCancel(result as unknown)) as string
-    },
-    async password(opts: { message: string }): Promise<string> {
-      const clack = await loadClack()
-      const result = await clack.password({ message: opts.message })
-      return (await assertNotCancel(result as unknown)) as string
-    },
-    spinner(message: string): Spinner {
-      let spin: { start(): void; stop(message?: string): void } | null = null
-      let started = false
-      let stopped = false
-      return {
-        start() {
-          if (started) return
-          started = true
-          void loadClack().then((c) => {
-            if (stopped) return // stop() already ran: do not start an orphan spinner
-            spin = c.spinner(message)
-            spin.start()
-          })
-        },
-        stop(message?: string) {
-          stopped = true
-          if (clack && spin) {
-            spin.stop(message)
-            return
-          }
-          if (message !== undefined) {
-            console.log(message)
-          }
-        },
-      }
-    },
-  }
-}
+/** Deterministic order for conflict resolution and reporting. */
+export const AGENT_ORDER = [
+  'claude-code',
+  'cursor',
+  'vscode',
+  'opencode',
+  'zed',
+  'windsurf',
+  'antigravity',
+] as const
 ````
 
 ## File: tests/adapters/claude-code.test.ts
@@ -13114,105 +14281,6 @@ describe('cursor applyServers', () => {
     const parsed = JSON.parse(content)
     expect(parsed.mcpServers.gh!).toEqual({ command: 'npx' })
     expect(parsed.mcpServers.old).toBeUndefined()
-  })
-})
-````
-
-## File: tests/adapters/detect.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import {
-  detectAgents,
-  resolveTargets,
-  resolveTargetsAsync,
-  validateAgentFlag,
-  adapters,
-} from '$/src/adapters/index'
-import type { AgentId } from '$/src/adapters/types'
-import { createRuntimeContext } from '$/src/core/context'
-
-const ctx = createRuntimeContext({
-  cwd: '/tmp/proj',
-  homeDir: '/tmp/home',
-  env: {},
-  isTTY: false,
-})
-
-describe('adapters index', () => {
-  it('validateAgentFlag accepts valid ids', () => {
-    expect(validateAgentFlag(['claude-code'])).toEqual(['claude-code'])
-    expect(validateAgentFlag(['cursor', 'vscode'])).toEqual([
-      'cursor',
-      'vscode',
-    ])
-  })
-
-  it('validateAgentFlag throws on unknown ids', () => {
-    expect(() => validateAgentFlag(['not-an-agent'])).toThrow(
-      'Unknown agent id(s) in --agents: not-an-agent',
-    )
-  })
-
-  it('resolveTargets uses flag first', () => {
-    const state = {
-      version: 1 as const,
-      scope: 'project' as const,
-      targets: [],
-      agents: {},
-      managedPlugins: [],
-    }
-    expect(resolveTargets({ flag: ['cursor'], state, ctx })).toEqual(['cursor'])
-  })
-
-  it('resolveTargets falls back to state targets', () => {
-    const state = {
-      version: 1 as const,
-      scope: 'project' as const,
-      targets: ['vscode'] as AgentId[],
-      agents: {},
-      managedPlugins: [],
-    }
-    expect(resolveTargets({ flag: undefined, state, ctx })).toEqual(['vscode'])
-  })
-
-  it('resolveTargets returns empty when nothing resolvable', () => {
-    const state = {
-      version: 1 as const,
-      scope: 'project' as const,
-      targets: [],
-      agents: {},
-      managedPlugins: [],
-    }
-    expect(resolveTargets({ flag: undefined, state, ctx })).toEqual([])
-  })
-
-  it('resolveTargetsAsync falls back to detection', async () => {
-    const state = {
-      version: 1 as const,
-      scope: 'project' as const,
-      targets: [],
-      agents: {},
-      managedPlugins: [],
-    }
-    const result = await resolveTargetsAsync({
-      flag: undefined,
-      state,
-      ctx,
-    })
-    expect(Array.isArray(result)).toBe(true)
-  })
-
-  it('adapters has all seven agents', () => {
-    expect(adapters).toHaveLength(7)
-    expect(adapters.map((a) => a.id)).toEqual([
-      'claude-code',
-      'cursor',
-      'vscode',
-      'opencode',
-      'zed',
-      'windsurf',
-      'antigravity',
-    ])
   })
 })
 ````
@@ -14073,37 +15141,118 @@ describe('zed applyServers', () => {
 })
 ````
 
-## File: tests/commands/basic.test.ts
+## File: tests/commands/integration.test.ts
 ````typescript
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { runSync } from '$/src/commands/sync'
+import { main } from '$/src/index'
+import { removeCommand } from '$/src/commands/remove.command'
 import { persistCanonicalConfig } from '$/src/commands/util'
-import { createRuntimeContext } from '$/src/core/context'
+import { loadState, emptyState, writeState } from '$/src/core/state'
 import { createSandbox } from '$/tests/helpers/sandbox'
 
-describe('commands runSync', () => {
-  it('runSync with no targets exits 1 with hint', async () => {
+describe('commands integration', () => {
+  it('init → sync → list flow', async () => {
     const { ctx, cleanup } = createSandbox()
     try {
-      // Create a canonical config first so runSync doesn't return early
+      // init with agents and a server
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          github: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        },
+      })
+
+      // sync with targets
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code', 'cursor'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+
+      expect(result.targets).toEqual(['claude-code', 'cursor'])
+      expect(result.written.length).toBeGreaterThan(0)
+
+      // Verify native file was written
+      const content = readFileSync(`${ctx.cwd}/.mcp.json`, 'utf8')
+      expect(content).toContain('mcpServers')
+      expect(content).toContain('github')
+
+      // Verify state was updated (lock file)
+      const stateContent = readFileSync(
+        `${ctx.cwd}/.agents/mcp-lock.json`,
+        'utf8',
+      )
+      expect(stateContent).toContain('claude-code')
+      expect(stateContent).toContain('cursor')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync is byte-idempotent', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          github: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        },
+      })
+
+      const result1 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+
+      const result2 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+
+      expect(result2.written).toEqual(result1.written)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('runSync strict default: zero resolvable targets exits 1 (programmatic caller)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
       persistCanonicalConfig('project', ctx, {
         $schema: 'https://example.com/schema.json',
         mcpServers: {},
       })
 
-      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
-        throw new Error('process.exit called')
-      })
+      const exitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => {}) as NodeJS.Process['exit'])
       try {
-        await expect(
-          runSync({
-            scope: 'project',
-            ctx,
-            flag: undefined,
-            dryRun: false,
-            yes: true,
-          } as Parameters<typeof runSync>[0]),
-        ).rejects.toThrow('process.exit called')
+        await runSync({
+          scope: 'project',
+          ctx,
+          flag: undefined,
+          dryRun: false,
+          yes: true,
+        } as Parameters<typeof runSync>[0])
         expect(exitSpy).toHaveBeenCalledWith(1)
       } finally {
         exitSpy.mockRestore()
@@ -14113,9 +15262,77 @@ describe('commands runSync', () => {
     }
   })
 
-  it('runSync with no canonical config returns early', async () => {
+  it('sync COMMAND com zero alvos resolviveis sai com 0, materializa plugins e imprime orientacao de sem-alvo', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const logged: string[] = []
+    try {
+      // Canonical com servidores, mas nenhum arquivo nativo de agente => zero alvos detectados.
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          github: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        },
+      })
+
+      const savedArgv = process.argv
+      const savedCwd = process.cwd()
+      const savedExit = process.exit
+      const savedLog = console.log
+      let exitCode: number | undefined
+      process.argv = ['node', 'index.js', 'sync', '--yes']
+      process.chdir(ctx.cwd)
+      process.exit = ((code: number) => {
+        exitCode = code
+      }) as unknown as NodeJS.Process['exit']
+      console.log = ((message: unknown) => {
+        logged.push(String(message))
+      }) as typeof console.log
+
+      try {
+        await main()
+        expect(exitCode).toBeUndefined() // comando nao chama process.exit (sucesso)
+      } finally {
+        process.argv = savedArgv
+        process.chdir(savedCwd)
+        process.exit = savedExit
+        console.log = savedLog
+      }
+
+      // Plugin files materializados pela fase de plugin (mesmo sem alvos).
+      const pluginDir = join(ctx.cwd, '.agents/plugins/github')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      // Lock persistido.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+
+      // Orientacao de "sem alvos" foi impressa.
+      const output = logged.join('\n')
+      expect(output).toContain('No target agents')
+      expect(output).toContain('agents-mcp sync --agents')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dry-run writes nothing', async () => {
     const { ctx, cleanup } = createSandbox()
     try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          github: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        },
+      })
+
       const result = await runSync({
         scope: 'project',
         ctx,
@@ -14123,343 +15340,251 @@ describe('commands runSync', () => {
         dryRun: true,
         yes: true,
       } as Parameters<typeof runSync>[0])
-      expect(result.targets).toEqual([])
+
       expect(result.written).toEqual([])
+
+      // Native file should not exist
+      const fs = require('node:fs')
+      expect(fs.existsSync(`${ctx.cwd}/.mcp.json`)).toBe(false)
     } finally {
+      cleanup()
+    }
+  })
+
+  it('remove alpha mantem somente beta no canônico e nos agentes (AC1)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const origCwd = process.cwd()
+    // `removeCommand.run` cria o `RuntimeContext` internamente via
+    // `createUiAndCtx()`, que usa `process.cwd()`. Forçar o cwd para o sandbox
+    // garante que o comando leia/grave arquivos dentro dele (sem tocar o disco
+    // real do repositorio).
+    mkdirSync(ctx.cwd, { recursive: true })
+    process.chdir(ctx.cwd)
+
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      // 1. Semente o canônico com `alpha` e `beta` (stdio, npx, args vazio).
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          alpha: { type: 'stdio', command: 'npx', args: [] },
+          beta: { type: 'stdio', command: 'npx', args: [] },
+        },
+      })
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['cursor'],
+        agents: {},
+        managedPlugins: ['alpha', 'beta'],
+      })
+
+      // 2. Sincroniza com `cursor`: cria os plugins e o `.cursor/mcp.json`.
+      await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+
+      // 3. Remove `alpha` (sem `--no-sync`: executa `runSync` de fato).
+      await removeCommand.run!({
+        args: { _: ['alpha'], global: false, yes: true },
+        rawArgs: ['alpha'],
+      } as unknown as Parameters<NonNullable<typeof removeCommand.run>>[0])
+
+      // Nunca deve sair com codigo de saida diferente de zero.
+      expect(exitSpy).not.toHaveBeenCalled()
+
+      // Canônico reparseado: somente `beta`, definicao inalterada.
+      const canonical = JSON.parse(
+        readFileSync(join(ctx.cwd, '.agents/mcp.json'), 'utf8'),
+      )
+      expect(Object.keys(canonical.mcpServers)).toEqual(['beta'])
+      expect(canonical.mcpServers.beta).toEqual({
+        type: 'stdio',
+        command: 'npx',
+        args: [],
+      })
+
+      // `.cursor/mcp.json` continua existindo e contem `beta` (nao `alpha`).
+      const cursorContent = readFileSync(
+        join(ctx.cwd, '.cursor/mcp.json'),
+        'utf8',
+      )
+      expect(cursorContent).toContain('beta')
+      expect(cursorContent).not.toContain('alpha')
+
+      // Plugin gerenciado de `beta` permanece inteiro.
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/beta/plugin.json')),
+      ).toBe(true)
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/beta/mcp.json'))).toBe(
+        true,
+      )
+
+      // Diretorio de `alpha` foi apagado (so havia arquivos gerenciados).
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/alpha'))).toBe(false)
+
+      // Estado: `managedPlugins` encolheu para `['beta']`.
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['beta'])
+    } finally {
+      exitSpy.mockRestore()
+      logSpy.mockRestore()
+      errorSpy.mockRestore()
+      process.chdir(origCwd)
       cleanup()
     }
   })
 })
 ````
 
-## File: tests/commands/doctor.test.ts
+## File: tests/core/fs-atomic.test.ts
 ````typescript
 import { describe, expect, it } from 'vitest'
-import { runDoctor } from '$/src/commands/doctor.command'
-import { runSync } from '$/src/commands/sync'
-import { createRuntimeContext } from '$/src/core/context'
-import { createSandbox } from '$/tests/helpers/sandbox'
-import { persistCanonicalConfig } from '$/src/commands/util'
-import { writeFileAtomic } from '$/src/core/fs-atomic'
-import { writeFileSync, rmSync } from 'node:fs'
+import {
+  mkdtempSync,
+  rmSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import { readTextFile, writeFileAtomic, backupFile } from '$/src/core/fs-atomic'
 
-describe('doctor', () => {
-  it('schema error: missing canonical config', async () => {
-    const { ctx, cleanup } = createSandbox()
+function makeSandbox(): string {
+  return mkdtempSync(join(tmpdir(), 'agents-mcp-fs-atomic-'))
+}
+
+describe('fs-atomic', () => {
+  it('readTextFile returns null for missing files', () => {
+    const dir = makeSandbox()
     try {
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      expect(result.errors).toBeGreaterThan(0)
-      expect(result.results[0]!.code).toBe('SCHEMA')
+      expect(readTextFile(join(dir, 'does-not-exist.txt'))).toBeNull()
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('env error: missing required env var', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('readTextFile throws on other errors', () => {
+    const dir = makeSandbox()
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              env: { MISSING_VAR: '${MISSING_VAR}' },
-            },
-          },
-        }),
-      )
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      const envErrors = result.results.filter((r) => r.code === 'ENV')
-      expect(envErrors.length).toBeGreaterThan(0)
-      expect(result.errors).toBeGreaterThan(0)
+      // A directory cannot be read as a text file.
+      expect(() => readTextFile(dir)).toThrow()
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('env: dotenv resolves placeholder, no error', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('writeFileAtomic round-trips content byte-stable', () => {
+    const dir = makeSandbox()
+    const path = join(dir, 'config.json')
     try {
-      writeFileAtomic(join(ctx.cwd, '.env'), 'MY_TOKEN=abc123\n')
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              env: { MY_TOKEN: '${MY_TOKEN}' },
-            },
-          },
-        }),
-      )
+      const content = '{"servers":{}}\n'
+      writeFileAtomic(path, content)
+      expect(readTextFile(path)).toBe(content)
 
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      const envErrors = result.results.filter((r) => r.code === 'ENV')
-      expect(envErrors.length).toBe(0)
-      expect(result.errors).toBe(0)
+      // Second write must be byte-identical.
+      writeFileAtomic(path, content)
+      expect(readTextFile(path)).toBe(content)
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('env: fallback placeholder resolves, no error', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('writeFileAtomic overwrites existing content', () => {
+    const dir = makeSandbox()
+    const path = join(dir, 'config.json')
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              env: { MY_TOKEN: '${MISSING_VAR:-fallback}' },
-            },
-          },
-        }),
-      )
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      const envErrors = result.results.filter((r) => r.code === 'ENV')
-      expect(envErrors.length).toBe(0)
-      expect(result.errors).toBe(0)
+      writeFileAtomic(path, 'first\n')
+      writeFileAtomic(path, 'second\n')
+      expect(readTextFile(path)).toBe('second\n')
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('runtime error: missing stdio binary', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('writeFileAtomic respects mode option', () => {
+    const dir = makeSandbox()
+    const path = join(dir, '.env')
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            nonexistent: {
-              type: 'stdio',
-              command: 'nonexistent-binary-xyz',
-            },
-          },
-        }),
-      )
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      const runtimeErrors = result.results.filter((r) => r.code === 'RUNTIME')
-      expect(runtimeErrors.length).toBeGreaterThan(0)
-      expect(result.errors).toBeGreaterThan(0)
+      writeFileAtomic(path, 'KEY=value\n', { mode: 0o600 })
+      const content = readTextFile(path)
+      expect(content).toBe('KEY=value\n')
+      // On POSIX the file must be created with mode 0o600 (§8.1, .env).
+      if (process.platform !== 'win32') {
+        expect(statSync(path).mode & 0o777).toBe(0o600)
+      }
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('drift: reformatting native file does not trigger drift', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('writeFileAtomic puts temp file in the target directory (not in cwd)', () => {
+    const dir = makeSandbox()
+    const targetDir = join(dir, 'project', '.agents')
+    const winPath = join(targetDir, 'mcp.json')
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              args: ['-y', 'pkg'],
-            },
-          },
-        }),
+      writeFileAtomic(winPath, '{"servers":{}}\n')
+      expect(readTextFile(winPath)).toBe('{"servers":{}}\n')
+      // No temp file may leak into the sandbox root or the process cwd.
+      const rootEntries = readdirSync(dir)
+      expect(rootEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
+        false,
       )
-
-      // First sync to create native file + state
-      await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        yes: true,
-      } as any)
-      // Reformat the native file (different formatting, same content)
-      const nativePath = join(ctx.cwd, '.mcp.json')
-      writeFileAtomic(
-        nativePath,
-        JSON.stringify(
-          {
-            mcpServers: {
-              test: {
-                type: 'stdio',
-                command: 'npx',
-                args: ['-y', 'pkg'],
-              },
-            },
-          },
-          null,
-          2,
-        ),
+      // The target directory itself must not retain a temp file after rename.
+      const targetEntries = readdirSync(targetDir)
+      expect(targetEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
+        false,
       )
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        strict: false,
-      })
-      const driftWarnings = result.results.filter((r) => r.code === 'DRIFT')
-      expect(driftWarnings.length).toBe(0)
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('drift: removing managed entry on disk is reported as drift', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('backupFile returns null when source missing', () => {
+    const dir = makeSandbox()
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              args: ['-y', 'pkg'],
-            },
-          },
-        }),
-      )
-
-      // First sync to create state
-      await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        yes: true,
-      } as any)
-
-      // Remove the native file
-      rmSync(join(ctx.cwd, '.mcp.json'), { force: true })
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        strict: false,
-      })
-      const driftWarnings = result.results.filter((r) => r.code === 'DRIFT')
-      expect(driftWarnings.length).toBeGreaterThan(0)
+      expect(backupFile(join(dir, 'missing.txt'))).toBeNull()
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('warnings do not fail unless --strict', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('backupFile creates a timestamped copy', () => {
+    const dir = makeSandbox()
+    const path = join(dir, 'config.json')
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            test: {
-              type: 'stdio',
-              command: 'npx',
-              env: { MISSING_VAR: '${MISSING_VAR}' },
-            },
-          },
-        }),
-      )
-
-      const nonStrict = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      // MISSING_VAR is not in .env, so it's an error even without --strict
-      expect(nonStrict.errors).toBeGreaterThan(0)
-
-      const strict = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: true,
-      })
-      expect(strict.errors).toBeGreaterThan(0)
+      writeFileSync(path, 'original\n')
+      const backup = backupFile(path)
+      expect(backup).toBeTruthy()
+      expect(backup!.includes('.bak.')).toBe(true)
+      expect(readTextFile(backup!)).toBe('original\n')
+      // Original is untouched.
+      expect(readTextFile(path)).toBe('original\n')
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  it('state error: corrupt state', async () => {
-    const { ctx, cleanup } = createSandbox()
+  it('concurrent writes do not collide', () => {
+    const dir = makeSandbox()
+    const path = join(dir, 'shared.json')
     try {
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', 'mcp.json'),
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {},
-        }),
-      )
-      // Write corrupt state
-      writeFileAtomic(
-        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
-        '{ not valid json',
-      )
-
-      const result = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        strict: false,
-      })
-      const stateErrors = result.results.filter((r) => r.code === 'STATE')
-      expect(stateErrors.length).toBeGreaterThan(0)
-      expect(result.errors).toBeGreaterThan(0)
+      const contents = Array.from({ length: 20 }, (_, i) => `write ${i}\n`)
+      contents.forEach((c) => writeFileAtomic(path, c))
+      // The last written content should be intact (no partial/corrupt file).
+      const final = readTextFile(path)
+      expect(final).toMatch(/^write \d+\n$/)
     } finally {
-      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 })
@@ -14924,391 +16049,98 @@ describe('plugins.removeAntigravityPluginConfig', () => {
 })
 ````
 
-## File: tests/e2e/e2e.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
-import { runSync } from '$/src/commands/sync'
-import { runDoctor } from '$/src/commands/doctor.command'
-import { persistCanonicalConfig } from '$/src/commands/util'
-import { createSandbox } from '$/tests/helpers/sandbox'
-import type { AgentId } from '$/src/adapters/types'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
-
-const ALL_AGENTS: AgentId[] = [
-  'claude-code',
-  'cursor',
-  'vscode',
-  'opencode',
-  'zed',
-  'windsurf',
-]
-
-const CANONICAL_CONFIG = {
-  $schema: DEFAULT_SCHEMA_URL,
-  mcpServers: {
-    github: {
-      type: 'stdio',
-      command: 'npx',
-      args: ['-y', '@modelcontextprotocol/server-github'],
-      env: {
-        GITHUB_PERSONAL_ACCESS_TOKEN: '${GITHUB_TOKEN}',
-      },
-    },
-    postgres: {
-      type: 'stdio',
-      command: 'uvx',
-      args: ['mcp-server-postgres', '${DATABASE_URL}'],
-    },
-    linear: {
-      type: 'streamable-http',
-      url: 'https://mcp.linear.app/mcp',
-      headers: {
-        Authorization: 'Bearer ${LINEAR_API_KEY}',
-      },
-    },
-  },
-}
-
-/**
- * Create mock binaries in the sandbox so doctor's runtime check passes.
- * Also sets env vars in ctx.env so doctor's env check passes.
- * Placeholder names in canonical config: GITHUB_TOKEN, DATABASE_URL, LINEAR_API_KEY.
- */
-function createMockBinaries(
-  ctx: ReturnType<typeof createSandbox>['ctx'],
-): void {
-  const binDir = `${ctx.cwd}/.bin`
-  mkdirSync(binDir, { recursive: true })
-  writeFileSync(`${binDir}/npx`, '#!/usr/bin/env node\nconsole.log("mock")\n', {
-    mode: 0o755,
-  })
-  writeFileSync(`${binDir}/uvx`, '#!/usr/bin/env node\nconsole.log("mock")\n', {
-    mode: 0o755,
-  })
-  // Add bin dir to PATH
-  ctx.env.PATH = `${binDir}:${ctx.env.PATH}`
-  process.env.PATH = `${binDir}:${process.env.PATH}`
-  // Define env vars in ctx.env (doctor reads ctx.env via resolveVar)
-  ctx.env.GITHUB_TOKEN = 'fake_token'
-  ctx.env.DATABASE_URL = 'postgres://user:pass@localhost/db'
-  ctx.env.LINEAR_API_KEY = 'fake_linear_key'
-  // Also set in process.env for completeness
-  process.env.GITHUB_PERSONAL_ACCESS_TOKEN = 'fake_token'
-  process.env.DATABASE_URL = 'postgres://user:pass@localhost/db'
-  process.env.LINEAR_API_KEY = 'fake_linear_key'
-}
-
-/**
- * Run the full E2E flow: init → sync → doctor.
- */
-async function runFullFlow(
-  ctx: ReturnType<typeof createSandbox>['ctx'],
-  scope: 'project' | 'global',
-  agents: AgentId[] = ALL_AGENTS,
-) {
-  // 1. init - create canonical config with one server
-  persistCanonicalConfig('project', ctx, {
-    $schema: CANONICAL_CONFIG.$schema,
-    mcpServers: {
-      github: CANONICAL_CONFIG.mcpServers.github,
-    },
-  })
-
-  // 2. sync with targets
-  const syncResult = await runSync({
-    scope,
-    ctx,
-    flag: agents,
-    dryRun: false,
-    yes: true,
-  } as Parameters<typeof runSync>[0])
-  expect(syncResult.targets).toEqual(agents)
-  expect(syncResult.written.length).toBeGreaterThan(0)
-
-  // 3. Verify native config file was written
-  const projectConfigPath = `${ctx.cwd}/.mcp.json`
-  if (scope === 'project') {
-    expect(existsSync(projectConfigPath)).toBe(true)
-    const content = readFileSync(projectConfigPath, 'utf8')
-    expect(content).toContain('mcpServers')
-    expect(content).toContain('github')
-  }
-
-  // 4. sync again - should be byte-idempotent
-  const syncResult2 = await runSync({
-    scope,
-    ctx,
-    flag: agents,
-    dryRun: false,
-    yes: true,
-  } as Parameters<typeof runSync>[0])
-  expect(syncResult2.written.length).toBeGreaterThan(0)
-
-  // 5. doctor - should pass
-  const doctorResult = await runDoctor({
-    scope,
-    ctx,
-    flag: agents,
-    dryRun: false,
-    strict: false,
-  } as Parameters<typeof runDoctor>[0])
-  expect(doctorResult.errors).toBe(0)
-
-  // 6. Remove all servers from canonical config
-  persistCanonicalConfig(scope, ctx, {
-    $schema: CANONICAL_CONFIG.$schema,
-    mcpServers: {},
-  })
-
-  // 7. doctor after removal - should still pass (no servers to check)
-  const finalDoctor = await runDoctor({
-    scope,
-    ctx,
-    flag: agents,
-    dryRun: false,
-    strict: false,
-  } as Parameters<typeof runDoctor>[0])
-  expect(finalDoctor.errors).toBe(0)
-}
-
-describe('E2E: agents-mcp full flow', () => {
-  it('project scope: init → sync → doctor', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      createMockBinaries(ctx)
-      await runFullFlow(ctx, 'project', ['claude-code', 'cursor', 'vscode'])
-    } finally {
-      cleanup()
+## File: tests/fixtures/schema/invalid-missing-command.json
+````json
+{
+  "mcpServers": {
+    "github": {
+      "type": "stdio"
     }
-  })
-
-  it('global scope: fresh-repo flow in --yes mode', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      createMockBinaries(ctx)
-      // For global scope, create canonical config in home/.agents
-      const fs = await import('node:fs')
-      fs.mkdirSync(`${ctx.homeDir}/.agents`, { recursive: true })
-      persistCanonicalConfig('global', ctx, {
-        $schema: CANONICAL_CONFIG.$schema,
-        mcpServers: {
-          github: CANONICAL_CONFIG.mcpServers.github,
-        },
-      })
-
-      await runFullFlow(ctx, 'global', ['claude-code', 'cursor'])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('--dry-run writes nothing (project scope)', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      createMockBinaries(ctx)
-      persistCanonicalConfig('project', ctx, {
-        $schema: CANONICAL_CONFIG.$schema,
-        mcpServers: {
-          github: CANONICAL_CONFIG.mcpServers.github,
-        },
-      })
-
-      const result = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: true,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-
-      // dry-run should not write any native files
-      expect(result.written).toEqual([])
-
-      // Native file should not exist
-      const fs = await import('node:fs')
-      expect(fs.existsSync(`${ctx.cwd}/.mcp.json`)).toBe(false)
-      expect(fs.existsSync(`${ctx.cwd}/.agents/.mcp-sync-state.json`)).toBe(
-        false,
-      )
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('all six agents: init → sync → doctor', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      createMockBinaries(ctx)
-      persistCanonicalConfig('project', ctx, {
-        $schema: CANONICAL_CONFIG.$schema,
-        mcpServers: CANONICAL_CONFIG.mcpServers,
-      })
-
-      // sync with all six agents
-      const result = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ALL_AGENTS,
-        dryRun: false,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-      expect(result.targets).toEqual(ALL_AGENTS)
-      expect(result.written.length).toBeGreaterThan(0)
-
-      // doctor
-      const doctorResult = await runDoctor({
-        scope: 'project',
-        ctx,
-        flag: ALL_AGENTS,
-        dryRun: false,
-        strict: false,
-      } as Parameters<typeof runDoctor>[0])
-      expect(doctorResult.errors).toBe(0)
-    } finally {
-      cleanup()
-    }
-  })
-})
-````
-
-## File: tests/helpers/sandbox.ts
-````typescript
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { createRuntimeContext, type RuntimeContext } from '$/src/core/context'
-
-/**
- * Create a temp sandbox with `cwd`, `homeDir`, and `XDG_CONFIG_HOME`/`APPDATA`
- * overridden so no test ever touches real user configuration.
- *
- * Every path returned is under `os.tmpdir()`. Call `cleanup()` at the end of
- * each test (or in `afterEach`).
- */
-export function createSandbox(): {
-  dir: string
-  ctx: RuntimeContext
-  cleanup: () => void
-} {
-  const dir = mkdtempSync(join(tmpdir(), 'agents-mcp-sandbox-'))
-  const projectDir = join(dir, 'project')
-  const homeDir = join(dir, 'home')
-  const env = {
-    ...process.env,
-    XDG_CONFIG_HOME: join(homeDir, '.config'),
-    APPDATA: join(homeDir, 'AppData', 'Roaming'),
-  }
-  const ctx = createRuntimeContext({
-    cwd: projectDir,
-    homeDir,
-    env,
-    isTTY: false,
-  })
-  return {
-    dir,
-    ctx,
-    cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
 ````
 
-## File: tests/sources/direct.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import { resolveDirect } from '$/src/sources/direct'
-import type { CanonicalServer } from '$/src/core/schema'
-import { isStdioServer, isHttpServer } from '$/src/core/schema'
-
-function asStdio(server: CanonicalServer) {
-  return server as Extract<CanonicalServer, { type: 'stdio' }>
+## File: tests/fixtures/schema/invalid-missing-url.json
+````json
+{
+  "mcpServers": {
+    "github": {
+      "type": "streamable-http"
+    }
+  }
 }
+````
 
-function asHttp(server: CanonicalServer) {
-  return server as Extract<
-    CanonicalServer,
-    { type: 'streamable-http' } | { type: 'sse' }
-  >
+## File: tests/fixtures/schema/invalid-server-name.json
+````json
+{
+  "mcpServers": {
+    "GitHub": {
+      "type": "stdio",
+      "command": "npx"
+    }
+  }
 }
+````
 
-describe('sources direct', () => {
-  it('parses --command with --arg', () => {
-    const result = resolveDirect({
-      command: 'npx',
-      arg: ['-y', '@scope/pkg'],
-    })
-    const s = asStdio(result.definition)
-    expect(isStdioServer(s)).toBe(true)
-    expect(s.command).toBe('npx')
-    expect(s.args).toEqual(['-y', '@scope/pkg'])
-  })
+## File: tests/fixtures/schema/invalid-transport.json
+````json
+{
+  "mcpServers": {
+    "github": {
+      "type": "websocket",
+      "command": "npx"
+    }
+  }
+}
+````
 
-  it('parses --command with whitespace tokenization', () => {
-    const result = resolveDirect({
-      command: 'npx -y @scope/pkg',
-    })
-    const s = asStdio(result.definition)
-    expect(s.command).toBe('npx')
-    expect(s.args).toEqual(['-y', '@scope/pkg'])
-  })
+## File: tests/fixtures/schema/invalid-unknown-key.json
+````json
+{
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "unknownKey": "should-be-rejected"
+    }
+  }
+}
+````
 
-  it('parses --http as streamable-http', () => {
-    const result = resolveDirect({
-      http: 'https://mcp.linear.app/mcp',
-    })
-    const s = asHttp(result.definition)
-    expect(isHttpServer(s)).toBe(true)
-    expect(s.type).toBe('streamable-http')
-    expect(s.url).toBe('https://mcp.linear.app/mcp')
-  })
-
-  it('parses --sse as sse', () => {
-    const result = resolveDirect({
-      sse: 'https://mcp.linear.app/sse',
-    })
-    const s = asHttp(result.definition)
-    expect(isHttpServer(s)).toBe(true)
-    expect(s.type).toBe('sse')
-    expect(s.url).toBe('https://mcp.linear.app/sse')
-  })
-
-  it('parses --env KEY=VALUE', () => {
-    const result = resolveDirect({
-      command: 'npx',
-      env: ['GITHUB_TOKEN=${GITHUB_TOKEN}'],
-    })
-    const s = asStdio(result.definition)
-    expect(isStdioServer(s)).toBe(true)
-    expect(s.env).toEqual({ GITHUB_TOKEN: '${GITHUB_TOKEN}' })
-    expect(result.requiredEnv.map((v) => v.name)).toContain('GITHUB_TOKEN')
-  })
-
-  it('parses --header', () => {
-    const result = resolveDirect({
-      http: 'https://api.example.com/mcp',
-      header: ['Authorization: Bearer token'],
-    })
-    const s = asHttp(result.definition)
-    expect(isHttpServer(s)).toBe(true)
-    expect(s.headers).toEqual({
-      Authorization: 'Bearer token',
-    })
-  })
-
-  it('suggests name from URL', () => {
-    const result = resolveDirect({
-      http: 'https://mcp.linear.app/mcp',
-    })
-    expect(result.suggestedName).toContain('linear')
-  })
-
-  it('suggests name from command', () => {
-    const result = resolveDirect({
-      command: 'npx -y @scope/pkg',
-    })
-    expect(result.suggestedName).toBe('npx')
-  })
-})
+## File: tests/fixtures/schema/valid.json
+````json
+{
+  "mcpServers": {
+    "github": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "postgres": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-server-postgres", "${DATABASE_URL}"]
+    },
+    "linear": {
+      "type": "streamable-http",
+      "url": "https://mcp.linear.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    },
+    "linear-sse": {
+      "type": "sse",
+      "url": "https://mcp.linear.app/sse",
+      "headers": {
+        "Authorization": "Bearer ${LINEAR_API_KEY}"
+      }
+    }
+  }
+}
 ````
 
 ## File: tests/sources/github.test.ts
@@ -15932,261 +16764,25 @@ describe('sources registry', () => {
 })
 ````
 
-## File: .agents/skills/product-owner/SKILL.md
-````markdown
----
-name: product-owner
-description: >-
-  Product Owner role grounded in Scrum and Kanban practices to discover,
-  prioritize, and frame product features, improvements, and bug fixes in
-  `workflow/BACKLOG.md`, and validate final delivery in `workflow/<change-slug>/VALIDATION.md`.
-  Use this skill whenever asked to act as a Product Owner, manage a product
-  backlog, frame business/user requirements before technical specification, or
-  validate delivered value in coordination with `spec-driven-workflow` and
-  `architect-worker`.
----
-
-# Product Owner Role
-
-Own the **why**, **who**, and **what value** of product changes. Bridge user needs and business goals with engineering execution through `workflow/BACKLOG.md` (the only root file in `workflow/`) and `workflow/<change-slug>/VALIDATION.md` (`spec-driven-workflow`), collaborating with the **Architect** and **Worker** (`architect-worker`).
-
-## Agile Foundations (Scrum & Kanban)
-
-Combine Scrum's value-driven product ownership with Kanban's upstream flow discipline:
-
-- **Scrum**:
-  - **Value Maximization & Product Goal**: Prioritize work that delivers the highest user and business impact toward the Product Goal.
-  - **Product Backlog & Refinement**: Maintain an ordered mini-backlog of evolutions, features, and bug fixes in `workflow/BACKLOG.md`, refining top items until they are clear and actionable.
-  - **INVEST & Behavioral Acceptance**: Frame demands with clear user perspective (User Stories / Jobs-to-be-Done) and observable product acceptance expectations—independent of implementation details.
-  - **Sprint / Release Value Validation**: Verify the delivered increment against original product intent before closing the cycle.
-- **Kanban**:
-  - **Upstream vs. Downstream Separation**: Operate in **Upstream** (discovery, triage, prioritization, shaping) before work is pulled into **Downstream** engineering (`SPEC.md` -> `PLAN.md` -> `TASKS.md` -> Implementation -> `REVIEW.md`).
-  - **Classes of Service**: Explicitly classify urgency and flow priority:
-    - `Expedite`: Critical production bugs, security issues, or blocking incidents.
-    - `Fixed Date`: Time-bound commitments or external deadlines.
-    - `Standard`: Regular features, enhancements, and non-urgent bug fixes.
-    - `Intangible`: Technical enablers or preventative improvements with long-term value.
-  - **Definition of Ready (DoR)**: Only move an item from `Refining` to `Ready` for the Architect when problem, value, scope boundaries, and product acceptance expectations are unambiguous.
-
-## Role Activation
-
-1. **Explicit Role Assignment**: Adopt the Product Owner role when requested (e.g., *"Act as Product Owner"*, *"Define this feature as a PO"*, or *"Validate this delivery"*).
-2. **Role Persistence**: Maintain the Product Owner perspective throughout the session unless the user instructs a role switch.
-3. **Collaboration Mode**: When working alongside `architect-worker`, hand off `Ready` items to the **Architect** via `workflow/BACKLOG.md` and receive completed deliveries back via `workflow/<change-slug>/VALIDATION.md`.
-
-## Responsibilities
-
-### 1. Maintain the Product Backlog & Frame Demands (`workflow/BACKLOG.md`)
-
-- Initialize `workflow/BACKLOG.md` using [BACKLOG.md](../spec-driven-workflow/resources/BACKLOG.md) (and check whether `workflow/` is in `.gitignore` per `spec-driven-workflow`, asking the user before adding it if missing).
-- Keep an ordered **Product Backlog** table for software evolutions, new features, enhancements, and bug reports (`Idea` -> `Refining` -> `Ready` -> `In Downstream` -> `Done`).
-- When preparing a demand for engineering, complete the **Active Demand Brief** section:
-  - Articulate the **User Problem & Business Value**.
-  - Write a clear **User Story / Job-to-be-Done** (or **Bug Impact & Observed Behavior** for bug fixes).
-  - Attach any screenshots (including annotated UI bug captures) or supporting evidence in `workflow/assets/` and link them in `workflow/BACKLOG.md` (e.g., `./assets/<filename>`).
-  - Define **Product Acceptance Expectations** (what a user or stakeholder must be able to do or observe).
-  - State **Out of Scope** items explicitly to prevent scope creep.
-  - Verify the **Definition of Ready (DoR)** checklist before handing off to the Architect.
-
-### 2. Clarify Ambiguities During Downstream Execution
-
-- If the Architect or Worker surfaces a product ambiguity or trade-off (e.g., in `SPEC.md` Open Questions or `REVIEW.md`), decide from a **user value and priority** perspective and update `workflow/BACKLOG.md` accordingly.
-
-### 3. Validate Completed Deliveries (`workflow/<change-slug>/VALIDATION.md`)
-
-- Once the Architect finishes `REVIEW.md` and prepares `workflow/<change-slug>/VALIDATION.md`, inspect the **Delivery Summary**, **Backlog Value Mapping**, and **How to Validate** scenarios.
-- Verify that the delivered increment satisfies the original product intent and acceptance expectations in `workflow/BACKLOG.md`.
-- Update `workflow/<change-slug>/VALIDATION.md` status:
-  - **`Approved`**: Complete the sign-off checklist so the Architect/user can close the cycle and delete `workflow/<change-slug>/` (while preserving and updating `workflow/BACKLOG.md` for ongoing backlog items).
-  - **`Changes Requested`**: Record clear product-level gaps in `workflow/<change-slug>/VALIDATION.md` (without prescribing code) so the Architect can plan follow-up adjustments.
-- Log any newly discovered opportunities or deferred enhancements back into the `workflow/BACKLOG.md` backlog.
-
-## Guardrails
-
-- **Never prescribe technical implementation**: Do not specify file paths, database schemas, frameworks, class designs, or code changes. Leave *how* to the Architect (`SPEC.md`/`PLAN.md`) and Worker.
-- **Never write or modify production code or test suites**.
-- **Only create or edit product-governance artifacts**: `workflow/BACKLOG.md`, `workflow/<change-slug>/VALIDATION.md` (validation notes and sign-off), `workflow/assets/` (backlog-level screenshots or evidence), and `.gitignore` (only after user confirmation if `workflow/` is missing).
-- **Never commit `workflow/`**: Ensure `workflow/` remains untracked by Git per `spec-driven-workflow`.
-
-## Handoff Lifecycle
-
-```text
-[Product Owner] 0. Discover & Frame  -> Curates backlog & writes Ready brief in workflow/BACKLOG.md
-       │
-       ▼
-[Architect]     1. Specify & Plan    -> Translates BACKLOG.md into workflow/<change-slug>/SPEC.md, PLAN.md (+ TASKS.md)
-       │
-       ▼
-[Worker]        2. Implement & Verify-> Builds & tests against workflow/<change-slug>/PLAN.md / TASKS.md
-       │
-       ▼
-[Architect]     3. Review & Handoff  -> Approves REVIEW.md, writes workflow/<change-slug>/VALIDATION.md
-       │
-       ▼
-[Product Owner] 4. Validate Value    -> Reviews workflow/<change-slug>/VALIDATION.md against BACKLOG.md
-       │
-       ├── If Changes Requested ──────► [Architect] refines SPEC.md/PLAN.md for Worker
-       │
-       ▼
-[PO / Architect]5. Sign-Off & Cleanup-> Marks Approved, confirms with user, deletes workflow/<change-slug>/, updates BACKLOG.md
-```
-````
-
-## File: .agents/skills/spec-driven-workflow/resources/PLAN.md
-````markdown
-# Execution Plan: <Short Title>
-
-- **Spec**: [SPEC.md](./SPEC.md)
-- **Status**: Draft | Ready | In Progress | Done
-
-## Technical Approach
-
-Summarize the chosen architecture, key design decisions, and any trade-offs.
-
-## Affected Areas
-
-- `path/to/module_a` — <what changes and why>
-- `path/to/module_b` — <what changes and why>
-
-## Execution Steps
-
-1. **<Step 1 Title>**
-   - Details of what to implement or modify.
-   - Verification: <how to confirm this step works>
-2. **<Step 2 Title>**
-   - Details of what to implement or modify.
-   - Verification: <how to confirm this step works>
-
-## Verification Strategy
-
-- Automated tests to add or update (unit, integration, e2e).
-- Commands to run (`test`, `lint`, `build`, `typecheck`).
-
-## Risks & Rollback
-
-- Potential failure modes and how to mitigate or revert safely.
-
-## Supporting Assets (Optional)
-
-- [<Short description>](./assets/<filename>) — <Architecture diagram, trace, or supporting evidence stored in `workflow/<change-slug>/assets/`>
-````
-
-## File: .agents/skills/spec-driven-workflow/resources/SPEC.md
-````markdown
-# Specification: <Short Title>
-
-- **Type**: Feature | Bug Fix | Refactor | Chore
-- **Status**: Draft | Approved | In Progress | Done
-- **Owner**: <author or agent>
-
-## Context & Problem Statement
-
-Describe the current state, why this change is needed, and (for bug fixes) reproduction steps along with expected vs. actual behavior.
-
-## Goals
-
-- <Measurable outcome 1>
-- <Measurable outcome 2>
-
-## Non-Goals
-
-- <Explicitly out-of-scope item 1>
-
-## Requirements
-
-### Functional Requirements
-
-1. <Requirement 1>
-2. <Requirement 2>
-
-### Non-Functional Requirements & Constraints
-
-- Performance, security, compatibility, or architectural constraints.
-
-## Acceptance Criteria
-
-- [ ] <Objective, testable criterion 1>
-- [ ] <Objective, testable criterion 2>
-
-## Open Questions
-
-- [ ] <Unresolved question, if any>
-
-## Supporting Assets (Optional)
-
-- [<Short description>](./assets/<filename>) — <Supporting screenshot, diagram, or evidence stored in `workflow/<change-slug>/assets/`>
-````
-
-## File: .agents/skills/spec-driven-workflow/resources/VALIDATION.md
-````markdown
-# Delivery Validation: <Short Title>
-
-- **Backlog**: [BACKLOG.md](../BACKLOG.md)
-- **Spec**: [SPEC.md](./SPEC.md)
-- **Review**: [REVIEW.md](./REVIEW.md)
-- **Prepared By**: <Architect / Lead Engineer>
-- **Validated By**: <Product Owner>
-- **Status**: Pending Validation | Changes Requested | Approved
-
-## Delivery Summary
-
-Plain-language overview of what was built or fixed, written for product and stakeholder review rather than code-level inspection.
-
-## Backlog Value Mapping
-
-| Backlog ID | Product Expectation | Delivery Status | Notes |
-| :--- | :--- | :--- | :--- |
-| B1 | <Original expectation from BACKLOG.md> | Delivered \| Partial \| Deferred | <Summary of how it was met> |
-
-## How to Validate
-
-Observable user flows, commands, UI paths, or scenarios the Product Owner can check to confirm the expected behavior:
-
-1. **<Scenario 1>**: <Steps to observe and expected outcome>
-2. **<Scenario 2>**: <Steps to observe and expected outcome>
-
-## Known Limitations & Follow-Ups
-
-- <Any deferred scope, edge cases, or recommended next items for the `BACKLOG.md` backlog>
-
-## Product Owner Sign-Off
-
-- [ ] Delivered behavior matches the product intent and user value in `BACKLOG.md`.
-- [ ] Product acceptance expectations are satisfied.
-- [ ] Ready to close this cycle and clean up `workflow/<change-slug>/` (while updating `../BACKLOG.md` as needed).
-
-### Validation Notes / Requested Adjustments
-
-- <Feedback from the Product Owner if `Changes Requested`, or sign-off note if `Approved`>
-
-### Supporting Assets (Optional)
-
-- [<Short description>](./assets/<filename>) — <Validation screenshot, recording, or evidence stored in `workflow/<change-slug>/assets/`>
-````
-
-## File: .agents/mcp.json
+## File: opencode.json
 ````json
 {
-  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
-  "mcpServers": {
+  "mcp": {
     "sequential-thinking": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
+      "type": "local",
+      "command": [
+        "npx",
         "-y",
         "@modelcontextprotocol/server-sequential-thinking"
       ]
     },
     "memory": {
-      "type": "stdio",
-      "command": "npx",
-      "args": [
+      "type": "local",
+      "command": [
+        "npx",
         "-y",
         "@modelcontextprotocol/server-memory"
-      ],
-      "env": {
-        "MEMORY_FILE_PATH": "/home/alexbruno/Projetos/GitHub/agents-mcp/cli/memory.jsonl"
-      }
+      ]
     }
   }
 }
@@ -16227,6 +16823,9 @@ const distPkg: Record<string, unknown> = {
   bin: {
     'agents-mcp': './index.js',
   },
+  publishConfig: {
+    access: 'public',
+  },
   files: ['index.js'],
 }
 
@@ -16256,959 +16855,919 @@ for (const file of metadataFiles) {
 console.log('✅ dist/package.json and metadata prepared in dist/ folder')
 ````
 
-## File: spec/BLUEPRINT.md
-````markdown
-# Technical Blueprint: `agents-mcp` (`v0.1.0`)
-
-> **Audience:** AI coding agents (Worker) and human contributors.
-> **Role of this document:** architecture, contracts, and non-negotiable decisions.
-> The format itself is specified in [`SPEC.md`](./SPEC.md); per-agent translation
-> in [`MATRIX.md`](./MATRIX.md); the rationale for each hard decision in
-> [`docs/decisions/`](../docs/decisions/).
-
----
-
-## 1. Vision & Design Principles
-
-`agents-mcp` is a **configuration compiler**, not a runtime. It owns three edges:
-
-1. **Core (single source of truth):** `.agents/mcp.json` (project) and
-   `~/.agents/mcp.json` (global).
-2. **Input edges (`src/sources/`, `import`):** normalize existing agent files, MCP
-   `server.json` manifests, GitHub repositories, npm packages, and CLI flags into
-   the canonical model.
-3. **Output edges (`src/adapters/`):** project the canonical model into each
-   agent's native file, translating schema and env syntax while preserving
-   everything the compiler does not own.
-
-Principles, in priority order:
-
-1. **Never lose user data.** No deletion of native files, no whole-file rewrites,
-   no silent field dropping.
-2. **Deterministic.** Same input → byte-identical output. The published schema is
-   reproducible on any machine and in CI.
-3. **Local-first.** No network required for `init`, `sync`, `remove`, `list`,
-   `doctor`. Network is only used by `add`/`import` when resolving external
-   sources.
-4. **Secrets stay symbolic.** Canonical and native files contain `${VAR}`
-   placeholders; real values live only in `.env`.
-5. **Testability by construction.** Paths, platform, environment, TTY, and fetch
-   are injected; adapters and compilers are pure functions over data.
-6. **Zero runtime dependencies in the published package.** Single-file ESM
-   bundle; everything inlined at build time.
-
----
-
-## 2. Tech Stack & Toolchain
-
-| Concern | Choice | Notes |
-| :--- | :--- | :--- |
-| Language | TypeScript `7.x` (strict) | Native compiler (`tsc --noEmit`) for type checking only. |
-| Runtime floor | **Node.js `>= 22`** | Current LTS baseline; `@types/node@^22` so the type check cannot use APIs above the floor. |
-| Module system | ESM (`"type": "module"`), `module`/`moduleResolution` = `preserve`/`bundler` | Source is never executed as-is; only bundled output ships. |
-| Bundler | `tsup@^9` (esbuild) | See §2.1. `dts: false` — this is a CLI, no type declarations are published. |
-| CLI parser | `citty@^0.2` | Sub-commands + global flags. |
-| Prompts | `@clack/prompts@^1.9` | Always behind `src/ui/prompts.ts`. |
-| Schema | `zod@^4.6` | Native `z.toJSONSchema()`. |
-| JSONC | `jsonc-parser@^3.3` | `parseTree` + `modify` + `applyEdits`. |
-| Argv splitting | `string-argv@^0.4` | Only for `--stdio "cmd args"` convenience. |
-| Tests | `vitest@^5` | Node environment, real temp filesystem, mocked `fetch`. |
-| Schema tests | `ajv@^8` + `ajv-formats@^3` (dev) | Validate the generated Draft 2020-12 document and fixtures. |
-| Packaging | `tsx` + `npm-run-all2` (dev) | `npm run dist` builds, packages, publishes. |
-| Formatting | `prettier@^3` | `format:check` runs in CI. |
-
-### 2.1 Why `tsup` (and not Vite or raw esbuild)
-
-All three end up using esbuild/Rollup-class bundling; the difference is the amount
-of glue we own.
-
-- **Vite** is browser-first. CLI/library bundling means library mode (Rollup),
-  externalization rules, `ssr` targets, and a dev server we never use. It is the
-  heaviest option for a single-file CLI with no assets.
-- **Raw `esbuild`** is viable and gives total control, but we would hand-write the
-  ~40-line build script for `banner` (shebang), `clean`, `target`, `platform`,
-  single-file output, tree shaking, and externals. That script is a permanent
-  maintenance surface.
-- **`tsup`** is a thin, purpose-built wrapper over esbuild that already provides
-  `banner`, `clean`, `format`, `target`, `platform`, `treeshake`, `splitting`, and
-  a TypeScript config file. Zero bespoke build code, identical output.
-
-**Decision:** use `tsup` with the configuration below. If `tsup` ever blocks us
-(for example on a future Node/TypeScript release), the escape hatch is a
-`scripts/build.ts` that calls `esbuild.build()` directly with the same options —
-the output contract stays identical.
-
-```ts
-// tsup.config.ts
-export default defineConfig({
-  entry: ['src/index.ts'],
-  outDir: 'dist',
-  format: ['esm'],
-  platform: 'node',
-  target: 'node22',
-  dts: false,
-  clean: true,
-  sourcemap: false,
-  splitting: false,
-  treeshake: true,
-  banner: { js: '#!/usr/bin/env node' },
-})
-```
-
-Build output contract (verified in CI and in `T11`):
-
-- exactly one runtime file: `dist/index.js`;
-- starts with the shebang;
-- contains no bare `import`/`require` of an external package (everything inlined);
-- `node dist/index.js --help` exits `0`.
-
----
-
-## 3. Repository Layout
-
-```text
-agents-mcp/
-├── docs/
-│   └── decisions/                    # ADRs (published)
-├── scripts/
-├── spec/
-│   ├── SPEC.md                       # published format specification
-│   ├── MATRIX.md                     # published per-agent translation matrix
-│   └── BLUEPRINT.md                  # this document
-├── src/
-│   ├── config.ts                     # constants (site, version, state, aliases)
-│   ├── index.ts                      # citty entrypoint
-│   ├── core/
-│   │   ├── schema.ts                 # Zod schemas + validateConfig()
-│   │   ├── fs-atomic.ts              # temp+rename, backup, JSONC read/write
-│   │   ├── store.ts                  # canonical file read/write
-│   │   ├── state.ts                  # sync state (targets + managed names)
-│   │   ├── placeholder.ts            # parse/translate `${VAR}` syntax
-│   │   ├── env.ts                    # `.env` parse, resolution, secret extraction
-│   │   └── gitignore.ts              # minimal `.env` / state protection
-│   ├── adapters/
-│   │   ├── types.ts                  # AgentAdapter contract
-│   │   ├── shared.ts                 # JSONC helpers + env translation
-│   │   ├── claude-code.ts
-│   │   ├── cursor.ts
-│   │   ├── vscode.ts
-│   │   ├── opencode.ts
-│   │   ├── windsurf.ts
-│   │   ├── zed.ts
-│   │   └── index.ts                  # registry + detection
-│   ├── sources/
-│   │   ├── types.ts                  # ResolvedServerPackage
-│   │   ├── direct.ts
-│   │   ├── github.ts
-│   │   ├── registry.ts
-│   │   └── index.ts                  # resolution order
-│   ├── commands/
-│   │   ├── init.ts
-│   │   ├── import.ts
-│   │   ├── add.ts
-│   │   ├── sync.ts
-│   │   ├── remove.ts
-│   │   ├── list.ts
-│   │   └── doctor.ts
-│   └── ui/
-│       ├── prompts.ts                # PromptUi port
-│       └── auto.ts                   # non-interactive implementation
-├── tests/
-│   ├── core/
-│   ├── adapters/
-│   ├── sources/
-│   ├── commands/
-│   ├── schema/
-│   └── helpers/
-├── package.json
-├── package.ts                        # dist/ packaging script
-├── tsconfig.json
-├── tsup.config.ts
-└── vitest.config.ts
-```
-
----
-
-## 4. Configuration Constants (`src/config.ts`)
-
-All constants live in one dependency-free module. Nothing here reads
-`process.env`; the schema URL must be reproducible on any machine.
-
-```ts
-export const AGENT_PLUGINS_MCP_SCHEMA_URL =
-  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
-export const AGENT_PLUGINS_MCP_SPEC_URL =
-  'https://agent-plugins.org/plugin-authors/mcp-servers'
-export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
-export const SCHEMA_DRAFT = 'draft-07'
-
-export const AGENTS_DIR = '.agents'
-export const CONFIG_FILE = 'mcp.json'
-export const STATE_FILE = '.mcp-sync-state.json'
-export const STATE_VERSION = 1
-export const ENV_FILE = '.env'
-export const ENV_EXAMPLE_FILE = '.env.example'
-
-export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
-
-/** Deterministic order for conflict resolution and reporting. */
-export const AGENT_ORDER = [
-  'claude-code', 'cursor', 'vscode', 'opencode', 'zed', 'windsurf',
-] as const
-```
-
-Rules:
-
-- The URL keeps the `v` prefix (`/schema/v0.1.0/...`), matching the README, the
-  spec text, and the published Agent Plugins schema URI.
-- `AGENTS_MCP_SITE_URL` is intentionally **not** supported. Determinism wins.
-
----
-
-## 5. Canonical Schema (`src/core/schema.ts`)
-
-### 5.1 Zod 4 definitions
-
-```ts
-export const AgentIdSchema = z.enum([
-  'claude-code', 'cursor', 'vscode', 'opencode', 'windsurf', 'zed',
-])
-
-/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
-const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
-
-/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
-const CWD_PATTERN =
-  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
-
-export const StdioServerSchema = z.strictObject({
-  type: z.literal('stdio'),
-  command: z.string().min(1),
-  args: z.array(z.string()).default([]),
-  env: z
-    .record(z.string(), z.string())
-    .optional()
-    .refine(
-      (env) =>
-        !env ||
-        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
-      {
-        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
-      },
-    ),
-  cwd: z.string().regex(CWD_PATTERN).optional(),
-})
-
-export const StreamableHttpServerSchema = z.strictObject({
-  type: z.literal('streamable-http'),
-  url: z.string().min(1),
-  headers: z.record(z.string(), z.string()).optional(),
-})
-
-export const SseServerSchema = z.strictObject({
-  type: z.literal('sse'),
-  url: z.string().min(1),
-  headers: z.record(z.string(), z.string()).optional(),
-})
-
-export const CanonicalServerSchema = z.discriminatedUnion('type', [
-  StdioServerSchema,
-  StreamableHttpServerSchema,
-  SseServerSchema,
-])
-
-export const CanonicalMcpConfigSchema = z.strictObject({
-  $schema: z.literal(DEFAULT_SCHEMA_URL),
-  mcpServers: z.record(z.string(), CanonicalServerSchema),
-})
-```
-
-Decisions:
-
-- **`z.strictObject()` everywhere.** Unknown keys are rejected at read time instead
-  of silently disappearing on the next `sync`.
-- **`z.url()`** (Zod 4 top-level format), not `z.string().url()`.
-- **Three transports.** `type` is `'stdio' | 'streamable-http' | 'sse'` (ADR-0010).
-- **`$schema` is fixed.** `$schema: z.literal(DEFAULT_SCHEMA_URL)` enforces the
-  official Agent Plugins MCP 1.0.0 URI; `validateConfig()` warns on mismatch.
-- **No `.refine()`/`.transform()` in this file.** `z.toJSONSchema()` throws by
-  default on unrepresentable schemas. Extras that cannot be expressed in JSON
-  Schema live in a separate `validateConfig()` function:
-  - warn when `$schema !== DEFAULT_SCHEMA_URL` (do not fail).
-- **No `disabled`/`targets` on server objects.** These extensions were removed
-  to match the official Agent Plugins MCP 1.0.0 schema (`additionalProperties:
-  false`).
-
-### 5.3 Defaults and write-back policy
-
-- `.parse()` applies defaults for compilation; **do not materialize defaults when
-  writing the canonical file.** A user who omits `args` keeps omitting it, so
-  `scan`, `import`, and `add` produce minimal diffs and `sync` stays idempotent.
-- Server names are the canonical identity. Renaming means remove + add.
-
----
-
-## 6. Import Convention & `tsconfig.json`
-
-The project uses one alias, `$`, mapped to the repository root.
-
-```json
-{
-  "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
-    "module": "preserve",
-    "moduleResolution": "bundler",
-    "baseUrl": ".",
-    "paths": { "$/*": ["./*"] },
-    "types": ["node"],
-    "resolveJsonModule": true,
-    "verbatimModuleSyntax": true,
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noImplicitOverride": true,
-    "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true,
-    "noEmit": true
-  },
-  "include": ["src", "scripts", "tests", "*.ts"]
-}
-```
-
-**Import rule (enforced in review):**
-
-- If the path climbs **zero or one** directory level, use a relative import:
-  `./schema`, `../config`, `../core/env`.
-- If it climbs **two or more** levels, use the alias: `$/package.json`,
-  `$/src/core/schema` (from `tests/` or `scripts/`).
-- **Never** append `.js`/`.ts` to a module specifier. Sources are only consumed by
-  bundlers/transpilers; the shipped artifact is a single file.
-- JSON import requires `with { type: 'json' }`.
-
-Tooling consequences:
-
-- `tsup`/esbuild reads `paths` from `tsconfig.json` automatically.
-- `tsx` supports `paths` (used by `scripts/*`).
-- **Vitest does not read `paths`** → `vitest.config.ts` MUST declare
-  `resolve.alias = { '$': rootDir }`.
-- `tsc --noEmit` is the first gate in `T1`; if TypeScript 7 rejects any option
-  above, fall back to TypeScript `5.9` and record it as a new ADR.
-
----
-
-## 7. Runtime Context & Path Resolution
-
-No module may call `os.homedir()`, `process.platform`, `process.cwd()`,
-`process.env`, or `process.stdout.isTTY` at import time or inside adapters.
-Everything comes through an injected context.
-
-```ts
-export interface RuntimeContext {
-  readonly cwd: string
-  readonly homeDir: string
-  readonly platform: NodeJS.Platform
-  readonly env: NodeJS.ProcessEnv
-  readonly isTTY: boolean
-}
-
-export function createRuntimeContext(overrides?: Partial<RuntimeContext>): RuntimeContext
-```
-
-- `createRuntimeContext()` is called exactly once in `src/index.ts` (and once per
-  test) and passed down.
-- Global paths respect `XDG_CONFIG_HOME` on Linux/macOS and `APPDATA` on Windows,
-  falling back to the documented defaults (see `MATRIX.md` §1.1).
-- VS Code probes `Code`, `Code - Insiders`, `VSCodium` in that order.
-- This is what makes Windows path behavior testable on Linux CI (ADR-0004).
-
----
-
-## 8. Core Modules
-
-### 8.1 `core/fs-atomic.ts`
-
-- `readTextFile(path): string | null` — `null` for `ENOENT`.
-- `writeFileAtomic(path, content, { mode })` — write to a temp file **in the same
-  directory**, `fsync`, then `rename`; on Windows retry `rename` after
-  `rm`-less fallback (`copyFile` + `unlink`) because `rename` over an existing file
-  can fail.
-- `backupFile(path)` — copy to `<path>.bak.<ISO timestamp>` before `--force`
-  operations.
-- `writeFileAtomic` must be safe against symlink surprises: `O_EXCL` on the temp
-  file, random suffix.
-- `.env` is written with mode `0o600`.
-
-### 8.2 `core/store.ts`
-
-Canonical file access only:
-
-- `getConfigPath(scope, ctx)` → `<cwd>/.agents/mcp.json` |
-  `<homeDir>/.agents/mcp.json`.
-- `readConfig(scope, ctx)` → `{ config, raw } | null`.
-- `writeConfig(scope, ctx, config)` → serializes `$schema` + `mcpServers` (minimal,
-  defaults not materialized), atomic write.
-- `loadValidatedConfig(scope, ctx)` → `{ config, warnings }`; throws
-  `ConfigValidationError` with a readable path (`mcpServers.github.url`).
-- Values are read with `jsonc-parser` even for `.json` files (tolerant of comments
-  and trailing commas).
-
-### 8.3 `core/state.ts`
-
-```ts
-interface SyncState {
-  version: 1
-  scope: 'project' | 'global'
-  targets: AgentId[]
-  agents: Record<AgentId, {
-    path: string
-    names: string[]
-    updatedAt: string // ISO-8601
-  }>
-}
-```
-
-Location: `<state dir>/.mcp-sync-state.json`, where the state dir is `<cwd>/.agents`
-or `<homeDir>/.agents`. Rules:
-
-- Missing file → empty state, no warning.
-- Corrupt/unknown-version file → warn, treat as empty, and rewrite on next
-  successful `sync`.
-- `targets` is the persisted agent selection. It is the second source of truth for
-  `sync` (after `--agents`, before auto-detection).
-- `names` per agent is the authoritative `previousManagedNames` set.
-- `import` seeds `names` for every agent it read, even with `--no-sync`.
-- `remove` and `sync` prune names no longer present in the canonical file.
-- State is always written atomically and is git-ignored.
-
-### 8.4 `core/placeholder.ts`
-
-Single implementation shared by adapters, `add`, `doctor`:
-
-```ts
-const PLACEHOLDER_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g
-
-interface Placeholder { raw: string; name: string; fallback?: string; start: number; end: number }
-
-parsePlaceholders(value: string): Placeholder[]
-translate(value: string, syntax: EnvSyntax, opts: { nativeDefault: boolean }):
-  { value: string; warnings: PlaceholderWarning[] }
-collectRequiredVars(server: CanonicalServer): RequiredVar[]
-```
-
-`EnvSyntax = 'posix' | 'env-colon' | 'brace-env'` (`${VAR}`, `${env:VAR}`,
-`{env:VAR}`). Translation is purely syntactic and idempotent. `translate()` never
-substitutes values.
-
-### 8.5 `core/env.ts`
-
-- `parseDotenv(content)` — line-based, `KEY=VALUE`, comments, optional quotes,
-  duplicate keys → last wins, no variable expansion.
-- `readDotenv(scope, ctx)` — `<cwd>/.env` for project, `<homeDir>/.agents/.env`
-  for global.
-- `resolveVar(name, { dotenv, processEnv, fallback })` — precedence: dotenv →
-  processEnv → fallback. Empty string counts as unset for fallback purposes.
-- `planSecretExtraction(server, { policy })` → `{ server, writes, warnings }` where
-  `writes` are `{ key, value, description? }`. Never touches disk.
-- `appendToDotenv(path, writes)` — creates the file if missing (mode `0600` after
-  ensuring `.env` is git-ignored), never overwrites an existing key; warns on a
-  key that exists with a different value.
-- `syncEnvExample(path, keys)` — append missing `KEY=` entries only; preserve
-  order, comments, and existing lines; never write values.
-
-### 8.6 `core/gitignore.ts`
-
-Minimal, lazy, and only for tool-owned secrets/state:
-
-- `ensureIgnored(rootDir, entries)` adds a managed block only when something is
-  about to be written:
-
-  ```gitignore
-  # agents-mcp local (managed)
-  .env
-  .agents/.mcp-sync-state.json
-  ```
-
-- Called by `env.appendToDotenv` and `state.writeState`, never by `init`/`sync` on
-  their own.
-- Never touches agent configuration files. Never ignores shared settings.
-- If an entry is already covered by another pattern, do not duplicate it.
-- If `.env` is already tracked by Git, warn with
-  `git rm --cached .env` and continue (the value is still safe from new commits).
-
----
-
-## 9. Adapter Layer
-
-### 9.1 Contract (`src/adapters/types.ts`)
-
-```ts
-export type ConfigScope = 'project' | 'global'
-export type EnvSyntax = 'posix' | 'env-colon' | 'brace-env'
-
-export type WarningCode =
-  | 'DEFAULT_DROPPED' | 'CWD_UNSUPPORTED' | 'TARGETS_NOT_NATIVE'
-  | 'SCOPE_UNSUPPORTED' | 'TRANSPORT_INFERRED' | 'UNKNOWN_FIELD_DROPPED'
-  | 'AMBIGUOUS_ENTRY' | 'UNKNOWN_PLACEHOLDER' | 'DISABLE_UNSUPPORTED'
-  | 'MANUAL_ENTRY_PRESERVED'
-
-export interface Warning {
-  code: WarningCode
-  agent: AgentId
-  server?: string
-  field?: string
-  message: string
-}
-
-export interface AdapterCapabilities {
-  readonly scopes: readonly ConfigScope[]
-  readonly format: 'json' | 'jsonc'
-  readonly envSyntax: EnvSyntax
-  readonly nativeDefault: boolean
-  readonly nativeDisabled: boolean
-  readonly cwd: boolean
-}
-
-export interface AdapterContext extends RuntimeContext {
-  readonly scope: ConfigScope
-  readonly previousManagedNames: ReadonlySet<string>
-}
-
-export interface CompileResult {
-  readonly content: string
-  readonly managedNames: readonly string[]
-  readonly warnings: readonly Warning[]
-}
-
-export interface ExtractResult {
-  readonly servers: Record<string, CanonicalServer>
-  readonly warnings: readonly Warning[]
-}
-
-export interface AgentAdapter {
-  readonly id: AgentId
-  readonly displayName: string
-  readonly capabilities: AdapterCapabilities
-
-  getConfigPath(scope: ConfigScope, ctx: RuntimeContext): string | null
-  detect(scope: ConfigScope, ctx: RuntimeContext): Promise<boolean>
-
-  /** Pure: canonical server -> native object (null when not applicable). */
-  compile(server: CanonicalServer): { entry: unknown | null; warnings: readonly Warning[] }
-
-  extractServers(rawContent: string, scope: ConfigScope): ExtractResult
-  applyServers(existingRawContent: string | null, servers: Record<string, CanonicalServer>, ctx: AdapterContext): CompileResult
-}
-```
-
-Why `compile()` is separate: `doctor` needs the expected native **object** to
-compare semantically with what is on disk. Comparing serialized text produces
-false positives whenever the user reformats a file.
-
-### 9.2 Shared helpers (`src/adapters/shared.ts`)
-
-- `applyServerEntries(existing, rootKey, entries, { managed, previous, format })` —
-  single implementation of `jsonc-parser` `modify()` + `applyEdits()`:
-  - create the root key only if needed;
-  - write each managed entry in one batch, applying edits in descending offset
-    order (the classic multi-edit footgun);
-  - delete names in `previous` that are no longer produced;
-  - never touch sibling keys.
-- `readEntry(parsed, path)` — tolerant nested lookup (`context_servers.x.command.path`).
-- `makeWarnings(agent, code, message, meta)` — small factory.
-- All functions are pure with respect to the filesystem; file I/O stays in the
-  command layer.
-
-### 9.3 JSONC rules
-
-- Read with `parseTree`/`parse`; on syntax errors, **abort** the write for that
-  file, report `InvalidConfigError`, and do not modify the file.
-- Preserve comments, trailing commas, CRLF, and BOM.
-- If the file is empty or whitespace only, treat it as `{}`.
-- Format only the inserted/replaced node (`formattingOptions: { tabSize: 2,
-  insertSpaces: true }`); preserve everything else byte-for-byte.
-- `~/.claude.json` and `.zed/settings.json` are large multi-purpose files: never
-  re-serialize the whole document.
-
-### 9.4 Behavior matrix
-
-The normative per-agent mapping is in [`MATRIX.md`](./MATRIX.md). Adapter
-implementation must satisfy:
-
-- `previousManagedNames` cleanup without touching manual entries;
-- scope support (`windsurf` is global-only) reported through
-  `capabilities.scopes`;
-- URL-only or otherwise unqualified native input is imported as `http` with
-  `TRANSPORT_INFERRED`;
-- `cwd` is not emitted (`CWD_UNSUPPORTED`);
-- `:-default` is dropped outside `claude-code` (`DEFAULT_DROPPED`);
-- `detect()` uses file/directory existence only (no `PATH` probing — that belongs
-  to `doctor`).
-### 9.5 Registry (`src/adapters/index.ts`)
-
-- `adapters: readonly AgentAdapter[]` in `AGENT_ORDER`.
-- `getAdapter(id)`, `getAdapters(ids?)`.
-- `detectAgents(ctx)` → agents whose config path exists or whose directory exists
-  (project) / whose global path exists (global).
-- `resolveTargets({ flag, state, ctx })` — precedence: `--agents` → `state.targets`
-  → detection. Unknown ids are a usage error.
-
----
-
-## 10. Source Resolvers (`src/sources/`)
-
-### 10.1 DTO
-
-```ts
-export interface RequiredEnvVar {
-  name: string
-  description?: string
-  isSecret: boolean
-}
-
-export interface ResolvedServerPackage {
-  suggestedName: string
-  definition: CanonicalServer       // placeholders already in `${VAR}` form
-  requiredEnv: RequiredEnvVar[]
-  source: { type: 'direct' | 'github' | 'registry'; ref: string }
-}
-```
-
-### 10.2 `direct.ts`
-
-- `--stdio <command>` + repeatable `--arg <token>`.
-- If `--arg` is absent and the `--stdio` value contains whitespace, tokenize with
-  `string-argv`; reject empty argv or an empty first token.
-- `--http <url>` (or a bare `http(s)://` source) → `type: "streamable-http"`.
-- `--env KEY=VALUE` → value is written to `.env` (via `core/env.ts`) and the
-  canonical entry uses `${KEY}`. `--env KEY` → reference only; warns when
-  unresolved.
-- `--header "Name: Value"` (repeatable) → `headers`; split on the first `:`.
-- `--cwd` → canonical `cwd` (preserved only; see `MATRIX.md`).
-- `--name` overrides `suggestedName`. Suggested name for URLs is derived from the
-  hostname + first path segment, sanitized to `SERVER_NAME_PATTERN`.
-
-### 10.3 `github.ts`
-
-1. Accept `owner/repo`, `https://github.com/owner/repo`, and an optional `#ref`.
-2. Try `https://raw.githubusercontent.com/<owner>/<repo>/<ref|main>/server.json`;
-   fall back to `master` when the ref is not explicit.
-3. If neither exists, resolve the default branch through
-   `https://api.github.com/repos/<owner>/<repo>` (only then), then read
-   `server.json`, then `package.json`.
-4. `server.json` parsing (fixture-driven):
-   - accept both `registry_type`/`registryType` and `identifier`/`name`;
-   - preference `npm` → `npx -y <id>[@<version>]`, `pypi` → `uvx <id>[==<version>]`,
-     `oci` → `docker run -i --rm <id>`;
-   - `environment_variables[]` with `is_required: true` become `requiredEnv`,
-     honoring `is_secret`.
-5. `package.json` fallback: `bin` (string or object) selects `<name>` for
-   `npx -y`; no `bin` → actionable error ("repository is not an MCP server").
-6. HTTP policy: `AbortSignal.timeout(10_000)`, one retry on `429`/`5xx` with
-   backoff, `User-Agent: agents-mcp/<version>`, response cap 2 MiB, optional
-   `GITHUB_TOKEN` (dotenv → env) for rate limits. Never execute fetched content.
-7. Validation with Zod; malformed payloads produce a specific error, never a
-   partial server entry.
-
-### 10.4 `registry.ts`
-
-- `@scope/name` or a bare package name that exists on npm → query
-  `https://registry.npmjs.org/<url-encoded-name>`.
-- Otherwise query
-  `https://registry.modelcontextprotocol.io/v0/servers?search=<query>&limit=10`.
-- Multiple results: interactive selection; under `--yes`, prefer an exact name
-  match, else fail with the candidate list.
-- Registry payloads are pinned by fixtures. 404 / 5xx / malformed JSON each get a
-  distinct message.
-
-### 10.5 Resolution order (`sources/index.ts`)
-
-Explicit flags → remote URL → `owner/repo` → registry/npm. The resolver never
-writes files; `commands/add.ts` owns persistence.
-
----
-
-## 11. Commands
-
-Global flags, available on every command: `--global`/`-g`, `--yes`/`-y`,
-`--agents <csv>`, `--dry-run`.
-
-`--yes` and `CI=true` imply the non-interactive `AutoUi`. When both a value and a
-default are needed, the default wins and the decision is printed.
-
-| Command | Behavior |
-| :--- | :--- |
-| `init` | Create `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents (multi-select; `--agents` bypasses), persist `targets` in state. Existing file → exit `1` unless `--force` (which writes a `.bak.<timestamp>` first). Never touches `.gitignore`. In non-interactive mode, targets come from `--agents`, else from detection; if neither yields an agent, exit `1` with a hint to pass `--agents` (never assume all six). |
-| `import` | Scan every adapter for the active scope, extract, normalize, dedupe/conflict-resolve, apply the secret policy, merge into canonical (existing entries win unless `--force`), seed state names for all scanned agents, then `sync` unless `--no-sync`. Native files are never deleted. |
-| `add <source>` | Resolve source, prompt/accept `--name`, resolve/Create env vars, write canonical, then `sync` unless `--no-sync`. Same name + same normalized definition → exit `0`, no write (idempotent). Same name + different definition → exit `1` with a diff; `--force` overwrites; interactive offers rename. |
-| `sync` | Validate canonical; targets = flag → state → detection; compile per adapter; write; update state; print summary. No targets → exit `1` with a hint (never a silent no-op). Idempotent: a second run produces no byte changes. |
-| `remove <name>` | Name must exist, else exit `1`. Remove from canonical, then `sync` unless `--no-sync`. |
-| `list` | Read-only table: name, type, command/URL, and per-agent sync status. `--all` includes the global file and marks shadowed entries (project wins). |
-| `doctor` | Schema, env resolution (all string fields), stdio binaries (`PATH` + `PATHEXT`, skip shell builtins), semantic drift per managed entry, unsupported-scope warnings, `.env`-tracked warning, state sanity. Exit `1` on errors; `--strict` promotes warnings. |
-
-Exit codes: `0` success, `1` validation/runtime failure, `2` usage error, `130`
-interrupted.
-
-Conflict policy on `import` (deterministic, `--yes`-safe): compare normalized
-definitions; equal → merge silently; different → interactive pick, or under
-`--yes` keep the entry from the earliest agent in `AGENT_ORDER` and warn with the
-losing agents listed.
-
-`--dry-run` must print the exact intended writes (path + JSON) and touch nothing,
-including state.
-
----
-
-## 12. UI & Prompts (`src/ui/`)
-
-```ts
-export interface PromptUi {
-  intro(message: string): void
-  outro(message: string): void
-  note(message: string, title?: string): void
-  warn(message: string): void
-  error(message: string): void
-  confirm(opts: { message: string; initialValue: boolean }): Promise<boolean>
-  select<T>(opts: { message: string; options: Option<T>[]; initialValue?: T }): Promise<T>
-  multiselect<T>(opts: { message: string; options: Option<T>[]; initialValues?: T[] }): Promise<T[]>
-  text(opts: { message: string; placeholder?: string; defaultValue?: string; validate?: (v: string) => string | undefined }): Promise<string>
-  password(opts: { message: string }): Promise<string>
-  spinner(message: string): { start(): void; stop(message?: string): void }
-}
-```
-
-- `createClackUi()` for TTY; `createAutoUi({ defaults, log })` for `--yes`/CI and
-  tests. No command may import `@clack/prompts` directly.
-- Ctrl-C exits `130` with a clean message.
-- Secrets are masked in prompts and never echoed in `note`/`warn`/`error`.
-
----
-
-## 13. Secret Hygiene
-
-Detection (during `import` and literal `add` values):
-
-- **Keys:** `/(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|CREDENTIAL|PRIVATE_KEY|AUTH|DSN)(?:_|$)/i`.
-- **Values:** URL credentials (`scheme://user:pass@`), known prefixes (`ghp_`,
-  `github_pat_`, `sk-`, `xox[baprs]-`), or high-entropy strings ≥ 20 chars.
-- Fields scanned: `env` values, `headers` values, `args` items, `url`.
-- A value already wrapped in `${...}` is never flagged.
-
-Policy:
-
-- Interactive: propose extraction per finding, with a derived uppercase key
-  (`<SERVER>_<KEY>`, sanitized and collision-checked).
-- `--yes`/CI: **warn only**; write nothing to `.env` unless `--extract-secrets` is
-  passed.
-- Before any `.env` write: ensure `.env` is git-ignored, create with mode `0600`,
-  never overwrite an existing key.
-- `.env.example` gets `KEY=` only.
-- Canonical file and native files receive `${KEY}`, never the value.
-- No secret value in logs, errors, or dry-run output (mask as `***`).
-
----
-
-## 14. Doctor
-
-Checks, in order, each producing a structured result:
-
-1. **Schema:** `CanonicalMcpConfigSchema` + `validateConfig()` warnings.
-2. **Env:** every placeholder in `env`, `headers`, `args`, `url`; missing required
-   variable (no fallback) = error.
-3. **Runtime:** for each `stdio` server, resolve `command` in `PATH` (respecting
-   `PATHEXT` on Windows); absolute paths must exist and be executable. `npx`/`uvx`
-   presence is checked, not the package itself.
-4. **Drift:** for each target agent and each name in state, compare
-   `adapter.compile(server)` with the parsed on-disk entry (deep equality after
-   normalization); missing/extra/changed = drift. Ignore formatting and unmanaged
-   entries.
-5. **State:** unreadable/corrupt state, targets pointing at unsupported scopes.
-6. **Hygiene:** `.env` tracked by Git; placeholders without fallback that resolve
-   nowhere.
-
-Exit `1` if any error; `0` if only warnings; `--strict` makes warnings fatal.
-All results are returned as data and rendered by the command (future `--json`).
-
----
-
-## 15. Packaging & Release
-
-Publishing happens **only** from `dist/`. The repository root is never published.
-
-The build pipeline is finalized together with the implementation (`T1`/`T11`); the contract below is mandatory regardless of the concrete script names.
-
-`package.json` (root) scripts required at minimum:
-
-- `build` → single-file bundle;
-- `typecheck` → `tsc --noEmit`;
-- `test` / `test:watch` → Vitest;
-- `format` / `format:check` → Prettier;
-- `verify` → typecheck + format check + tests + build;
-- `dist:build` → full `verify`;
-- `dist:package` → `tsx package.ts`;
-- `dist:publish` → `npm publish ./dist`;
-- `dist` → build → package → publish, in order;
-- `prepublishOnly` → refuse publishing from the repository root.
-
-`package.ts` requirements:
-
-- create `dist/` if missing;
-- derive `dist/package.json` from the root manifest, removing `scripts`, `devDependencies`, **and `dependencies`** (everything is bundled);
-- expose exactly one binary: `bin: { "agents-mcp": "./index.js" }`, with `main`/`exports` pointing at `./index.js`, explicit `files`, and `engines.node: ">=22"`;
-- copy `LICENSE` and `README.md`; copy `CHANGELOG.md` when present (the changelog is maintained by the `changelog-management` skill) and warn instead of failing when it is absent;
-- write the manifest with a trailing newline.
-
-Constraints:
-
-- **Exactly one binary:** `agents-mcp`.
-- No runtime `dependencies` in the published manifest.
-- `npm run dist` runs build → package → publish in that order. Publishing is always manual and happens after a version bump.
-- `dist:build` runs the full `verify` suite, so CI catches drift before publication.
-
----
-
-## 16. Testing & CI
-
-### 16.1 Test layout
-
-| Path | Coverage |
-| :--- | :--- |
-| `tests/core/schema.test.ts` | positive/negative fixtures, strictness, defaults, name pattern |
-| `tests/core/placeholder.test.ts` | grammar, fallbacks, all three env syntaxes, idempotence |
-| `tests/core/env.test.ts` | `.env` parsing, precedence (dotenv wins), secret heuristics, `.env.example`, no overwrite |
-| `tests/core/store.test.ts` | atomic write, minimal serialization, invalid JSONC abort |
-| `tests/core/state.test.ts` | targets persistence, corrupt state, pruning |
-| `tests/core/gitignore.test.ts` | lazy managed block, no duplicate entries, no agent files |
-| `tests/adapters/contract.test.ts` | table-driven contract across all 6 adapters |
-| `tests/adapters/<agent>.test.ts` | compile/extract/apply, JSONC preservation, previousManagedNames, CRLF/BOM |
-| `tests/sources/*.test.ts` | direct parsing, GitHub chain, registry, mocked `fetch`, fixtures |
-| `tests/commands/*.test.ts` | integration in temp dirs: `init → add → sync → list → remove`, `import`, `doctor` |
-| `tests/helpers/sandbox.ts` | temp `cwd`/`homeDir`/`XDG_CONFIG_HOME`, guard that fails if not under `os.tmpdir()` |
-
-Rules:
-
-- Use the **real filesystem** inside the sandbox; mock only `fetch` and, when
-  needed, `process.env`/`PATH`.
-- Never mock `node:fs` or `node:os`; inject `RuntimeContext` instead.
-- Every mutating test asserts it never left the sandbox (guard).
-- Adapter round-trip tests are table-driven from `MATRIX.md` to prevent drift.
-
-### 16.2 CI (`.github/workflows/ci.yml`)
-
-- `verify`: Ubuntu, Node `22`, `24`, `26` → `npm ci` + `npm run verify`.
-- `windows-paths`: Windows, Node `22` → `typecheck` + `tests/core` +
-  `tests/adapters` (path resolution and atomic-rename behavior).
-- No test may hit the network; everything is mocked or fixture-driven.
-
-Coverage (optional, enabled from day one): `@vitest/coverage-v8`, thresholds 80%
-lines/functions and 75% branches over `src/core` and `src/adapters`.
-
----
-
-## 17. Risks & Mitigations
-
-| Risk | Mitigation |
-| :--- | :--- |
-| Corrupting `~/.claude.json` or `.zed/settings.json` | JSONC AST edits only; abort on parse error; atomic writes; `.bak` before `--force`; tests with real fixture files. |
-| Secret leakage | Symbolic placeholders end-to-end; `.env` git-ignored before write; `0600`; masked logs; warn-only in CI. |
-| Stale generated schema | Schema is derived from Zod at build time; no committed artifact to drift. |
-| Node/TS version drift | `engines >=22`, `@types/node@^22`, CI matrix; TS 7 is the only type checker, bundling does not depend on it. |
-| Windows path/rename differences | Injected platform, XDG/APPDATA resolution, Windows CI job, rename fallback. |
-| `jsonc-parser` multi-edit offset bugs | One shared helper, descending edits, dedicated tests. |
-| False-positive drift | Semantic comparison via `compile()`, never text diff. |
-| Network flakiness in `add` | Timeouts, one retry, fixtures in tests, no network in `verify`. |
-| Overwriting user MCP entries | Manage only names present in state; manual entries are preserved and reported. |
-| `zod` upgrade breaking schema output | Pinned major range; `verify` runs `typecheck` + `build`. |
-
----
-
-## 18. Definition of Done (`v0.1.0`)
-
-- All six adapters implement the contract and pass round-trip, JSONC,
-  `previousManagedNames`, and warning tests.
-- All seven commands work in project and global scopes, interactively (via the
-  prompt port) and non-interactively (`--yes`), with `--dry-run` honored.
-- `sync` is idempotent byte-for-byte; `remove` propagates without touching manual
-  entries; `import` never deletes native files.
-- `doctor` detects all five failure classes and exits `1` on errors.
-- `npm run verify` and `npm run build` are green; `node dist/index.js --help`
-  works; `dist/package.json` has one `bin`, no dependencies, and `engines >=22`.
-- No secret value can reach a canonical or native file through any command.
-- README, `SPEC.md`, `MATRIX.md`, and this blueprint describe exactly what the code
-  does.
-
----
-
-## 19. Architecture Decision Records
-
-| ADR | Decision |
-| :--- | :--- |
-| [0001](../docs/decisions/0001-canonical-transports.md) | Canonical transports are `stdio` and `http`. **Superseded by ADR-0010**. |
-| [0002](../docs/decisions/0002-schema-source-and-versioning.md) | Zod 4 is the single schema source; Draft 2020-12 output; fixed `$id` URL. **Superseded by ADR-0010**. |
-| [0003](../docs/decisions/0003-bundler-tsup.md) | `tsup` (esbuild) single-file ESM bundle, no `.d.ts`. |
-| [0004](../docs/decisions/0004-runtime-context-and-pure-compilers.md) | Injected runtime context and pure native compilers. |
-| [0005](../docs/decisions/0005-local-sync-state.md) | Local sync state + persisted targets. |
-| [0006](../docs/decisions/0006-non-destructive-compilation.md) | Native files are preserved in place. |
-| [0007](../docs/decisions/0007-env-and-secrets.md) | `.env` precedence and safe secret extraction. |
-| [0008](../docs/decisions/0008-packaging-and-runtime-floor.md) | Node `>=22`, publish from `dist/` only, single binary. |
-| [0009](../docs/decisions/0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`. |
-| [0010](../docs/decisions/0010-adopt-agent-plugins-mcp-schema.md) | Adopt Agent Plugins MCP 1.0.0 as the normative basis. |
-| [0011](../docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md) | Plugin ownership via `managedPlugins` and safe, non-recursive cleanup. |
-````
-
-## File: src/commands/remove.command.ts
+## File: src/adapters/index.ts
 ````typescript
 /**
- * `remove` command (§11).
+ * Adapter registry (§9.5): all six adapters in `AGENT_ORDER`, plus lookup,
+ * detection, and target resolution.
  *
- * Remove a server from the canonical config and sync unless `--no-sync`.
- * Unknown name → exit `1`.
+ * `resolveTargets` implements the precedence: `--agents` flag → persisted
+ * `state.targets` → auto-detection. Unknown ids are a usage error.
+ */
+
+import { z } from 'zod'
+import { AGENT_ORDER } from '$/src/config'
+import type { AgentIdSchema } from '$/src/core/schema'
+import type { RuntimeContext, ConfigScope } from '$/src/core/context'
+import type { SyncState } from '$/src/core/state'
+import type {
+  AgentAdapter,
+  AdapterCapabilities,
+  AdapterContext,
+  CompileResult,
+  ExtractResult,
+  Warning,
+  WarningCode,
+  EnvSyntax,
+} from '$/src/adapters/types'
+import { makeWarning } from '$/src/adapters/types'
+import * as claudeCode from '$/src/adapters/claude-code'
+import * as cursor from '$/src/adapters/cursor'
+import * as vscode from '$/src/adapters/vscode'
+import * as opencode from '$/src/adapters/opencode'
+import * as zed from '$/src/adapters/zed'
+import * as windsurf from '$/src/adapters/windsurf'
+import * as antigravity from '$/src/adapters/antigravity'
+
+export type AgentId = z.infer<typeof AgentIdSchema>
+
+/** Re-export the adapter contract types and warning factory. */
+export type {
+  AgentAdapter,
+  AdapterCapabilities,
+  AdapterContext,
+  CompileResult,
+  ExtractResult,
+  Warning,
+  WarningCode,
+  EnvSyntax,
+}
+export { makeWarning }
+
+function buildAdapter(
+  id: AgentId,
+  displayName: string,
+  capabilities: AdapterCapabilities,
+  getConfigPath: (scope: ConfigScope, ctx: RuntimeContext) => string | null,
+  detect: (scope: ConfigScope, ctx: RuntimeContext) => Promise<boolean>,
+  compile: AgentAdapter['compile'],
+  extractServers: AgentAdapter['extractServers'],
+  applyServers: AgentAdapter['applyServers'],
+): AgentAdapter {
+  return {
+    id,
+    displayName,
+    capabilities,
+    getConfigPath,
+    detect,
+    compile,
+    extractServers,
+    applyServers,
+  }
+}
+
+/**
+ * Validate `--agents` flag values against known agent ids. Throws a usage
+ * error for unknown ids. Shared by `resolveTargets` and `resolveTargetsAsync`.
+ */
+export function validateAgentFlag(flag: readonly string[]): AgentId[] {
+  const valid = new Set(AGENT_ORDER)
+  const unknown = flag.filter((id) => !valid.has(id as AgentId))
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown agent id(s) in --agents: ${unknown.join(', ')}. Valid: ${AGENT_ORDER.join(', ')}`,
+    )
+  }
+  return flag as AgentId[]
+}
+
+/** All six adapters, in deterministic `AGENT_ORDER`. */
+export const adapters: readonly AgentAdapter[] = [
+  buildAdapter(
+    claudeCode.id,
+    claudeCode.displayName,
+    claudeCode.capabilities,
+    claudeCode.getConfigPath,
+    claudeCode.detect,
+    claudeCode.compile,
+    claudeCode.extractServers,
+    claudeCode.applyServers,
+  ),
+  buildAdapter(
+    cursor.id,
+    cursor.displayName,
+    cursor.capabilities,
+    cursor.getConfigPath,
+    cursor.detect,
+    cursor.compile,
+    cursor.extractServers,
+    cursor.applyServers,
+  ),
+  buildAdapter(
+    vscode.id,
+    vscode.displayName,
+    vscode.capabilities,
+    vscode.getConfigPath,
+    vscode.detect,
+    vscode.compile,
+    vscode.extractServers,
+    vscode.applyServers,
+  ),
+  buildAdapter(
+    opencode.id,
+    opencode.displayName,
+    opencode.capabilities,
+    opencode.getConfigPath,
+    opencode.detect,
+    opencode.compile,
+    opencode.extractServers,
+    opencode.applyServers,
+  ),
+  buildAdapter(
+    zed.id,
+    zed.displayName,
+    zed.capabilities,
+    zed.getConfigPath,
+    zed.detect,
+    zed.compile,
+    zed.extractServers,
+    zed.applyServers,
+  ),
+  buildAdapter(
+    windsurf.id,
+    windsurf.displayName,
+    windsurf.capabilities,
+    windsurf.getConfigPath,
+    windsurf.detect,
+    windsurf.compile,
+    windsurf.extractServers,
+    windsurf.applyServers,
+  ),
+  buildAdapter(
+    antigravity.id,
+    antigravity.displayName,
+    antigravity.capabilities,
+    antigravity.getConfigPath,
+    antigravity.detect,
+    antigravity.compile,
+    antigravity.extractServers,
+    antigravity.applyServers,
+  ),
+] as const
+
+/** Map of agent id → adapter, in `AGENT_ORDER`. */
+export const adapterMap: ReadonlyMap<AgentId, AgentAdapter> = new Map(
+  adapters.map((a) => [a.id, a]),
+)
+
+/** Lookup an adapter by id. Throws a usage error for unknown ids. */
+export function getAdapter(id: string): AgentAdapter {
+  const adapter = adapterMap.get(id as AgentId)
+  if (!adapter) {
+    const valid = Array.from(adapterMap.keys()).join(', ')
+    throw new Error(
+      `Unknown agent id \`${id}\`. Valid agent ids: ${valid}. Pass --agents to select.`,
+    )
+  }
+  return adapter
+}
+
+export function getAdapters(ids?: readonly string[]): AgentAdapter[] {
+  if (!ids || ids.length === 0) {
+    return [...adapters]
+  }
+  return ids.map((id) => getAdapter(id))
+}
+
+/**
+ * Detect which agents are configured for `scope`. For project scope, an agent
+ * counts as detected when its config path exists or its containing directory
+ * exists; for global scope, when its config path exists.
+ */
+export async function detectAgents(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): Promise<AgentId[]> {
+  const detected: AgentId[] = []
+  const { statSync } = await import('node:fs')
+  const { dirname } = await import('node:path')
+
+  for (const adapter of adapters) {
+    // Gate on declared scope support, not on getConfigPath() === null.
+    // antigravity returns null for getConfigPath (per-plugin storage) but still
+    // supports project/global scope and must be detectable via detect().
+    if (!adapter.capabilities.scopes.includes(scope)) {
+      continue
+    }
+
+    let found = false
+    try {
+      found = await adapter.detect(scope, ctx)
+    } catch {
+      found = false
+    }
+
+    if (!found && scope === 'project') {
+      const path = adapter.getConfigPath(scope, ctx)
+      // Only fall back to directory-existence when the adapter has a single
+      // native config path; per-plugin adapters (antigravity) are handled by
+      // detect() itself.
+      if (path !== null) {
+        // Only fall back to directory-existence when the config's parent dir is
+        // not cwd itself (otherwise every project "has" claude-code/opencode).
+        const parent = dirname(path)
+        if (parent !== ctx.cwd) {
+          try {
+            found = statSync(parent).isDirectory()
+          } catch {
+            found = false
+          }
+        }
+      }
+    }
+
+    if (found) {
+      detected.push(adapter.id)
+    }
+  }
+
+  return detected
+}
+
+/**
+ * Resolve the target agents with precedence: `--agents` flag → persisted
+ * `state.targets` → auto-detection. Unknown ids are a usage error.
+ * Returns an empty array when nothing is resolvable (caller decides whether
+ * that is an error).
+ */
+export function resolveTargets({
+  flag,
+  state,
+  ctx,
+}: {
+  flag: readonly string[] | undefined
+  state: SyncState
+  ctx: RuntimeContext
+}): AgentId[] {
+  if (flag && flag.length > 0) {
+    return validateAgentFlag(flag)
+  }
+
+  if (state.targets && state.targets.length > 0) {
+    return [...state.targets]
+  }
+
+  return []
+}
+
+/**
+ * Async variant of resolveTargets that falls back to detection when neither
+ * flag nor state targets are available.
+ */
+export async function resolveTargetsAsync({
+  flag,
+  state,
+  ctx,
+}: {
+  flag: readonly string[] | undefined
+  state: SyncState
+  ctx: RuntimeContext
+}): Promise<AgentId[]> {
+  if (flag && flag.length > 0) {
+    return validateAgentFlag(flag)
+  }
+  if (state.targets && state.targets.length > 0) {
+    return [...state.targets]
+  }
+  return detectAgents(state.scope, ctx)
+}
+````
+
+## File: src/commands/doctor.command.ts
+````typescript
+/**
+ * `doctor` command (§11).
+ *
+ * Runs six checks in order (§14):
+ *   1. Schema — canonical config validity + validateConfig() warnings
+ *   2. Env — every placeholder in env/headers/args/url; missing required var = error
+ *   3. Runtime — stdio binaries resolved in PATH (respecting PATHEXT on Windows);
+ *      absolute paths must exist and be executable
+ *   4. Drift — adapter.compile(server) vs parsed on-disk entry (deep equality)
+ *   5. State — corrupt/unreadable state; targets pointing at unsupported scopes
+ *   6. Hygiene — `.env` tracked by Git; literal/plaintext secret findings
+ *
+ * Exit `1` if any error; `0` if only warnings; `--strict` makes warnings fatal.
  */
 
 import { defineCommand } from 'citty'
+import { existsSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+import { parse } from 'jsonc-parser'
+import {
+  createUiAndCtx,
+  configPath,
+  isDryRun,
+  isGlobalFlag,
+  isYesFlag,
+  parseAgentsFlag,
+} from '$/src/commands/util'
+import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
+import type { LoadValidatedConfigResult } from '$/src/core/store'
+import { loadState } from '$/src/core/state'
+import { parsePlaceholders, SECRET_KEY_RE } from '$/src/core/placeholder'
+import { readDotenv, resolveVar } from '$/src/core/env'
+import { readTextFile } from '$/src/core/fs-atomic'
+import { isGitTracked } from '$/src/core/gitignore'
+import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+import type { CanonicalServer } from '$/src/core/schema'
+import { isStdioServer } from '$/src/core/schema'
+
+export interface DoctorResult {
+  code: string
+  severity: 'error' | 'warning'
+  message: string
+  agent?: string
+  server?: string
+  field?: string
+}
+
+export interface DoctorSummary {
+  errors: number
+  warnings: number
+  results: DoctorResult[]
+}
+
+export interface DoctorOptions {
+  scope: ConfigScope
+  ctx: RuntimeContext
+  flag: readonly string[] | undefined
+  dryRun: boolean
+  strict: boolean
+}
+
+/** Run all six doctor checks and return structured results. */
+export async function runDoctor(
+  options: DoctorOptions,
+): Promise<DoctorSummary> {
+  const { scope, ctx, flag, dryRun, strict } = options
+  const { ui } = createUiAndCtx({ yes: strict })
+
+  const results: DoctorResult[] = []
+
+  // 1. Schema check — wrap loadValidatedConfig in try/catch so an invalid
+  //    .agents/mcp.json yields a structured SCHEMA error instead of crashing.
+  let validated: LoadValidatedConfigResult | undefined
+  try {
+    const result = loadValidatedConfig(scope, ctx)
+    if (result) {
+      validated = result
+    }
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      results.push({
+        code: 'SCHEMA',
+        severity: 'error',
+        message: `Invalid canonical config at ${configPath(scope, ctx)}: ${err.issues
+          .map((i) => `${i.path || 'root'} — ${i.message}`)
+          .join('; ')}`,
+      })
+      renderResults(ui, results, strict)
+      const errors = results.filter((r) => r.severity === 'error').length
+      const warnings = results.filter((r) => r.severity === 'warning').length
+      return { errors, warnings, results }
+    }
+    throw err
+  }
+
+  if (!validated) {
+    results.push({
+      code: 'SCHEMA',
+      severity: 'error',
+      message: `No canonical config at ${configPath(scope, ctx)}. Run 'agents-mcp init' first.`,
+    })
+    renderResults(ui, results, strict)
+    const errors = results.filter((r) => r.severity === 'error').length
+    const warnings = results.filter((r) => r.severity === 'warning').length
+    return { errors, warnings, results }
+  }
+
+  const { config, warnings: configWarnings } = validated
+  for (const w of configWarnings) {
+    results.push({
+      code: 'SCHEMA',
+      severity: 'warning',
+      message: w,
+    })
+  }
+  // Schema structure is valid by virtue of loadValidatedConfig parsing.
+  const servers = config.mcpServers
+
+  // Resolve targets for drift/state checks.
+  const stateResult = loadState(scope, ctx)
+  const state = stateResult.state
+  const targets = await resolveTargetsAsync({ flag, state, ctx })
+
+  // 2. Env check — every placeholder in env/headers/args/url; missing required
+  //    var without fallback = error, reported once under ENV (not duplicated
+  //    under HYGIENE). Never assign server name to result.agent.
+  const dotenvVars = readDotenv(scope, ctx).vars
+  const reportedEnvVars = new Set<string>()
+  for (const [name, server] of Object.entries(servers)) {
+    for (const field of placeholderFields(server)) {
+      const phs = parsePlaceholders(field.value)
+      for (const ph of phs) {
+        const resolved = resolveVar(ph.name, {
+          dotenv: dotenvVars,
+          processEnv: ctx.env,
+        })
+        if (resolved.source === 'unset' && ph.fallback === undefined) {
+          const key = `${name}::${field.name}::${ph.name}`
+          if (reportedEnvVars.has(key)) continue
+          reportedEnvVars.add(key)
+          results.push({
+            code: 'ENV',
+            severity: 'error',
+            message: `Required env var \`${ph.name}\` is not set (no fallback) for server \`${name}\` field \`${field.name}\``,
+            server: name,
+            field: field.name,
+          })
+        }
+      }
+    }
+  }
+
+  // 3. Runtime check — stdio binaries.
+  for (const server of Object.values(servers)) {
+    if (!isStdioServer(server)) continue
+    const cmd = server.command
+    if (isAbsolutePath(cmd, ctx.platform)) {
+      if (!existsSync(cmd) || !isExecutable(cmd, ctx.platform)) {
+        results.push({
+          code: 'RUNTIME',
+          severity: 'error',
+          message: `Binary \`${cmd}\` does not exist or is not executable`,
+        })
+      }
+    } else {
+      const resolved = which(cmd, ctx.env, ctx.platform)
+      if (!resolved) {
+        results.push({
+          code: 'RUNTIME',
+          severity: 'error',
+          message: `Binary \`${cmd}\` not found in PATH`,
+        })
+      }
+    }
+  }
+
+  // 4. Drift check — compile per adapter vs parsed on-disk entry.
+  for (const agentId of targets) {
+    const adapter = getAdapter(agentId)
+    const nativePath = adapter.getConfigPath(scope, ctx)
+    if (nativePath === null) continue
+    const existing = readTextFile(nativePath)
+
+    // (a) Extra/orphan managed server names on disk in native files.
+    const onDiskNames = new Set<string>()
+    if (existing !== null) {
+      const parsed = parseNativeEntryWhole(
+        existing,
+        adapter.capabilities.rootKey,
+      )
+      if (parsed !== null) {
+        for (const name of Object.keys(parsed)) {
+          onDiskNames.add(name)
+        }
+      }
+    }
+    const canonicalNames = new Set(Object.keys(servers))
+    for (const diskName of onDiskNames) {
+      if (!canonicalNames.has(diskName)) {
+        results.push({
+          code: 'DRIFT',
+          severity: 'warning',
+          message: `Orphan server \`${diskName}\` on disk in ${nativePath} but not in canonical config`,
+          agent: agentId,
+          server: diskName,
+        })
+      }
+    }
+
+    for (const [name, server] of Object.entries(servers)) {
+      const { entry } = adapter.compile(server)
+      if (existing === null) {
+        results.push({
+          code: 'DRIFT',
+          severity: 'warning',
+          message: `Managed server \`${name}\` missing from ${nativePath}`,
+          agent: agentId,
+          server: name,
+        })
+        continue
+      }
+      const parsed = parseNativeEntry(
+        existing,
+        name,
+        adapter.capabilities.rootKey,
+      )
+      if (parsed === null) {
+        results.push({
+          code: 'DRIFT',
+          severity: 'warning',
+          message: `Managed server \`${name}\` missing from ${nativePath}`,
+          agent: agentId,
+          server: name,
+        })
+        continue
+      }
+      if (!deepEqual(normalizeEntry(entry), normalizeEntry(parsed))) {
+        results.push({
+          code: 'DRIFT',
+          severity: 'warning',
+          message: `Managed server \`${name}\` drifted on disk for ${agentId}`,
+          agent: agentId,
+          server: name,
+        })
+      }
+    }
+
+    // (b) Plugin files in .agents/plugins/<name>/ for canonical servers.
+    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+    const pluginsDir = join(base, '.agents', 'plugins')
+    const includeAntigravity =
+      adapter.capabilities.layout === 'per-plugin' || agentId === 'antigravity'
+    for (const name of canonicalNames) {
+      const pluginDir = join(pluginsDir, name)
+      const pluginJson = join(pluginDir, 'plugin.json')
+      const mcpJson = join(pluginDir, 'mcp.json')
+      const mcpConfigJson = join(pluginDir, 'mcp_config.json')
+
+      let missing: string[] = []
+      if (!existsSync(pluginJson)) missing.push('plugin.json')
+      if (!existsSync(mcpJson)) missing.push('mcp.json')
+      if (includeAntigravity && !existsSync(mcpConfigJson)) {
+        missing.push('mcp_config.json')
+      }
+
+      if (missing.length > 0) {
+        results.push({
+          code: 'DRIFT',
+          severity: 'warning',
+          message: `Plugin \`${name}\` missing ${missing.join(', ')} in ${pluginDir}`,
+          agent: agentId,
+          server: name,
+        })
+      }
+    }
+  }
+
+  // 5. State check — corrupt state; targets pointing at unsupported scopes.
+  //    Gate on `adapter.capabilities.scopes.includes(scope)` so antigravity
+  //    (per-plugin layout, no single config path) is not a false positive.
+  for (const w of stateResult.warnings) {
+    results.push({
+      code: 'STATE',
+      severity: 'error',
+      message: w,
+    })
+  }
+  // Legacy-import notices are non-fatal STATE warnings by default and are
+  // promoted to failures by --strict (like any other warning). They name
+  // .agents/mcp-lock.json (the lock path).
+  for (const n of stateResult.notices) {
+    results.push({
+      code: 'STATE',
+      severity: 'warning',
+      message: n,
+    })
+  }
+  for (const agentId of targets) {
+    const adapter = getAdapter(agentId)
+    if (!adapter.capabilities.scopes.includes(scope)) {
+      results.push({
+        code: 'STATE',
+        severity: 'warning',
+        message: `Target \`${agentId}\` does not support ${scope} scope`,
+        agent: agentId,
+      })
+    }
+  }
+
+  // 6. Hygiene — .env tracked by Git; literal/plaintext secret findings.
+  //    Missing env vars are reported only under ENV (check #2), never here.
+  if (isGitTracked(ctx.cwd, '.env')) {
+    results.push({
+      code: 'HYGIENE',
+      severity: 'warning',
+      message: `.env is tracked by Git; run \`git rm --cached .env\` to stop tracking it`,
+    })
+  }
+  for (const [name, server] of Object.entries(servers)) {
+    for (const field of placeholderFields(server)) {
+      const phs = parsePlaceholders(field.value)
+      // A literal (non-placeholder) value under a secret-like key is a
+      // plaintext secret finding: it should use \`${VAR}\` instead.
+      if (phs.length === 0 && SECRET_KEY_RE.test(field.name)) {
+        results.push({
+          code: 'HYGIENE',
+          severity: 'warning',
+          message: `Plaintext secret in server \`${name}\` field \`${field.name}\`: use \${VAR} instead of a literal value`,
+          server: name,
+          field: field.name,
+        })
+      }
+    }
+  }
+
+  renderResults(ui, results, strict)
+
+  const errors = results.filter((r) => r.severity === 'error').length
+  const warnings = results.filter((r) => r.severity === 'warning').length
+  return { errors, warnings, results }
+}
+
+/** Render results through the UI. */
+function renderResults(
+  ui: ReturnType<typeof createUiAndCtx>['ui'],
+  results: DoctorResult[],
+  strict: boolean,
+): void {
+  if (results.length === 0) {
+    ui.note('doctor: no issues found')
+    return
+  }
+  for (const r of results) {
+    const prefix = r.severity === 'error' ? 'error' : 'warn'
+    const parts = [r.code]
+    if (r.server) parts.push(`\`${r.server}\``)
+    if (r.field) parts.push(`\`${r.field}\``)
+    ui[prefix](`${parts.join(' ')}: ${r.message}`)
+  }
+  const errs = results.filter((r) => r.severity === 'error').length
+  const warns = results.filter((r) => r.severity === 'warning').length
+  ui.note(
+    `doctor: ${errs} error(s), ${warns} warning(s)${strict ? ' (strict mode)' : ''}`,
+  )
+}
+
+/** Check if a path is absolute. */
+function isAbsolutePath(p: string, platform: NodeJS.Platform): boolean {
+  return (
+    p.startsWith('/') || (platform === 'win32' && /^[a-zA-Z]:[\\/]/.test(p))
+  )
+}
+
+/** Check if a file is executable. */
+function isExecutable(p: string, platform: NodeJS.Platform): boolean {
+  try {
+    if (platform === 'win32') return true
+    const stat = existsSync(p) ? statSync(p) : null
+    return Boolean(stat?.isFile() && (stat.mode & 0o111) !== 0)
+  } catch {
+    return false
+  }
+}
+
+/** Resolve a command in PATH (respecting PATHEXT on Windows). */
+function which(
+  cmd: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
+): string | null {
+  const pathEnv = env.PATH || env.Path || env.path || ''
+  const pathExt =
+    platform === 'win32'
+      ? env.PATHEXT || env.Pathext || env.pathext || '.exe;.cmd;.bat;.ps1'
+      : ''
+  const exts = pathExt.split(';').filter(Boolean)
+
+  for (const dir of pathEnv
+    .split(platform === 'win32' ? ';' : ':')
+    .filter(Boolean)) {
+    const candidates =
+      exts.length > 0
+        ? exts.map((e) => join(dir, `${cmd}${e}`))
+        : [join(dir, cmd)]
+    for (const cand of candidates) {
+      try {
+        if (
+          existsSync(cand) &&
+          (platform === 'win32' || isExecutable(cand, platform))
+        ) {
+          return cand
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null
+}
+
+/** Fields that can contain placeholders. */
+function placeholderFields(
+  server: CanonicalServer,
+): Array<{ name: string; value: string }> {
+  const fields: Array<{ name: string; value: string }> = []
+  if (isStdioServer(server)) {
+    fields.push({ name: 'command', value: server.command })
+    for (const [i, arg] of (server.args ?? []).entries()) {
+      fields.push({ name: `args[${i}]`, value: arg })
+    }
+    if (server.env) {
+      for (const [k, v] of Object.entries(server.env)) {
+        fields.push({ name: `env.${k}`, value: v })
+      }
+    }
+  } else {
+    fields.push({ name: 'url', value: server.url })
+    if (server.headers) {
+      for (const [k, v] of Object.entries(server.headers)) {
+        fields.push({ name: `headers.${k}`, value: v })
+      }
+    }
+  }
+  return fields
+}
+
+/** Parse the whole native file object under `rootKey` (best-effort JSONC). */
+function parseNativeEntryWhole(
+  content: string,
+  rootKey: string | undefined,
+): Record<string, unknown> | null {
+  if (!rootKey) return null
+  try {
+    const errors: { error: number; offset: number; length: number }[] = []
+    const parsed = parse(content, errors) as Record<string, unknown>
+    if (errors.length > 0) return null
+    const rootVal = parsed[rootKey]
+    if (rootVal && typeof rootVal === 'object' && !Array.isArray(rootVal)) {
+      return rootVal as Record<string, unknown>
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/** Parse a native file entry for a server name under `rootKey` only. */
+function parseNativeEntry(
+  content: string,
+  name: string,
+  rootKey: string | undefined,
+): Record<string, unknown> | null {
+  if (!rootKey) return null
+  const whole = parseNativeEntryWhole(content, rootKey)
+  if (!whole) return null
+  const entry = whole[name]
+  if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+    return entry as Record<string, unknown>
+  }
+  return null
+}
+
+/** Normalize an entry for drift comparison (strip formatting differences, sort keys). */
+function normalizeEntry(entry: unknown): unknown {
+  if (entry === null || entry === undefined) return entry
+  if (Array.isArray(entry)) return entry.map(normalizeEntry)
+  if (typeof entry === 'object') {
+    const normalized: Record<string, unknown> = {}
+    const keys = Object.keys(entry as Record<string, unknown>).sort()
+    for (const k of keys) {
+      normalized[k] = normalizeEntry((entry as Record<string, unknown>)[k])
+    }
+    return normalized
+  }
+  return entry
+}
+
+/** Deep equality check (key-order invariant via sorted-key normalization). */
+function deepEqual(a: unknown, b: unknown): boolean {
+  return JSON.stringify(normalizeEntry(a)) === JSON.stringify(normalizeEntry(b))
+}
+
+export const doctorCommand = defineCommand({
+  meta: {
+    name: 'doctor',
+    description: 'Audit schema validity, env vars, runtime binaries, and drift',
+  },
+  args: {
+    strict: {
+      type: 'boolean',
+      alias: 's',
+      description: 'Promote warnings to errors (exit 1)',
+    },
+    global: {
+      type: 'boolean',
+      alias: 'g',
+      description: 'Operate on the global agent configuration',
+    },
+    agents: {
+      type: 'string',
+      description:
+        'Comma-separated target agents (e.g. claude-code,antigravity)',
+    },
+  },
+  run: async ({ args, rawArgs }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
+    const dryRun = isDryRun(args)
+    const flag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
+
+    const summary = await runDoctor({
+      scope,
+      ctx,
+      flag,
+      dryRun,
+      strict: args.strict === true,
+    })
+
+    if (summary.errors > 0 || (summary.warnings > 0 && args.strict === true)) {
+      process.exit(1)
+    }
+  },
+})
+````
+
+## File: src/commands/import.command.ts
+````typescript
+/**
+ * `import` command (§11).
+ *
+ * Scan every adapter for the active scope, extract, normalize, deduplicate /
+ * conflict-resolve, apply the secret policy, merge into canonical (existing
+ * entries win unless `--force`), seed state names for all scanned agents, then
+ * `sync` unless `--no-sync`. Native files are never deleted.
+ */
+
+import { defineCommand } from 'citty'
+import { join } from 'node:path'
+import { readdirSync, statSync } from 'node:fs'
 import {
   createUiAndCtx,
   configPath,
   persistCanonicalConfig,
-  isDryRun,
-  loadSyncState,
   persistSyncState,
+  isDryRun,
+  isGlobalFlag,
   isNoSyncFlag,
+  isYesFlag,
   parseAgentsFlag,
   formatConfigValidationError,
   formatDryRunActions,
 } from '$/src/commands/util'
 import { runSync } from '$/src/commands/sync'
+import { resolveTargetsAsync, adapters } from '$/src/adapters/index'
+import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
-import type { ConfigScope } from '$/src/core/context'
-import { removeManagedPlugin } from '$/src/core/plugins'
+import { loadState, type SyncState } from '$/src/core/state'
+import {
+  planSecretExtraction,
+  applySecretExtraction,
+  appendToDotenv,
+  syncEnvExample,
+} from '$/src/core/env'
+import { readTextFile } from '$/src/core/fs-atomic'
+import type { AgentId } from '$/src/adapters/types'
+import type { CanonicalServer } from '$/src/core/schema'
+import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+import * as antigravity from '$/src/adapters/antigravity'
 
-export const removeCommand = defineCommand({
+export const importCommand = defineCommand({
   meta: {
-    name: 'remove',
-    description: 'Remove a server and clean it from managed agent configs',
+    name: 'import',
+    description: 'Consolidate existing agent MCP configs into .agents/mcp.json',
   },
   args: {
     'no-sync': {
       type: 'boolean',
-      description: 'Remove from canonical without running sync afterwards',
+      description: 'Import into canonical without running sync afterwards',
+    },
+    force: {
+      type: 'boolean',
+      alias: 'f',
+      description: 'Overwrite conflicting canonical entries',
+    },
+    'extract-secrets': {
+      type: 'boolean',
+      description: 'Write detected secrets to .env (warn-only by default)',
     },
   },
   run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
     const path = configPath(scope, ctx)
     const dryRun = isDryRun(args)
     const noSync = isNoSyncFlag(args, rawArgs)
-    const yes = args.yes === true
+    const force = args.force === true
+    const extractSecrets = args['extract-secrets'] === true
+    const yes = isYesFlag(args)
     const agentsFlag = parseAgentsFlag(args, rawArgs)
-    const name = args._?.[0] as string | undefined
 
-    if (!name) {
-      ui.error('Usage: agents-mcp remove <name>')
-      process.exit(2)
-    }
-
-    // Load + validate canonical config, reporting ConfigValidationError cleanly.
+    // Load + validate canonical config. A missing config is tolerated (import
+    // creates it); an invalid one is reported as a structured error.
     let validated
     try {
       validated = loadValidatedConfig(scope, ctx)
@@ -17219,1944 +17778,1054 @@ export const removeCommand = defineCommand({
       }
       throw err
     }
-    if (!validated) {
-      ui.error(`No canonical config at ${path}. Run 'agents-mcp init' first.`)
-      process.exit(1)
+    let canonical: Record<string, CanonicalServer> = {}
+    let schemaUrl = DEFAULT_SCHEMA_URL
+    if (validated) {
+      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
+      canonical = {
+        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
+      }
     }
 
-    const servers = {
-      ...(validated.config.mcpServers as Record<string, unknown>),
-    }
-    if (!(name in servers)) {
-      ui.error(`Unknown server \`${name}\`. Not found in canonical config.`)
-      process.exit(1)
-    }
-
-    // Load the state before changing the canonical config.
-    const stateResult = loadSyncState(scope, ctx)
+    const stateResult = loadState(scope, ctx)
     const state = stateResult.state
 
-    delete servers[name]
+    const allWarnings: string[] = []
+    // name -> [{agentId, server}] so cross-agent conflicts can be detected.
+    const candidates: Map<
+      string,
+      Array<{ agentId: AgentId; server: CanonicalServer }>
+    > = new Map()
+    const extractedByAgent: Record<AgentId, string[]> = {} as Record<
+      AgentId,
+      string[]
+    >
+    const scannedAgents: AgentId[] = []
+    // Planned file operations for the --dry-run preview.
+    const plannedWrites: { type: 'write' | 'remove'; path: string }[] = []
 
-    // Planned file operations for the --dry-run preview (zero disk writes).
-    const planned: { type: 'write' | 'remove'; path: string }[] = []
-    planned.push({ type: 'write', path })
+    function addCandidate(
+      agentId: AgentId,
+      name: string,
+      server: CanonicalServer,
+    ): void {
+      const arr = candidates.get(name) ?? []
+      arr.push({ agentId, server })
+      candidates.set(name, arr)
+    }
 
+    // 1. Scan every non-antigravity adapter (single native config file).
+    for (const adapter of adapters) {
+      // antigravity is per-plugin: handled separately below.
+      if (adapter.id === 'antigravity') continue
+
+      const nativePath = adapter.getConfigPath(scope, ctx)
+      if (nativePath === null) continue
+      const exists = await adapter.detect(scope, ctx)
+      if (!exists) continue
+      scannedAgents.push(adapter.id as AgentId)
+
+      const existing = readTextFile(nativePath)
+      if (existing === null) continue
+
+      const { servers, warnings } = adapter.extractServers(existing, scope)
+      allWarnings.push(...warnings.map((w) => w.message))
+      for (const [name, server] of Object.entries(servers)) {
+        addCandidate(adapter.id as AgentId, name, server)
+      }
+    }
+
+    // 1b. Antigravity (layout === 'per-plugin'): scan
+    // <base>/.agents/plugins/*/mcp_config.json and call antigravity.extractServers().
+    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+    const pluginsDir = join(base, '.agents', 'plugins')
+    let antigravityEntries: string[] = []
+    try {
+      antigravityEntries = readdirSync(pluginsDir)
+    } catch {
+      antigravityEntries = []
+    }
+    for (const entry of antigravityEntries) {
+      const mcpConfigPath = join(pluginsDir, entry, 'mcp_config.json')
+      let isFile = false
+      try {
+        isFile = statSync(mcpConfigPath).isFile()
+      } catch {
+        isFile = false
+      }
+      if (!isFile) continue
+      const existing = readTextFile(mcpConfigPath)
+      if (existing === null) continue
+      const { servers, warnings } = antigravity.extractServers(existing, scope)
+      allWarnings.push(...warnings.map((w) => w.message))
+      for (const [name, server] of Object.entries(servers)) {
+        addCandidate('antigravity', name, server)
+      }
+      scannedAgents.push('antigravity')
+    }
+
+    // 2. Resolve cross-agent server conflicts.
+    const extracted: Record<string, CanonicalServer> = {}
+    for (const [name, defs] of candidates) {
+      const uniqueServers = [
+        ...new Map(
+          defs.map((d) => [JSON.stringify(d.server), d] as const),
+        ).values(),
+      ]
+      if (uniqueServers.length === 1) {
+        const winner = uniqueServers[0]!
+        extracted[name] = winner.server
+        extractedByAgent[winner.agentId] = [
+          ...(extractedByAgent[winner.agentId] ?? []),
+          name,
+        ]
+        continue
+      }
+
+      // Conflict: multiple agents define the same server differently.
+      defs.sort(
+        (a, b) =>
+          AGENT_ORDER.indexOf(a.agentId) - AGENT_ORDER.indexOf(b.agentId),
+      )
+      const winner = defs[0]!
+      const losers = defs.slice(1).map((d) => d.agentId)
+
+      if (yes || !ctx.isTTY) {
+        // Non-interactive (--yes / CI): deterministic AGENT_ORDER winner +
+        // warning naming both agents and the server.
+        allWarnings.push(
+          `Server \`${name}\` is defined by multiple agents (${losers.join(
+            ', ',
+          )}, ${winner.agentId}) with differing definitions; keeping ${winner.agentId}'s definition (AGENT_ORDER).`,
+        )
+        extracted[name] = winner.server
+        extractedByAgent[winner.agentId] = [
+          ...(extractedByAgent[winner.agentId] ?? []),
+          name,
+        ]
+      } else {
+        // Interactive TTY: prompt the user to choose which definition wins (or skip).
+        const options: Array<{
+          label: string
+          value: AgentId | '__skip__'
+        }> = defs.map((d) => ({
+          label: `${d.agentId}: ${JSON.stringify(d.server)}`,
+          value: d.agentId,
+        }))
+        options.push({ label: 'Skip this server', value: '__skip__' })
+        const chosen = await ui.select<AgentId | '__skip__'>({
+          message: `Conflict for server \`${name}\`: multiple agents define it differently. Choose which definition wins:`,
+          options,
+        })
+        if (chosen === '__skip__') {
+          continue
+        }
+        const pick = defs.find((d) => d.agentId === chosen)
+        if (!pick) continue
+        extracted[name] = pick.server
+        extractedByAgent[chosen] = [...(extractedByAgent[chosen] ?? []), name]
+      }
+    }
+
+    // Secret policy: plan extraction and optionally write to .env + .env.example.
+    const allWrites: Array<{ key: string; value: string }> = []
+    const allKeys: string[] = []
+    const extractedCanonical: Record<string, CanonicalServer> = {}
+    for (const [name, server] of Object.entries(extracted)) {
+      const { writes, replacements, warnings } = planSecretExtraction(
+        name,
+        server,
+        { policy: extractSecrets ? 'extract' : 'warn' },
+      )
+      allWarnings.push(...warnings)
+      for (const w of writes) {
+        allWrites.push(w)
+        allKeys.push(w.key)
+      }
+      extractedCanonical[name] = extractSecrets
+        ? applySecretExtraction(server, { writes, replacements, warnings })
+        : server
+    }
+    canonical = { ...canonical, ...extractedCanonical }
+
+    if (!dryRun && extractSecrets && allWrites.length > 0) {
+      // Project: <cwd>/.env ; Global: <homeDir>/.agents/.env
+      const dotenvPath =
+        scope === 'project'
+          ? join(ctx.cwd, '.env')
+          : join(ctx.homeDir, '.agents', '.env')
+      const examplePath =
+        scope === 'project'
+          ? join(ctx.cwd, '.env.example')
+          : join(ctx.homeDir, '.agents', '.env.example')
+      appendToDotenv(dotenvPath, allWrites)
+      syncEnvExample(examplePath, allKeys)
+    }
+
+    // Persist canonical config (B7: tolerate zero resolvable targets — still
+    // persist .agents/mcp.json and plugins, warn, hint sync instead of exit 1).
+    plannedWrites.push({ type: 'write', path })
     if (!dryRun) {
       persistCanonicalConfig(scope, ctx, {
-        $schema: validated.config.$schema,
-        mcpServers: servers,
+        $schema: schemaUrl,
+        mcpServers: canonical,
       })
-    }
 
-    ui.note(`Removed server \`${name}\` from canonical config`)
-
-    if (dryRun) {
-      // Dry-run preview of planned file operations (zero disk writes).
-      ui.note(formatDryRunActions(planned))
-      return
-    }
-
-    if (noSync) {
-      const removal = removeManagedPlugin({
+      const nextState: SyncState = {
+        ...state,
         scope,
-        ctx,
-        name,
-        managedPlugins: state.managedPlugins,
-        dryRun: false,
-      })
-
-      if (removal.ok) {
-        const nextState = {
-          ...state,
-          scope,
-          targets: state.targets,
-          agents: { ...state.agents },
-          managedPlugins: state.managedPlugins.filter((n) => n !== name),
-        }
-        persistSyncState(scope, ctx, nextState)
-        if (removal.removed.length > 0) {
-          ui.note(
-            `Agent sync skipped (--no-sync): the managed plugin of \`${name}\` was cleaned. Run \`agents-mcp sync\` to sync agents later.`,
-          )
-        }
-      } else {
-        for (const err of removal.errors) {
-          ui.error(err)
-        }
-        ui.note(
-          `Server \`${name}\` was removed from canonical, but plugin files remain and will be reprocessed on the next \`sync\`.`,
-        )
-        process.exit(1)
-        return
+        targets: state.targets,
+        agents: { ...state.agents },
       }
-    } else {
-      const summary = await runSync({
+      for (const agentId of scannedAgents) {
+        // Store the adapter's native path (not the canonical path).
+        const nativePath =
+          agentId === 'antigravity'
+            ? join(base, '.agents', 'plugins')
+            : (adapters
+                .find((a) => a.id === agentId)!
+                .getConfigPath(scope, ctx) ?? path)
+        nextState.agents[agentId] = {
+          path: nativePath,
+          names: extractedByAgent[agentId] ?? [],
+          updatedAt: new Date().toISOString(),
+        }
+      }
+      persistSyncState(scope, ctx, nextState)
+    }
+
+    if (!noSync && !dryRun) {
+      await runSync({
         scope,
         ctx,
         flag: agentsFlag,
         dryRun: false,
         yes,
-        // B7: removing a server in a project without targets succeeds and
-        // cleans up the managed plugin.
         allowEmptyTargets: true,
       })
-      if (summary.errors.length > 0) {
-        process.exit(1)
-      }
+    } else if (!noSync && dryRun) {
+      await runSync({
+        scope,
+        ctx,
+        flag: agentsFlag,
+        dryRun: true,
+        yes,
+        allowEmptyTargets: true,
+      })
+    }
+
+    // Dry-run preview of planned file operations (zero disk writes).
+    if (dryRun && plannedWrites.length > 0) {
+      ui.note(formatDryRunActions(plannedWrites))
+    }
+
+    ui.note(
+      `Imported ${Object.keys(extracted).length} server(s) from ${scannedAgents.length} agent(s)`,
+    )
+    for (const w of allWarnings) {
+      ui.warn(w)
     }
   },
 })
 ````
 
-## File: src/commands/util.ts
+## File: src/commands/init.command.ts
 ````typescript
 /**
- * Shared helpers for the core commands (§11).
+ * `init` command (§11).
  *
- * Commands own the `RuntimeContext` + `PromptUi` creation and filesystem/state
- * access. Adapters and compilers remain pure.
+ * Scaffold `<scope>/.agents/mcp.json` (`$schema`, `mcpServers: {}`), select agents
+ * (multi-select; `--agents` bypasses), persist `targets` in state. Existing
+ * file → exit `1` unless `--force` (writes a `.bak.<timestamp>` first). Never
+ * touches `.gitignore`. Non-interactive targets come from `--agents` or
+ * detection; none → allow empty targets with a guidance hint (B7) instead of
+ * `exit 1`.
  */
 
-import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import { defineCommand } from 'citty'
+import { existsSync } from 'node:fs'
 import {
-  getConfigPath,
-  loadValidatedConfig,
-  writeConfig,
-  ConfigValidationError,
-} from '$/src/core/store'
+  createUiAndCtx,
+  configPath,
+  persistSyncState,
+  persistCanonicalConfig,
+  isDryRun,
+  isGlobalFlag,
+  isYesFlag,
+  parseAgentsFlag,
+  formatDryRunActions,
+} from '$/src/commands/util'
 import {
-  getStatePath,
-  loadState,
-  writeState,
-  type SyncState,
-} from '$/src/core/state'
-import { resolveTargetsAsync } from '$/src/adapters/index'
-import { createUi } from '$/src/index'
-import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import type { AgentId, AgentAdapter } from '$/src/adapters/types'
-import { getAdapter } from '$/src/adapters/index'
-import type { CanonicalServer, CanonicalMcpConfig } from '$/src/core/schema'
-import { AGENTS_DIR, CONFIG_FILE, STATE_FILE } from '$/src/config'
-
-export { writeFileAtomic } from '$/src/core/fs-atomic'
-
-/** Create the `RuntimeContext` and `PromptUi` for the current process. */
-export function createUiAndCtx({ yes = false }: { yes?: boolean } = {}): {
-  ctx: RuntimeContext
-  ui: ReturnType<typeof createUi>['ui']
-} {
-  const { ctx, ui } = createUi({ yes })
-  return { ctx, ui }
-}
-
-/** Path to the canonical config for a scope. */
-export function configPath(scope: ConfigScope, ctx: RuntimeContext): string {
-  return getConfigPath(scope, ctx)
-}
-
-/** Path to the sync state for a scope. */
-export function statePath(scope: ConfigScope, ctx: RuntimeContext): string {
-  return getStatePath(scope, ctx)
-}
-
-/** Load the canonical config for a scope. Null when absent. */
-export function loadCanonicalConfig(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): Awaited<ReturnType<typeof loadValidatedConfig>> | null {
-  return loadValidatedConfig(scope, ctx)
-}
-
-/** Format a `ConfigValidationError` into a clean, human-readable string. */
-export function formatConfigValidationError(
-  err: ConfigValidationError,
-): string {
-  const issues = err.issues
-    .map((issue) => `  • ${issue.path || 'root'} — ${issue.message}`)
-    .join('\n')
-  return `Invalid config at ${err.path}:\n${issues}`
-}
-
-/**
- * Load the canonical config for a scope, exiting with a formatted error when
- * it is missing or invalid. Shared by `add`, `sync`, `list`, `remove`, and
- * `import` so every command reports `ConfigValidationError` consistently.
- */
-export function loadCanonicalOrExit(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-  ui: ReturnType<typeof createUi>['ui'],
-): CanonicalMcpConfig {
-  try {
-    const validated = loadValidatedConfig(scope, ctx)
-    if (!validated) {
-      ui.error(
-        `No canonical config at ${configPath(scope, ctx)}. Run 'agents-mcp init' first.`,
-      )
-      process.exit(1)
-    }
-    return validated.config
-  } catch (err) {
-    if (err instanceof ConfigValidationError) {
-      ui.error(formatConfigValidationError(err))
-      process.exit(1)
-    }
-    throw err
-  }
-}
-
-/** Load the sync state (empty state when absent/corrupt). */
-export function loadSyncState(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): { state: SyncState; warnings: string[] } {
-  return loadState(scope, ctx)
-}
-
-/** Persist the sync state atomically. */
-export function persistSyncState(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-  state: SyncState,
-): void {
-  writeState(scope, ctx, state)
-}
-
-/** Write the canonical config atomically (minimal serialization). */
-export function persistCanonicalConfig(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-  config: Record<string, unknown>,
-): void {
-  writeConfig({ scope, ctx, config })
-}
-
-/**
- * Resolve target agents with precedence flag → state → detection.
- */
-export async function resolveTargetAgents({
-  flag,
-  state,
-  ctx,
-}: {
-  flag: readonly string[] | undefined
-  state: SyncState
-  ctx: RuntimeContext
-}): Promise<AgentId[]> {
-  return resolveTargetsAsync({ flag, state, ctx })
-}
-
-/**
- * Read the existing native file content for an adapter (null when absent).
- */
-export async function readNativeContent(
-  adapter: AgentAdapter,
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): Promise<string | null> {
-  const path = adapter.getConfigPath(scope, ctx)
-  if (path === null) {
-    return null
-  }
-  return readTextFile(path)
-}
-
-/**
- * Write native content for an adapter atomically.
- */
-export async function writeNativeContent(
-  adapter: AgentAdapter,
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-  content: string,
-): Promise<void> {
-  const path = adapter.getConfigPath(scope, ctx)
-  if (path === null) {
-    return
-  }
-  writeFileAtomic(path, content)
-}
-
-/** Whether `dry-run` is active from the parsed citty args. */
-export function isDryRun(args: Record<string, unknown>): boolean {
-  return args['dry-run'] === true
-}
-
-/** Format planned file operations for a `--dry-run` preview. */
-export function formatDryRunActions(
-  actions: { type: 'write' | 'remove'; path: string }[],
-): string {
-  return actions.map((a) => `[dry-run] ${a.type} ${a.path}`).join('\n')
-}
-
-/**
- * Detects the `--no-sync` flag regardless of how citty parsed it.
- *
- * Citty consumes `--no-sync` before parsing and delivers `args.sync === false`
- * (without the `no-sync` key). This helper covers all forms:
- * `args['no-sync'] === true`, `args.sync === false` and `rawArgs.includes('--no-sync')`.
- */
-export function isNoSyncFlag(
-  args: Record<string, unknown>,
-  rawArgs: readonly string[],
-): boolean {
-  return (
-    args['no-sync'] === true ||
-    args.sync === false ||
-    rawArgs.includes('--no-sync')
-  )
-}
-
-/** Normalizes a comma-separated list of agents. */
-function splitAgentList(value: string): string[] | undefined {
-  const ids = value
-    .split(',')
-    .map((id) => id.trim())
-    .filter((id) => id.length > 0)
-  return ids.length > 0 ? ids : undefined
-}
-
-/**
- * Extracts `--agents` from `args` (when citty already parsed the flag) and
- * from `rawArgs` (forms `--agents=<list>` and `--agents <list>`).
- *
- * The `rawArgs` fallback covers subcommands that do not declare `agents` and
- * the case where citty transforms `--agents <list>` into `true` + positional.
- */
-export function parseAgentsFlag(
-  args: Record<string, unknown>,
-  rawArgs: readonly string[],
-): string[] | undefined {
-  const fromArgs = args.agents
-  if (typeof fromArgs === 'string') {
-    const parsed = splitAgentList(fromArgs)
-    if (parsed) {
-      return parsed
-    }
-  }
-
-  for (let i = 0; i < rawArgs.length; i++) {
-    const token = rawArgs[i]
-    if (token === undefined) continue
-    if (token === '--') break
-    if (token.startsWith('--agents=')) {
-      return splitAgentList(token.slice('--agents='.length))
-    }
-    if (token === '--agents') {
-      const next = rawArgs[i + 1]
-      if (next !== undefined && !next.startsWith('-')) {
-        return splitAgentList(next)
-      }
-    }
-  }
-
-  return undefined
-}
-
-export { AGENTS_DIR, CONFIG_FILE, STATE_FILE, type CanonicalServer }
-````
-
-## File: src/core/schema.ts
-````typescript
-import { z } from 'zod'
+  resolveTargetsAsync,
+  detectAgents,
+  adapters,
+} from '$/src/adapters/index'
+import { backupFile } from '$/src/core/fs-atomic'
+import { loadState } from '$/src/core/state'
 import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import type { AgentId } from '$/src/adapters/types'
+import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+export const initCommand = defineCommand({
+  meta: {
+    name: 'init',
+    description: 'Scaffold .agents/mcp.json and select target agents',
+  },
+  args: {
+    force: {
+      type: 'boolean',
+      alias: 'f',
+      description:
+        'Overwrite an existing canonical config (writes a .bak first)',
+    },
+  },
+  run: async ({ args, rawArgs }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
+    const path = configPath(scope, ctx)
+    const dryRun = isDryRun(args)
+    const force = args.force === true
+    const agentsFlag = parseAgentsFlag(args, rawArgs)
 
-export const AgentIdSchema = z.enum([
-  'claude-code',
-  'cursor',
-  'vscode',
-  'opencode',
-  'windsurf',
-  'zed',
-  'antigravity',
-])
-
-/** Chaves de variável de ambiente reservadas pelo Agent Plugins MCP 1.0.0. */
-const RESERVED_ENV_KEYS = ['PLUGIN_ROOT', 'PLUGIN_DATA']
-
-/** Padrão de `cwd` permitido pelo Agent Plugins MCP 1.0.0. */
-const CWD_PATTERN =
-  /^(?:\.\/|\$\{PLUGIN_ROOT\}(?:\/|$)|\$\{PLUGIN_DATA\}(?:\/|$))/
-
-export const StdioServerSchema = z.strictObject({
-  type: z.literal('stdio'),
-  command: z.string().min(1),
-  args: z.array(z.string()).default([]),
-  env: z
-    .record(z.string(), z.string())
-    .optional()
-    .refine(
-      (env) =>
-        !env ||
-        Object.keys(env).every((key) => !RESERVED_ENV_KEYS.includes(key)),
-      {
-        message: `Reserved environment variable keys are not allowed: ${RESERVED_ENV_KEYS.join(', ')}`,
-      },
-    ),
-  cwd: z.string().regex(CWD_PATTERN).optional(),
-})
-
-export const StreamableHttpServerSchema = z.strictObject({
-  type: z.literal('streamable-http'),
-  url: z.string().min(1),
-  headers: z.record(z.string(), z.string()).optional(),
-})
-
-export const SseServerSchema = z.strictObject({
-  type: z.literal('sse'),
-  url: z.string().min(1),
-  headers: z.record(z.string(), z.string()).optional(),
-})
-
-export const CanonicalServerSchema = z.discriminatedUnion('type', [
-  StdioServerSchema,
-  StreamableHttpServerSchema,
-  SseServerSchema,
-])
-
-export const CanonicalMcpConfigSchema = z.strictObject({
-  $schema: z.literal(DEFAULT_SCHEMA_URL),
-  mcpServers: z.record(z.string(), CanonicalServerSchema),
-})
-
-export type CanonicalMcpConfig = z.infer<typeof CanonicalMcpConfigSchema>
-export type CanonicalServer = z.infer<typeof CanonicalServerSchema>
-
-export type StdioServer = z.infer<typeof StdioServerSchema>
-export type StreamableHttpServer = z.infer<typeof StreamableHttpServerSchema>
-export type SseServer = z.infer<typeof SseServerSchema>
-
-/**
- * Type guards over the canonical `type` discriminator.
- */
-export function isStdioServer(server: CanonicalServer): server is StdioServer {
-  return server.type === 'stdio'
-}
-
-export function isHttpServer(
-  server: CanonicalServer,
-): server is StreamableHttpServer | SseServer {
-  return server.type === 'streamable-http' || server.type === 'sse'
-}
-
-/**
- * Non-JSON-Schema checks that cannot be expressed in the generated Draft 2020-12
- * document. Never fails; returns warnings only.
- */
-export function validateConfig(config: unknown): { warnings: string[] } {
-  const warnings: string[] = []
-
-  if (typeof config === 'object' && config !== null && '$schema' in config) {
-    const schemaUrl = (config as { $schema?: unknown }).$schema
-    if (typeof schemaUrl !== 'string' || schemaUrl !== DEFAULT_SCHEMA_URL) {
-      warnings.push(
-        `$schema mismatch: expected ${DEFAULT_SCHEMA_URL}, got ${String(schemaUrl)}`,
+    if (existsSync(path) && !force) {
+      ui.error(
+        `Canonical config already exists at ${path}. Use --force to overwrite.`,
       )
-    }
-  } else {
-    warnings.push(`Missing required \$schema; expected ${DEFAULT_SCHEMA_URL}`)
-  }
-
-  return { warnings }
-}
-````
-
-## File: src/config.ts
-````typescript
-export const AGENT_PLUGINS_MCP_SCHEMA_URL =
-  'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
-export const AGENT_PLUGINS_MCP_SPEC_URL =
-  'https://agent-plugins.org/plugin-authors/mcp-servers'
-export const DEFAULT_SCHEMA_URL = AGENT_PLUGINS_MCP_SCHEMA_URL
-export const SCHEMA_DRAFT = 'draft-2020-12'
-
-export const AGENTS_DIR = '.agents'
-export const CONFIG_FILE = 'mcp.json'
-export const STATE_FILE = '.mcp-sync-state.json'
-export const STATE_VERSION = 1
-export const ENV_FILE = '.env'
-export const ENV_EXAMPLE_FILE = '.env.example'
-
-export const SERVER_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
-
-/** Deterministic order for conflict resolution and reporting. */
-export const AGENT_ORDER = [
-  'claude-code',
-  'cursor',
-  'vscode',
-  'opencode',
-  'zed',
-  'windsurf',
-  'antigravity',
-] as const
-````
-
-## File: tests/cli/entrypoint.test.ts
-````typescript
-import { describe, expect, it, vi, afterEach, afterAll } from 'vitest'
-import { runCommand } from 'citty'
-import { main, normalizeGlobalArgs } from '$/src/index'
-import { ConfigValidationError } from '$/src/core/store'
-import pkg from '$/package.json' with { type: 'json' }
-
-vi.mock('citty', async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>
-  return {
-    ...actual,
-    runCommand: vi.fn(actual.runCommand as (...args: unknown[]) => unknown),
-    showUsage: vi.fn(actual.showUsage as (...args: unknown[]) => unknown),
-  }
-})
-
-describe('normalizeGlobalArgs', () => {
-  it('converte --agents <lista> em --agents=<lista>', () => {
-    expect(
-      normalizeGlobalArgs(['sync', '--agents', 'antigravity,cursor']),
-    ).toEqual(['sync', '--agents=antigravity,cursor'])
-  })
-
-  it('preserva --agents=<lista>', () => {
-    expect(normalizeGlobalArgs(['sync', '--agents=antigravity'])).toEqual([
-      'sync',
-      '--agents=antigravity',
-    ])
-  })
-
-  it('não converte --agents sem valor', () => {
-    expect(normalizeGlobalArgs(['sync', '--agents'])).toEqual([
-      'sync',
-      '--agents',
-    ])
-  })
-
-  it('não converte --agents após o separador --', () => {
-    expect(
-      normalizeGlobalArgs(['sync', '--', '--agents', 'antigravity']),
-    ).toEqual(['sync', '--', '--agents', 'antigravity'])
-  })
-})
-
-describe('CLI entrypoint', () => {
-  const exitSpy = vi
-    .spyOn(process, 'exit')
-    .mockImplementation((() => {}) as NodeJS.Process['exit'])
-  const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-  afterEach(() => {
-    exitSpy.mockClear()
-    logSpy.mockClear()
-    errorSpy.mockClear()
-  })
-
-  afterAll(() => {
-    exitSpy.mockRestore()
-    logSpy.mockRestore()
-    errorSpy.mockRestore()
-  })
-
-  it('--version prints version and does not exit', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', '--version']
-    try {
-      await expect(main()).resolves.toBeUndefined()
-      expect(exitSpy).not.toHaveBeenCalled()
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('-v prints version and does not exit', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', '-v']
-    try {
-      await expect(main()).resolves.toBeUndefined()
-      expect(exitSpy).not.toHaveBeenCalled()
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('--help prints usage and does not exit', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', '--help']
-    try {
-      await expect(main()).resolves.toBeUndefined()
-      expect(exitSpy).not.toHaveBeenCalled()
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('-h prints usage and does not exit', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', '-h']
-    try {
-      await expect(main()).resolves.toBeUndefined()
-      expect(exitSpy).not.toHaveBeenCalled()
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('unknown command calls process.exit with 2', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', 'nonexistent-command']
-    try {
-      // Mock process.exit to prevent vitest from detecting it
-      const origExit = process.exit
-      let exitCode: number | undefined
-      process.exit = ((code: number) => {
-        exitCode = code
-      }) as unknown as NodeJS.Process['exit']
-      try {
-        await main()
-        expect(exitCode).toBe(2)
-      } finally {
-        process.exit = origExit
-      }
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('subcommand --help is not intercepted at root level', async () => {
-    const origArgv = process.argv
-    process.argv = ['node', 'index.js', 'sync', '--help']
-    try {
-      await expect(main()).resolves.toBeUndefined()
-    } finally {
-      process.argv = origArgv
-    }
-  })
-
-  it('executa main() quando argv[1] é um symlink para index.js (bin instalado)', async () => {
-    const { symlink, unlink } = await import('node:fs/promises')
-    const { join } = await import('node:path')
-    const { tmpdir } = await import('node:os')
-
-    const symlinkPath = join(tmpdir(), `agents-mcp-test-${Date.now()}`)
-    const target = join(process.cwd(), 'dist/index.js')
-
-    try {
-      await symlink(target, symlinkPath)
-    } catch {
-      // symlink pode já existir de uma execução anterior
+      process.exit(1)
     }
 
-    const origArgv = process.argv
-    const origVitest = process.env.VITEST
-    const origExit = process.exit
-    const origLog = console.log
-    let exitCode: number | undefined
-    let logged: string[] = []
-    process.exit = ((code: number) => {
-      exitCode = code
-    }) as unknown as NodeJS.Process['exit']
-    console.log = ((msg: unknown) => {
-      logged.push(String(msg))
-    }) as unknown as typeof console.log
-
-    delete process.env.VITEST
-    process.argv = ['node', symlinkPath, '--version']
-
-    try {
-      await main()
-      expect(exitCode).toBeUndefined()
-      expect(logged.some((m) => m.includes(pkg.version))).toBe(true)
-    } finally {
-      process.env.VITEST = origVitest
-      process.argv = origArgv
-      process.exit = origExit
-      console.log = origLog
-      try {
-        await unlink(symlinkPath)
-      } catch {
-        // ignore
-      }
+    if (existsSync(path) && force && !dryRun) {
+      backupFile(path)
     }
-  })
 
-  it('imprime erro no stderr antes de sair com código 1 em erro de runtime (ConfigValidationError)', async () => {
-    const origArgv = process.argv
-    const origExit = process.exit
-    const origError = console.error
-    let exitCode: number | undefined
-    let errors: string[] = []
-    process.exit = ((code: number) => {
-      exitCode = code
-    }) as unknown as NodeJS.Process['exit']
-    console.error = ((msg: unknown) => {
-      errors.push(String(msg))
-    }) as unknown as typeof console.error
+    const stateResult = loadState(scope, ctx)
+    const state = stateResult.state
 
-    process.argv = ['node', 'index.js', 'add', 'x', '--command=npx']
-    vi.mocked(runCommand).mockRejectedValueOnce(
-      new ConfigValidationError(
-        'Invalid canonical config at /home/user/.agents/mcp.json: mcpServers — required',
-        '/home/user/.agents/mcp.json',
-      ),
-    )
-
-    try {
-      await main()
-      expect(exitCode).toBe(1)
-      expect(errors.some((m) => m.includes('Invalid canonical config'))).toBe(
-        true,
-      )
-    } finally {
-      process.argv = origArgv
-      process.exit = origExit
-      console.error = origError
-    }
-  })
-})
-````
-
-## File: tests/commands/integration.test.ts
-````typescript
-import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { runSync } from '$/src/commands/sync'
-import { removeCommand } from '$/src/commands/remove.command'
-import { persistCanonicalConfig } from '$/src/commands/util'
-import { loadState, emptyState, writeState } from '$/src/core/state'
-import { createSandbox } from '$/tests/helpers/sandbox'
-
-describe('commands integration', () => {
-  it('init → sync → list flow', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      // init with agents and a server
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://example.com/schema.json',
-        mcpServers: {
-          github: {
-            type: 'stdio',
-            command: 'npx',
-            args: ['-y', '@modelcontextprotocol/server-github'],
-          },
-        },
+    let targets: AgentId[]
+    if (agentsFlag) {
+      targets = await resolveTargetsAsync({ flag: agentsFlag, state, ctx })
+    } else if (isYesFlag(args) || !ctx.isTTY || ctx.env.CI === 'true') {
+      targets = await resolveTargetsAsync({ flag: undefined, state, ctx })
+    } else {
+      // Interactive: multi-select agents, pre-select detected agents (B7).
+      const detected = await detectAgents(scope, ctx)
+      const options = adapters.map((a) => ({
+        label: a.displayName,
+        value: a.id,
+      }))
+      const selected = await ui.multiselect<AgentId>({
+        message: 'Select target agents',
+        options,
+        initialValues: detected,
       })
+      targets = selected
+    }
 
-      // sync with targets
-      const result = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code', 'cursor'],
-        dryRun: false,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
+    const plannedWrites: { type: 'write' | 'remove'; path: string }[] = []
+    plannedWrites.push({ type: 'write', path })
 
-      expect(result.targets).toEqual(['claude-code', 'cursor'])
-      expect(result.written.length).toBeGreaterThan(0)
-
-      // Verify native file was written
-      const content = readFileSync(`${ctx.cwd}/.mcp.json`, 'utf8')
-      expect(content).toContain('mcpServers')
-      expect(content).toContain('github')
-
-      // Verify state was updated
-      const stateContent = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
-        'utf8',
+    if (targets.length === 0) {
+      ui.warn(
+        'No target agents configured or detected. Continuing with an empty target list; run `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`) to sync later.',
       )
-      expect(stateContent).toContain('claude-code')
-      expect(stateContent).toContain('cursor')
-    } finally {
-      cleanup()
     }
-  })
 
-  it('sync is byte-idempotent', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://example.com/schema.json',
-        mcpServers: {
-          github: {
-            type: 'stdio',
-            command: 'npx',
-            args: ['-y', '@modelcontextprotocol/server-github'],
-          },
-        },
-      })
-
-      const result1 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-
-      const result2 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: false,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-
-      expect(result2.written).toEqual(result1.written)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('sync with no resolvable targets exits 1', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://example.com/schema.json',
+    if (!dryRun) {
+      persistCanonicalConfig(scope, ctx, {
+        $schema: DEFAULT_SCHEMA_URL,
         mcpServers: {},
       })
-
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation((() => {}) as NodeJS.Process['exit'])
-      try {
-        await runSync({
-          scope: 'project',
-          ctx,
-          flag: undefined,
-          dryRun: false,
-          yes: true,
-        } as Parameters<typeof runSync>[0])
-        expect(exitSpy).toHaveBeenCalledWith(1)
-      } finally {
-        exitSpy.mockRestore()
+      const nextState = {
+        ...state,
+        scope,
+        targets,
+        agents: { ...state.agents },
       }
-    } finally {
-      cleanup()
+      persistSyncState(scope, ctx, nextState)
     }
-  })
 
-  it('dry-run writes nothing', async () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://example.com/schema.json',
-        mcpServers: {
-          github: {
-            type: 'stdio',
-            command: 'npx',
-            args: ['-y', '@modelcontextprotocol/server-github'],
-          },
-        },
-      })
-
-      const result = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['claude-code'],
-        dryRun: true,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-
-      expect(result.written).toEqual([])
-
-      // Native file should not exist
-      const fs = require('node:fs')
-      expect(fs.existsSync(`${ctx.cwd}/.mcp.json`)).toBe(false)
-    } finally {
-      cleanup()
+    // Dry-run preview of planned file operations (zero disk writes).
+    if (dryRun && plannedWrites.length > 0) {
+      ui.note(formatDryRunActions(plannedWrites))
     }
-  })
 
-  it('remove alpha mantem somente beta no canônico e nos agentes (AC1)', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const origCwd = process.cwd()
-    // `removeCommand.run` cria o `RuntimeContext` internamente via
-    // `createUiAndCtx()`, que usa `process.cwd()`. Forçar o cwd para o sandbox
-    // garante que o comando leia/grave arquivos dentro dele (sem tocar o disco
-    // real do repositorio).
-    mkdirSync(ctx.cwd, { recursive: true })
-    process.chdir(ctx.cwd)
-
-    const exitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as NodeJS.Process['exit'])
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    try {
-      // 1. Semente o canônico com `alpha` e `beta` (stdio, npx, args vazio).
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://example.com/schema.json',
-        mcpServers: {
-          alpha: { type: 'stdio', command: 'npx', args: [] },
-          beta: { type: 'stdio', command: 'npx', args: [] },
-        },
-      })
-      writeState('project', ctx, {
-        ...emptyState('project'),
-        targets: ['cursor'],
-        agents: {},
-        managedPlugins: ['alpha', 'beta'],
-      })
-
-      // 2. Sincroniza com `cursor`: cria os plugins e o `.cursor/mcp.json`.
-      await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      } as Parameters<typeof runSync>[0])
-
-      // 3. Remove `alpha` (sem `--no-sync`: executa `runSync` de fato).
-      await removeCommand.run!({
-        args: { _: ['alpha'], global: false, yes: true },
-        rawArgs: ['alpha'],
-      } as unknown as Parameters<NonNullable<typeof removeCommand.run>>[0])
-
-      // Nunca deve sair com codigo de saida diferente de zero.
-      expect(exitSpy).not.toHaveBeenCalled()
-
-      // Canônico reparseado: somente `beta`, definicao inalterada.
-      const canonical = JSON.parse(
-        readFileSync(join(ctx.cwd, '.agents/mcp.json'), 'utf8'),
-      )
-      expect(Object.keys(canonical.mcpServers)).toEqual(['beta'])
-      expect(canonical.mcpServers.beta).toEqual({
-        type: 'stdio',
-        command: 'npx',
-        args: [],
-      })
-
-      // `.cursor/mcp.json` continua existindo e contem `beta` (nao `alpha`).
-      const cursorContent = readFileSync(
-        join(ctx.cwd, '.cursor/mcp.json'),
-        'utf8',
-      )
-      expect(cursorContent).toContain('beta')
-      expect(cursorContent).not.toContain('alpha')
-
-      // Plugin gerenciado de `beta` permanece inteiro.
-      expect(
-        existsSync(join(ctx.cwd, '.agents/plugins/beta/plugin.json')),
-      ).toBe(true)
-      expect(existsSync(join(ctx.cwd, '.agents/plugins/beta/mcp.json'))).toBe(
-        true,
-      )
-
-      // Diretorio de `alpha` foi apagado (so havia arquivos gerenciados).
-      expect(existsSync(join(ctx.cwd, '.agents/plugins/alpha'))).toBe(false)
-
-      // Estado: `managedPlugins` encolheu para `['beta']`.
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual(['beta'])
-    } finally {
-      exitSpy.mockRestore()
-      logSpy.mockRestore()
-      errorSpy.mockRestore()
-      process.chdir(origCwd)
-      cleanup()
-    }
-  })
+    ui.note(`Initialized ${scope} canonical config at ${path}`)
+    ui.note(`Targets: ${targets.join(', ') || '(none)'}`)
+  },
 })
 ````
 
-## File: tests/commands/plugins-sync.test.ts
+## File: src/commands/list.command.ts
 ````typescript
-import { describe, expect, it, vi, afterAll } from 'vitest'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { runSync } from '$/src/commands/sync'
-import { main } from '$/src/index'
-import { createUiAndCtx, persistCanonicalConfig } from '$/src/commands/util'
-import { loadState, writeState, emptyState } from '$/src/core/state'
-import { getAdapter } from '$/src/adapters/index'
-import type { PromptUi } from '$/src/ui/prompts'
-import { createSandbox } from '$/tests/helpers/sandbox'
+/**
+ * `list` command (§11).
+ *
+ * Read-only table: name, type, command/URL, per-agent sync status. `--all`
+ * includes the global scope and marks shadowed entries (project wins).
+ */
 
-vi.mock('$/src/commands/util', async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>
-  return { ...actual, createUiAndCtx: vi.fn() }
-})
+import { defineCommand } from 'citty'
+import {
+  createUiAndCtx,
+  configPath,
+  isDryRun,
+  isGlobalFlag,
+  isYesFlag,
+  loadCanonicalOrExit,
+} from '$/src/commands/util'
+import { loadState } from '$/src/core/state'
+import type { ConfigScope } from '$/src/core/context'
+import type { AgentId } from '$/src/adapters/types'
 
-const exitSpy = vi
-  .spyOn(process, 'exit')
-  .mockImplementation((() => {}) as NodeJS.Process['exit'])
-
-afterAll(() => {
-  exitSpy.mockRestore()
-})
-
-function setupUi(ctx: ReturnType<typeof createSandbox>['ctx']) {
-  const ui = {
-    error: vi.fn(),
-    warn: vi.fn(),
-    note: vi.fn(),
-  }
-  vi.mocked(createUiAndCtx).mockImplementation(() => ({
-    ctx,
-    ui: ui as unknown as PromptUi,
-  }))
-  return ui
-}
-
-function seedCanonicalAndCollision(
-  ctx: ReturnType<typeof createSandbox>['ctx'],
-) {
-  persistCanonicalConfig('project', ctx, {
-    $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
-    mcpServers: {
-      taken: { type: 'stdio', command: 'npx', args: [] },
+export const listCommand = defineCommand({
+  meta: {
+    name: 'list',
+    description: 'Inspect configured servers, targets, and sync state',
+  },
+  args: {
+    all: {
+      type: 'boolean',
+      alias: 'a',
+      description: 'Include global scope and mark shadowed entries',
     },
-  })
+    global: {
+      type: 'boolean',
+      alias: 'g',
+      description: 'Operate on the global scope only',
+    },
+  },
+  run: async ({ args }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const includeAll = args.all === true
+    const scopes: ConfigScope[] = includeAll
+      ? ['project', 'global']
+      : isGlobalFlag(args)
+        ? ['global']
+        : ['project']
 
-  const pluginDir = join(ctx.cwd, '.agents/plugins/taken')
-  mkdirSync(pluginDir, { recursive: true })
-  const sentinelPath = join(pluginDir, 'sentinel.txt')
-  writeFileSync(sentinelPath, 'KEEP')
-  return { sentinelPath, pluginDir }
-}
+    // Collect all server names from project scope first (for shadow detection).
+    const projectNames = new Set<string>()
+    const scopeData: Array<{
+      scope: ConfigScope
+      servers: Record<string, unknown>
+      state: Awaited<ReturnType<typeof loadState>>['state']
+    }> = []
 
-describe('commands sync (B3/T5: unmanaged plugin collision)', () => {
-  it('reporta PLUGIN_UNMANAGED como erro, sem resumo de sucesso', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      const { sentinelPath, pluginDir } = seedCanonicalAndCollision(ctx)
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('not managed by the CLI')
-      expect(summary.warnings).toEqual([])
-      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-
-      expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Partial sync completed with failures'),
-      )
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((note) => note.includes('Synced'))).toBe(false)
-    } finally {
-      cleanup()
+    for (const scope of scopes) {
+      const config = loadCanonicalOrExit(scope, ctx, ui)
+      const stateResult = loadState(scope, ctx)
+      const state = stateResult.state
+      const servers = config.mcpServers ?? {}
+      scopeData.push({ scope, servers, state })
+      if (scope === 'project') {
+        for (const name of Object.keys(servers)) {
+          projectNames.add(name)
+        }
+      }
     }
-  })
 
-  it('aceita --agents <lista> separado por espaço no sync', async () => {
-    const { ctx, cleanup } = createSandbox()
-    setupUi(ctx)
-    const localExit = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as NodeJS.Process['exit'])
-    const originalCwd = process.cwd()
-    const originalArgv = process.argv
-    try {
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
-        mcpServers: {
-          remote: {
-            type: 'streamable-http',
-            url: 'https://example.com/mcp',
-          },
-        },
-      })
-      process.chdir(ctx.cwd)
-      process.argv = ['node', 'index.js', 'sync', '--agents', 'antigravity']
+    for (const { scope, servers, state } of scopeData) {
+      const names = Object.keys(servers) as string[]
 
-      await main()
+      for (const name of names) {
+        const server = servers[name] as {
+          type?: string
+          command?: string
+          url?: string
+        }
+        const type = server.type ?? (server.url ? 'streamable-http' : 'stdio')
+        const displayType =
+          type === 'stdio'
+            ? 'command'
+            : type === 'streamable-http'
+              ? 'http'
+              : type
+        const isHttp = type === 'streamable-http' || type === 'sse'
+        const target = isHttp ? (server.url ?? '') : (server.command ?? '')
 
-      expect(localExit).not.toHaveBeenCalled()
-      expect(
-        existsSync(join(ctx.cwd, '.agents/plugins/remote/mcp_config.json')),
-      ).toBe(true)
-    } finally {
-      process.chdir(originalCwd)
-      process.argv = originalArgv
-      localExit.mockRestore()
-      cleanup()
-    }
-  })
+        // Per-agent sync status: list which agents have this server synced.
+        const syncedAgents: string[] = []
+        for (const agentId of Object.keys(state.agents)) {
+          const agent = state.agents[agentId as AgentId]
+          if (agent?.names.includes(name)) {
+            syncedAgents.push(agentId)
+          }
+        }
+        const syncStatus =
+          syncedAgents.length > 0
+            ? `synced (${syncedAgents.join(', ')})`
+            : 'not-synced'
 
-  it('faz o comando sync sair com código 1 na colisão não gerenciada', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const localExit = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as NodeJS.Process['exit'])
-    const originalCwd = process.cwd()
-    const originalArgv = process.argv
-    try {
-      seedCanonicalAndCollision(ctx)
-      process.chdir(ctx.cwd)
-      process.argv = ['node', 'index.js', 'sync', '--agents', 'cursor']
+        const shadowed =
+          includeAll && scope === 'global' && projectNames.has(name)
+            ? ' (shadowed)'
+            : ''
 
-      await main()
-
-      expect(localExit).toHaveBeenCalledWith(1)
-    } finally {
-      process.chdir(originalCwd)
-      process.argv = originalArgv
-      localExit.mockRestore()
-      cleanup()
-    }
-  })
-
-  it('quietErrors suprime o bloco de erro de plugin no runSync', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonicalAndCollision(ctx)
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-        quietErrors: true,
-      })
-
-      expect(summary.errors).toHaveLength(1)
-      expect(ui.error).not.toHaveBeenCalled()
-    } finally {
-      cleanup()
-    }
-  })
-})
-
-describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
-  function seedCanonical(ctx: ReturnType<typeof createSandbox>['ctx']) {
-    persistCanonicalConfig('project', ctx, {
-      $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
-      mcpServers: {
-        web: { type: 'streamable-http', url: 'https://example.com/mcp' },
-      },
-    })
-  }
-
-  it('allowEmptyTargets: zero targets nao sai com 1, gera plugin e emite nota de orientacao', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonical(ctx)
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        yes: true,
-        allowEmptyTargets: true,
-      })
-
-      expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.targets).toEqual([])
-      expect(summary.errors).toEqual([])
-
-      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.includes('No target agents'))).toBe(true)
-      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
-      expect(notes.some((n) => n.includes('agents-mcp sync --agents'))).toBe(
-        true,
-      )
-      expect(notes.some((n) => n.startsWith('Synced'))).toBe(false)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('skipAgentSync nao toca arquivos de agente nem state.targets/state.agents', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonical(ctx)
-      writeState('project', ctx, {
-        ...emptyState('project'),
-        targets: ['cursor'],
-        managedPlugins: [],
-      })
-      const cursorPath = getAdapter('cursor').getConfigPath('project', ctx)
-      if (!cursorPath) {
-        throw new Error(
-          'cursor adapter nao tem caminho de configuracao no escopo do projeto',
+        ui.note(
+          `${name.padEnd(14)} ${displayType.padEnd(8)} ${target.padEnd(24)} ${syncStatus}${shadowed}`,
         )
       }
-      const cursorDir = dirname(cursorPath)
-      mkdirSync(cursorDir, { recursive: true })
-      writeFileSync(cursorPath, '{"mcpServers":{}}')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-        skipAgentSync: true,
-      })
-
-      expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.targets).toEqual([])
-      expect(summary.errors).toEqual([])
-      expect(readFileSync(cursorPath, 'utf8')).toBe('{"mcpServers":{}}')
-
-      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-
-      const state = loadState('project', ctx).state
-      expect(state.targets).toEqual(['cursor'])
-      expect(state.agents).toEqual({})
-      expect(state.managedPlugins).toEqual(['web'])
-
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
-      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
-    } finally {
-      cleanup()
     }
-  })
 
-  it('skipAgentSync com flag antigravity cria mcp_config.json e preserva targets', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonical(ctx)
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['antigravity'],
-        dryRun: false,
-        yes: true,
-        skipAgentSync: true,
-      })
-
-      expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.targets).toEqual([])
-      expect(summary.errors).toEqual([])
-
-      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
-
-      const state = loadState('project', ctx).state
-      expect(state.targets).toEqual([])
-      expect(state.managedPlugins).toEqual(['web'])
-
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
-    } finally {
-      cleanup()
+    const totalNames = new Set(scopeData.flatMap((d) => Object.keys(d.servers)))
+      .size
+    if (totalNames === 0) {
+      ui.note('No servers configured.')
     }
-  })
-
-  it('skipAgentSync com antigravity em state.targets (sem flag) cria mcp_config.json', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonical(ctx)
-      writeState('project', ctx, {
-        ...emptyState('project'),
-        targets: ['antigravity'],
-      })
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: undefined,
-        dryRun: false,
-        yes: true,
-        skipAgentSync: true,
-      })
-
-      expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.errors).toEqual([])
-      expect(
-        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
-      ).toBe(true)
-
-      const state = loadState('project', ctx).state
-      expect(state.targets).toEqual(['antigravity'])
-
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('allowEmptyTargets com colisao nao gerenciada registra erro sem sobrescrever o diretorio', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      persistCanonicalConfig('project', ctx, {
-        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
-        mcpServers: {
-          taken: { type: 'stdio', command: 'npx', args: [] },
-        },
-      })
-      const pluginDir = join(ctx.cwd, '.agents/plugins/taken')
-      mkdirSync(pluginDir, { recursive: true })
-      const sentinelPath = join(pluginDir, 'sentinel.txt')
-      writeFileSync(sentinelPath, 'KEEP')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-        allowEmptyTargets: true,
-      })
-
-      expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('not managed by the CLI')
-      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-
-      const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.startsWith('Synced'))).toBe(false)
-      expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Partial sync completed with failures'),
-      )
-    } finally {
-      cleanup()
-    }
-  })
-})
-
-describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', () => {
-  const SCHEMA_URL = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
-
-  function seedPluginFiles(
-    ctx: ReturnType<typeof createSandbox>['ctx'],
-    name: string,
-    extra: Record<string, string> = {},
-  ): string {
-    const pluginDir = join(ctx.cwd, '.agents/plugins', name)
-    mkdirSync(pluginDir, { recursive: true })
-    for (const file of ['plugin.json', 'mcp.json', 'mcp_config.json']) {
-      writeFileSync(join(pluginDir, file), '{}')
-    }
-    for (const [file, content] of Object.entries(extra)) {
-      writeFileSync(join(pluginDir, file), content)
-    }
-    return pluginDir
-  }
-
-  function seedManagedState(
-    ctx: ReturnType<typeof createSandbox>['ctx'],
-    managedPlugins: string[],
-  ) {
-    writeState('project', ctx, {
-      ...emptyState('project'),
-      managedPlugins,
-    })
-  }
-
-  function canonicalEmpty(ctx: ReturnType<typeof createSandbox>['ctx']) {
-    persistCanonicalConfig('project', ctx, {
-      $schema: SCHEMA_URL,
-      mcpServers: {},
-    })
-  }
-
-  function canonicalWithWeb(ctx: ReturnType<typeof createSandbox>['ctx']) {
-    persistCanonicalConfig('project', ctx, {
-      $schema: SCHEMA_URL,
-      mcpServers: {
-        web: { type: 'streamable-http', url: 'https://example.com/mcp' },
-      },
-    })
-  }
-
-  it('remove plugin obsoleto quando servidor sai do canônico (managedPlugins esvazia)', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalEmpty(ctx)
-      seedManagedState(ctx, ['alpha'])
-      const pluginDir = seedPluginFiles(ctx, 'alpha')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(existsSync(pluginDir)).toBe(false)
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual([])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('preserva arquivo manual e diretorio de plugin obsoleto nao vazio', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalEmpty(ctx)
-      seedManagedState(ctx, ['alpha'])
-      const pluginDir = seedPluginFiles(ctx, 'alpha', {
-        'sentinel.txt': 'KEEP-ME',
-      })
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'sentinel.txt'))).toBe(true)
-      expect(existsSync(pluginDir)).toBe(true)
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual([])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('remove mcp_config.json ao desselecionar antigravity (flag sem antigravity)', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalWithWeb(ctx)
-      seedManagedState(ctx, ['web'])
-      const pluginDir = seedPluginFiles(ctx, 'web')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual(['web'])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('mantem mcp_config.json quando antigravity esta no alvo', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalWithWeb(ctx)
-      seedManagedState(ctx, ['web'])
-      seedPluginFiles(ctx, 'web')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['antigravity'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(
-        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
-      ).toBe(true)
-      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/plugin.json'))).toBe(
-        true,
-      )
-      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/mcp.json'))).toBe(
-        true,
-      )
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual(['web'])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('dryRun nao remove nada no disco e nao persiste estado', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalEmpty(ctx)
-      seedManagedState(ctx, ['alpha'])
-      const pluginDir = seedPluginFiles(ctx, 'alpha')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: true,
-        yes: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual(['alpha'])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('sync repetido e idempotente: estado igual e segundo run sem erros', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalWithWeb(ctx)
-      seedManagedState(ctx, ['web'])
-      seedPluginFiles(ctx, 'web')
-
-      const summary1 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-      expect(summary1.errors).toEqual([])
-      const stateAfterFirst = loadState('project', ctx).state
-
-      const summary2 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-      expect(summary2.errors).toEqual([])
-      const stateAfterSecond = loadState('project', ctx).state
-
-      expect(stateAfterSecond).toEqual(stateAfterFirst)
-      expect(stateAfterSecond.managedPlugins).toEqual(['web'])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('skipAgentSync nao poda mcp_config.json preexistente de plugin gerenciado', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalWithWeb(ctx)
-      seedManagedState(ctx, ['web'])
-      const pluginDir = seedPluginFiles(ctx, 'web')
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-        skipAgentSync: true,
-      })
-
-      expect(summary.errors).toEqual([])
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
-
-      const state = loadState('project', ctx).state
-      expect(state.managedPlugins).toEqual(['web'])
-      expect(state.targets).toEqual([])
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('erro de limpeza de plugin obsoleto: erro reportado, nome mantido em managedPlugins e retry no proximo sync', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      canonicalEmpty(ctx)
-      seedManagedState(ctx, ['alpha'])
-      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
-      mkdirSync(pluginDir, { recursive: true })
-      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
-      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
-      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
-      mkdirSync(join(pluginDir, 'plugin.json'))
-
-      // Primeiro run: falha na limpeza, erro reportado e nome preservado.
-      const summary1 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-
-      expect(summary1.errors).toHaveLength(1)
-      expect(summary1.errors[0]).toContain('Failed to remove plugin `alpha`')
-      expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Partial sync completed with failures'),
-      )
-
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(pluginDir)).toBe(true)
-
-      // Nome preservado para ser reprocessado no proximo sync.
-      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
-
-      // Segundo run: nome ainda gerenciado, o mesmo erro se repete (retry).
-      const summary2 = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-      })
-      expect(summary2.errors).toHaveLength(1)
-      expect(summary2.errors[0]).toContain('Failed to remove plugin `alpha`')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('erro de limpeza de plugin obsoleto faz o comando sync sair com codigo 1', async () => {
-    const { ctx, cleanup } = createSandbox()
-    setupUi(ctx)
-    const localExit = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as NodeJS.Process['exit'])
-    const originalCwd = process.cwd()
-    const originalArgv = process.argv
-    try {
-      canonicalEmpty(ctx)
-      seedManagedState(ctx, ['alpha'])
-      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
-      mkdirSync(pluginDir, { recursive: true })
-      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
-      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
-      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
-      mkdirSync(join(pluginDir, 'plugin.json'))
-
-      process.chdir(ctx.cwd)
-      process.argv = ['node', 'index.js', 'sync', '--agents', 'cursor']
-
-      await main()
-
-      expect(localExit).toHaveBeenCalledWith(1)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
-      expect(existsSync(pluginDir)).toBe(true)
-      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
-    } finally {
-      process.chdir(originalCwd)
-      process.argv = originalArgv
-      localExit.mockRestore()
-      cleanup()
-    }
-  })
+  },
 })
 ````
 
-## File: tests/core/fs-atomic.test.ts
+## File: tests/core/schema.test.ts
 ````typescript
 import { describe, expect, it } from 'vitest'
 import {
-  mkdtempSync,
-  rmSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { readTextFile, writeFileAtomic, backupFile } from '$/src/core/fs-atomic'
+  CanonicalMcpConfigSchema,
+  validateConfig,
+  AgentIdSchema,
+  isStdioServer,
+  isHttpServer,
+} from '$/src/core/schema'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
 
-function makeSandbox(): string {
-  return mkdtempSync(join(tmpdir(), 'agents-mcp-fs-atomic-'))
-}
+describe('canonical schema', () => {
+  it('rejects an unsupported type value (Zod)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'websocket', url: 'https://example.com' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
 
-describe('fs-atomic', () => {
-  it('readTextFile returns null for missing files', () => {
-    const dir = makeSandbox()
-    try {
-      expect(readTextFile(join(dir, 'does-not-exist.txt'))).toBeNull()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
+  it('rejects a missing type value (Zod)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { url: 'https://example.com' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a missing $schema (required)', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
+      },
+    })
+    expect(result.success).toBe(false)
+    expect(result.error?.issues.some((i) => i.path.includes('$schema'))).toBe(
+      true,
+    )
+  })
+
+  it('rejects disabled field on server', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', disabled: true },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects targets field on server', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', targets: ['claude-code'] },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects PLUGIN_ROOT as an env key', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', env: { PLUGIN_ROOT: '/x' } },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects PLUGIN_DATA as an env key', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', env: { PLUGIN_DATA: '/x' } },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects cwd outside allowed plugin paths', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '/absolute/path' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('accepts cwd with ./ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: './subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts cwd with ${PLUGIN_ROOT}/ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_ROOT}/subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('accepts cwd with ${PLUGIN_DATA}/ prefix', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/subdir' },
+      },
+    })
+    expect(result.success).toBe(true)
+  })
+
+  it('rejects $schema with a different URI', () => {
+    const result = CanonicalMcpConfigSchema.safeParse({
+      $schema: 'https://example.com/other.json',
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
+      },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('AgentIdSchema enumerates the seven agents', () => {
+    expect(AgentIdSchema.options).toEqual([
+      'claude-code',
+      'cursor',
+      'vscode',
+      'opencode',
+      'windsurf',
+      'zed',
+      'antigravity',
+    ])
+  })
+
+  it('parses a valid canonical config', () => {
+    const config = CanonicalMcpConfigSchema.parse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: {
+          type: 'stdio',
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-github'],
+        },
+        linear: {
+          type: 'streamable-http',
+          url: 'https://mcp.linear.app/mcp',
+        },
+        'linear-sse': {
+          type: 'sse',
+          url: 'https://mcp.linear.app/sse',
+        },
+      },
+    })
+    expect(isStdioServer(config.mcpServers.github!)).toBe(true)
+    if (isStdioServer(config.mcpServers.github!)) {
+      expect(config.mcpServers.github!.command).toBe('npx')
+    }
+    expect(isHttpServer(config.mcpServers.linear!)).toBe(true)
+    if (isHttpServer(config.mcpServers.linear!)) {
+      expect(config.mcpServers.linear!.type).toBe('streamable-http')
+    }
+    expect(isHttpServer(config.mcpServers['linear-sse']!)).toBe(true)
+    if (isHttpServer(config.mcpServers['linear-sse']!)) {
+      expect(config.mcpServers['linear-sse']!.type).toBe('sse')
     }
   })
 
-  it('readTextFile throws on other errors', () => {
-    const dir = makeSandbox()
-    try {
-      // A directory cannot be read as a text file.
-      expect(() => readTextFile(dir)).toThrow()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
+  it('applies args default without materializing on write', () => {
+    const parsed = CanonicalMcpConfigSchema.parse({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {
+        github: { type: 'stdio', command: 'npx' },
+      },
+    })
+    const github = parsed.mcpServers.github!
+    expect(isStdioServer(github)).toBe(true)
+    if (isStdioServer(github)) {
+      expect(github.args).toEqual([])
     }
   })
 
-  it('writeFileAtomic round-trips content byte-stable', () => {
-    const dir = makeSandbox()
-    const path = join(dir, 'config.json')
-    try {
-      const content = '{"servers":{}}\n'
-      writeFileAtomic(path, content)
-      expect(readTextFile(path)).toBe(content)
-
-      // Second write must be byte-identical.
-      writeFileAtomic(path, content)
-      expect(readTextFile(path)).toBe(content)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+  it('rejects unknown top-level keys (z.strictObject)', () => {
+    expect(() =>
+      CanonicalMcpConfigSchema.parse({
+        $schema: DEFAULT_SCHEMA_URL,
+        mcpServers: {},
+        bogus: true,
+      }),
+    ).toThrow()
   })
 
-  it('writeFileAtomic overwrites existing content', () => {
-    const dir = makeSandbox()
-    const path = join(dir, 'config.json')
-    try {
-      writeFileAtomic(path, 'first\n')
-      writeFileAtomic(path, 'second\n')
-      expect(readTextFile(path)).toBe('second\n')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+  it('validateConfig warns on $schema mismatch but does not fail', () => {
+    const { warnings } = validateConfig({
+      $schema: 'https://example.com/other.json',
+      mcpServers: {},
+    })
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain(DEFAULT_SCHEMA_URL)
   })
 
-  it('writeFileAtomic respects mode option', () => {
-    const dir = makeSandbox()
-    const path = join(dir, '.env')
-    try {
-      writeFileAtomic(path, 'KEY=value\n', { mode: 0o600 })
-      const content = readTextFile(path)
-      expect(content).toBe('KEY=value\n')
-      // On POSIX the file must be created with mode 0o600 (§8.1, .env).
-      if (process.platform !== 'win32') {
-        expect(statSync(path).mode & 0o777).toBe(0o600)
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('writeFileAtomic puts temp file in the target directory (not in cwd)', () => {
-    const dir = makeSandbox()
-    const targetDir = join(dir, 'project', '.agents')
-    const winPath = join(targetDir, 'mcp.json')
-    try {
-      writeFileAtomic(winPath, '{"servers":{}}\n')
-      expect(readTextFile(winPath)).toBe('{"servers":{}}\n')
-      // No temp file may leak into the sandbox root or the process cwd.
-      const rootEntries = readdirSync(dir)
-      expect(rootEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
-        false,
-      )
-      // The target directory itself must not retain a temp file after rename.
-      const targetEntries = readdirSync(targetDir)
-      expect(targetEntries.some((e) => e.startsWith('.agents-mcp-tmp-'))).toBe(
-        false,
-      )
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('backupFile returns null when source missing', () => {
-    const dir = makeSandbox()
-    try {
-      expect(backupFile(join(dir, 'missing.txt'))).toBeNull()
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('backupFile creates a timestamped copy', () => {
-    const dir = makeSandbox()
-    const path = join(dir, 'config.json')
-    try {
-      writeFileSync(path, 'original\n')
-      const backup = backupFile(path)
-      expect(backup).toBeTruthy()
-      expect(backup!.includes('.bak.')).toBe(true)
-      expect(readTextFile(backup!)).toBe('original\n')
-      // Original is untouched.
-      expect(readTextFile(path)).toBe('original\n')
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('concurrent writes do not collide', () => {
-    const dir = makeSandbox()
-    const path = join(dir, 'shared.json')
-    try {
-      const contents = Array.from({ length: 20 }, (_, i) => `write ${i}\n`)
-      contents.forEach((c) => writeFileAtomic(path, c))
-      // The last written content should be intact (no partial/corrupt file).
-      const final = readTextFile(path)
-      expect(final).toMatch(/^write \d+\n$/)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+  it('validateConfig does not warn when $schema matches', () => {
+    const { warnings } = validateConfig({
+      $schema: DEFAULT_SCHEMA_URL,
+      mcpServers: {},
+    })
+    expect(warnings).toEqual([])
   })
 })
 ````
 
-## File: tests/fixtures/schema/invalid-missing-command.json
-````json
-{
-  "mcpServers": {
-    "github": {
-      "type": "stdio"
-    }
-  }
-}
+## File: .gitignore
+````
+# Dependencies
+node_modules/
+
+# Build output (published from dist/, never committed)
+dist/
+
+# Test artifacts
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# agents-mcp local sync state/lock (repository-local choice: the CLI does NOT
+# auto-ignore these; this repo ignores them to avoid an untracked generated file)
+.agents/.mcp-sync-state.json
+.agents/mcp-lock.json
+
+# Package artifacts
+*.tgz
+
+# Local workflow artifacts (never published or tracked)
+workflow/
 ````
 
-## File: tests/fixtures/schema/invalid-missing-url.json
-````json
-{
-  "mcpServers": {
-    "github": {
-      "type": "streamable-http"
-    }
-  }
-}
-````
-
-## File: tests/fixtures/schema/invalid-server-name.json
-````json
-{
-  "mcpServers": {
-    "GitHub": {
-      "type": "stdio",
-      "command": "npx"
-    }
-  }
-}
-````
-
-## File: tests/fixtures/schema/invalid-transport.json
-````json
-{
-  "mcpServers": {
-    "github": {
-      "type": "websocket",
-      "command": "npx"
-    }
-  }
-}
-````
-
-## File: tests/fixtures/schema/invalid-unknown-key.json
-````json
-{
-  "mcpServers": {
-    "github": {
-      "type": "stdio",
-      "command": "npx",
-      "unknownKey": "should-be-rejected"
-    }
-  }
-}
-````
-
-## File: tests/fixtures/schema/valid.json
-````json
-{
-  "mcpServers": {
-    "github": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-      }
-    },
-    "postgres": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["mcp-server-postgres", "${DATABASE_URL}"]
-    },
-    "linear": {
-      "type": "streamable-http",
-      "url": "https://mcp.linear.app/mcp",
-      "headers": {
-        "Authorization": "Bearer ${LINEAR_API_KEY}"
-      }
-    },
-    "linear-sse": {
-      "type": "sse",
-      "url": "https://mcp.linear.app/sse",
-      "headers": {
-        "Authorization": "Bearer ${LINEAR_API_KEY}"
-      }
-    }
-  }
-}
-````
-
-## File: docs/decisions/README.md
+## File: .agents/skills/architect-worker/SKILL.md
 ````markdown
-# Architecture Decision Records
+---
+name: architect-worker
+description: >-
+  Role-based multi-agent software engineering pattern separating high-level
+  architecture, specification, planning, and code review (Architect) from
+  focused code implementation and verification (Worker). Use this skill whenever
+  assigned the Architect or Worker role (in any language), or when coordinating
+  work between planning/review agents and implementation agents via `workflow/`.
+---
 
-Immutable records of the choices that shape `agents-mcp`. Each ADR states the
-context, the decision, the alternatives rejected, and the accepted trade-offs.
+# Architect & Worker Pattern
 
-| ADR | Title | Status |
-| :--- | :--- | :--- |
-| [0001](./0001-canonical-transports.md) | Canonical transports are `stdio` and `http` | Superseded by ADR-0010 |
-| [0002](./0002-schema-source-and-versioning.md) | Zod 4 is the schema source of truth; publish Draft-07 | Superseded by ADR-0010 |
-| [0003](./0003-bundler-tsup.md) | Bundle the CLI with `tsup` (esbuild), no declarations | Accepted |
-| [0004](./0004-runtime-context-and-pure-compilers.md) | Injected runtime context and pure native compilers | Accepted |
-| [0005](./0005-local-sync-state.md) | Local sync state and persisted agent targets | Accepted |
-| [0006](./0006-non-destructive-compilation.md) | Preserve native files in place | Accepted |
-| [0007](./0007-env-and-secrets.md) | `.env` precedence and safe secret extraction | Accepted |
-| [0008](./0008-packaging-and-runtime-floor.md) | Node 22 floor, single binary, publish from `dist/` only | Accepted |
-| [0009](./0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths` | Accepted |
-| [0010](./0010-adopt-agent-plugins-mcp-schema.md) | Adotar o padrão Agent Plugins MCP 1.0.0 | Accepted |
-| [0011](./0011-plugin-lifecycle-and-safe-cleanup.md) | Ciclo de vida de plugins e limpeza segura | Accepted |
-| [0012](./0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`) | Accepted |
+Separate software engineering responsibilities into two complementary agent roles synchronized through the `workflow/` directory (`spec-driven-workflow`), optionally preceded and validated by the **Product Owner** role (`product-owner`):
 
-## Conventions
+- **Product Owner** *(optional, via `product-owner`)* — Owns product intent, priority, and value validation through `workflow/BACKLOG.md` (the only root file in `workflow/`) and `workflow/<change-slug>/VALIDATION.md`.
+- **Architect** — Owns specifications, high-level architecture, execution planning, task sharding, code review, quality control, and delivery handoff inside `workflow/<change-slug>/`.
+- **Worker** — Owns code implementation, testing, and remediation for a given `workflow/<change-slug>/`, strictly following the Architect's specifications and all project documentation and skills.
 
-- One decision per file, numbered sequentially.
-- Never edit an accepted ADR's intent; supersede it with a new record.
-- Every ADR is referenced from [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md) §19 and,
-  when relevant, from the package documentation.
+> **Parallelism**: Because each initiative lives in its own `workflow/<change-slug>/` subdirectory, the Architect can specify and plan new items in `workflow/<other-slug>/` while a Worker implements an already-ready plan in `workflow/<change-slug>/`, and multiple Workers can execute non-conflicting plans concurrently.
+
+## Role Activation
+
+1. **Explicit Role Assignment**: Adopt the role specified by the user (e.g., *"Act as the Architect"* or *"Act as the Worker"*, including equivalent role names in the user's language).
+2. **Role Persistence**: Maintain the assigned role for the entire session unless the user explicitly instructs a role switch.
+3. **Missing Role Clarification**: If this skill is invoked without a clear role assignment, ask the user whether to proceed as **Architect** or **Worker** before taking action.
+
+---
+
+## Role 1: The Architect
+
+The Architect governs **what** is built, **how** it is structured, and **whether** the result meets quality standards.
+
+### Responsibilities
+
+1. **Specification (`workflow/<change-slug>/SPEC.md`)**
+   - Read `workflow/BACKLOG.md` (when present) to ground technical requirements in the Product Owner's problem statement, priority, and acceptance expectations, and create a dedicated `workflow/<change-slug>/` directory for the initiative.
+   - Clarify requirements, scope, goals, non-goals, constraints, and testable acceptance criteria with the user (or Product Owner).
+2. **Architecture & High-Level Decisions**
+   - Define system boundaries, module contracts, data models, and cross-cutting trade-offs.
+   - Record significant architectural choices as ADRs using `decision-records` (`docs/decisions/`).
+3. **Planning & Task Breakdown (`workflow/<change-slug>/PLAN.md` & `TASKS.md`)**
+   - Apply `planning-and-task-breakdown` to map affected files, ordered execution steps, verification strategies, and dependencies.
+   - Shard large or parallelizable plans into `workflow/<change-slug>/TASKS.md` with disjoint scopes so one or more Worker agents can execute safely.
+4. **Code Review & Quality Control (`workflow/<change-slug>/REVIEW.md`)**
+   - Apply `code-review` to inspect the Worker's implementation against `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, and engineering standards.
+   - Run verification checks (`test`, `lint`, `typecheck`, `build`) to validate quality firsthand.
+   - Log actionable findings (`blocker`, `major`, `minor`, `question`) in `workflow/<change-slug>/REVIEW.md` and set the review status (`Changes Requested` or `Approved`).
+   - Once `REVIEW.md` is `Approved`, if `workflow/BACKLOG.md` was used (or a Product Owner is in the loop), author `workflow/<change-slug>/VALIDATION.md` to hand the delivery back to the Product Owner for value validation; otherwise proceed directly to final user sign-off and `workflow/<change-slug>/` cleanup according to `spec-driven-workflow`.
+
+### Architect Guardrails
+
+- **Never write or modify production/application code or test suites.** Leave all implementation edits to the Worker.
+- **Only create or edit governance artifacts**: `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, `workflow/<change-slug>/TASKS.md`, `workflow/<change-slug>/REVIEW.md`, `workflow/<change-slug>/VALIDATION.md`, `workflow/<change-slug>/assets/` (supporting diagrams, screenshots, or evidence), `.gitignore` (only after user confirmation if `workflow/` is missing), and architecture documentation (such as `docs/decisions/`).
+- **Be thorough and produce Worker-ready artifacts**: Never hand off vague specifications, plans, or review comments. Every requirement in `SPEC.md`, step in `PLAN.md`, task in `TASKS.md`, and finding in `REVIEW.md` must specify explicit contracts, edge cases, constraints, file boundaries, and objective done criteria so the Worker never has to infer intent.
+
+---
+
+## Role 2: The Worker
+
+The Worker turns the Architect's specifications and plans into clean, well-tested, production-ready code.
+
+### Responsibilities
+
+1. **Load Context Before Coding**
+   - Read `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, `workflow/<change-slug>/TASKS.md` (if present), and `workflow/<change-slug>/REVIEW.md` (if addressing review feedback), along with any linked evidence in `workflow/<change-slug>/assets/`.
+   - Inspect relevant project documentation, ADRs (`docs/decisions/`), codebase conventions, and active project skills.
+   - If assigned a specific task ID (e.g., `T2` in `workflow/<change-slug>/TASKS.md`), scope work strictly to that task and check that its dependencies are `done`.
+2. **Execute & Verify Incrementally**
+   - Follow `incremental-implementation` to build in small, verifiable slices.
+   - Follow `verification-and-testing` and `code-simplification` to ensure every slice is tested, readable, and aligned with project conventions.
+   - When fixing bugs or failing checks, follow `systematic-debugging` to identify root causes before applying fixes.
+3. **Address Review Feedback**
+   - When `workflow/<change-slug>/REVIEW.md` has open items (`blocker`, `major`, `minor`, or `question`), resolve each item in code/tests strictly as directed and update its status in `workflow/<change-slug>/REVIEW.md` (or provide answers to questions). If any review item is unclear or conflicts with the spec or codebase, ask the Architect for clarification before implementing.
+4. **Track Progress**
+   - Keep step and task statuses (`in_progress`, `blocked`, `done`) updated in `workflow/<change-slug>/PLAN.md` and `workflow/<change-slug>/TASKS.md`.
+
+### Worker Guardrails
+
+- **No unrequested work or scope drift**: Keep local, low-level implementation decisions (e.g., internal helpers, naming, test structure) within the assigned boundaries, **but never** make unrequested refactors, "improvements", or changes outside what is explicitly specified in `workflow/<change-slug>/SPEC.md`, `PLAN.md`, `TASKS.md`, and `REVIEW.md`. Do not alter requirements in `SPEC.md` or redesign the architecture in `PLAN.md`.
+- **Ask when anything is unclear — never guess**: If `SPEC.md`, `PLAN.md`, `TASKS.md`, or `REVIEW.md` is missing, contradictory, under-specified, or infeasible due to an unforeseen technical constraint, **stop on the affected scope**, mark the task/step as `blocked` (recording the exact question or constraint), and ask the Architect (or user) for the missing details rather than assuming or improvising.
+- **Follow review directives strictly**: Address every open item in `workflow/<change-slug>/REVIEW.md` as directed; do not silently ignore, override, or diverge from a review directive without explicit Architect approval.
+- **Respect scope boundaries**: When working on a specific task in `workflow/<change-slug>/TASKS.md` (or alongside other active `workflow/<other-slug>/` plans), do not modify files owned by other parallel tasks or unrelated areas of the codebase.
+- **Never commit `workflow/`**: Ensure `workflow/` remains untracked by Git per `spec-driven-workflow`.
+
+---
+
+## Handoff Lifecycle
+
+The Architect and Worker (and optionally the Product Owner via `product-owner`) coordinate asynchronously or sequentially through `workflow/`:
+
+```text
+[Product Owner] 0. Discover & Frame  -> (Optional) Writes workflow/BACKLOG.md
+       │
+       ▼
+[Architect]     1. Specify & Plan    -> Reads BACKLOG.md (if any), writes workflow/<change-slug>/SPEC.md, PLAN.md (+ TASKS.md)
+       │
+       ▼
+[Worker]        2. Implement & Verify-> Executes workflow/<change-slug>/PLAN.md / TASKS.md, runs tests, marks done
+       │
+       ▼
+[Architect]     3. Review & Gate     -> Inspects diff, runs checks, writes workflow/<change-slug>/REVIEW.md
+       │
+       ├── If Changes Requested ──────► [Worker] resolves open items in REVIEW.md
+       │
+       ▼
+[Architect]     4. Delivery Handoff  -> (If PO in loop) Writes workflow/<change-slug>/VALIDATION.md for PO
+       │
+       ├── If PO Requests Changes ────► [Architect] refines SPEC.md/PLAN.md for Worker
+       │
+       ▼
+[PO / Architect]5. Sign-Off & Cleanup-> Confirms with user/PO, deletes workflow/<change-slug>/, updates BACKLOG.md
+```
+````
+
+## File: .agents/skills/spec-driven-workflow/SKILL.md
+````markdown
+---
+name: spec-driven-workflow
+description: >-
+  Default software engineering workflow using a `workflow/` directory where
+  `workflow/BACKLOG.md` is the only root file and every change lives in its own
+  scoped subdirectory `workflow/<change-slug>/` (`SPEC.md`, `PLAN.md`,
+  `TASKS.md`, `REVIEW.md`, and conditional `VALIDATION.md`). Use this skill as
+  the standard process whenever starting a feature, bug fix, refactoring,
+  architecture change, or code review—to capture product intent, specify
+  requirements, plan execution, coordinate parallel work, track review
+  findings, and validate delivery.
+---
+
+# Spec-Driven Workflow
+
+Adopt this workflow as the **standard software engineering process** for any non-trivial change. Do not jump straight into writing code; follow the gated lifecycle below using the `workflow/` directory to separate **why/value** (`BACKLOG.md`), **what** needs to change (`SPEC.md`), **how** it will be built (`PLAN.md`), **who** executes independent pieces (`TASKS.md`), **what** needs attention after implementation (`REVIEW.md`), and **whether** the delivered value meets product expectations (`VALIDATION.md`).
+
+## Standard Operating Flow
+
+Follow these phases in order:
+
+0. **Discover & Frame (`BACKLOG.md`, conditional)** — Capture product intent, user value, priority, or a prioritized mini-backlog of evolutions/bugs (typically owned by the `product-owner` role) before technical specification.
+1. **Specify (`SPEC.md`)** — Define the problem, scope, constraints, and acceptance criteria (consuming `BACKLOG.md` when present) before designing or coding.
+2. **Plan (`PLAN.md`)** — Map the technical approach, affected files, ordered steps, and verification strategy.
+3. **Shard (`TASKS.md`, conditional)** — Break the plan into trackable tasks only when complexity, multi-scope work, or parallel execution warrants it.
+4. **Implement** — Execute against `PLAN.md` (or `TASKS.md`), keeping artifact statuses current as work progresses.
+5. **Review (`REVIEW.md`)** — Record code review findings (human or agent) and resolve blockers/major issues before completion.
+6. **Validate (`VALIDATION.md`, conditional)** — Hand the approved delivery back to the Product Owner (or stakeholder) with plain-language summary and validation scenarios to confirm product value before cleanup.
+
+> **Trivial changes exception**: Skip `workflow/` artifacts only for trivial, self-contained edits (e.g., typo fixes, single-line formatting, or minor comment updates) where specification and planning add no value.
+
+## Directory Layout
+
+Keep **`workflow/BACKLOG.md` as the only file at the `workflow/` root**. Always place all implementation-related artifacts (`SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, `VALIDATION.md`, and change-specific assets) inside a dedicated subdirectory `workflow/<change-slug>/` named with a concise kebab-case slug identifying the feature, bug fix, refactor, or backlog item (e.g., `workflow/b1-checkout-fix/`, `workflow/user-authentication/`):
+
+```text
+workflow/
+├── BACKLOG.md                # Optional: Only file at workflow/ root (Product Owner backlog & Ready briefs)
+├── assets/                   # Optional: Backlog-level screenshots, mockups, or supporting evidence
+└── <change-slug>/            # Required per non-trivial change (e.g., b1-checkout-fix, user-auth)
+    ├── assets/               # Optional: Change-specific screenshots, diagrams, logs, and evidence
+    ├── SPEC.md               # Required for any non-trivial change
+    ├── PLAN.md               # Required before implementation starts
+    ├── TASKS.md              # Optional: only for large plans or parallel/async agent work
+    ├── REVIEW.md             # Created during human or agent code review
+    └── VALIDATION.md         # Optional: Architect-to-PO delivery handoff and value sign-off
+```
+
+- **Why `<change-slug>/` is mandatory**: Isolating every initiative in its own `workflow/<change-slug>/` directory allows multiple agents to work in parallel on different plans (as long as their code scopes do not conflict), and allows an Architect to specify and plan upcoming items in `workflow/<slug-b>/` while a Worker implements an already-approved plan in `workflow/<slug-a>/`.
+- **Never place `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md` directly in `workflow/` root.**
+
+If `workflow/`, `workflow/<change-slug>/`, or any required artifact does not exist yet, **create the directory and initialize the missing files automatically** using the templates in `./resources/`.
+
+### Supporting Assets & Evidence
+
+Any agent or contributor in **any phase** (`BACKLOG.md`, `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md`) may attach screenshots (e.g., annotated UI bug captures), diagrams, logs, or other supporting files to enrich context for downstream or peer agents:
+
+- **Storage location**:
+  - Store backlog-level evidence referenced by `workflow/BACKLOG.md` in `workflow/assets/`.
+  - Store change-specific evidence referenced by `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md` in `workflow/<change-slug>/assets/`.
+  - Never scatter temporary evidence files in the repository root, source directories, or tracked `docs/` folders.
+- **Naming**: Use clear, descriptive filenames (preferably kebab-case, prefixed with the related item/finding ID when applicable, such as `b1-checkout-bug-annotated.png` or `r2-mobile-overflow.png`).
+- **Linking**: Reference attached files from any Markdown document using relative links or image embeds (e.g., `![Annotated checkout bug](./assets/b1-checkout-bug-annotated.png)` or `[Failure log](./assets/test-failure.log)`).
+
+### Version Control
+
+The `workflow/` directory—including `workflow/assets/` and all subdirectories—contains local process-management and guidance artifacts and **must never be tracked by Git**:
+
+- Check whether `workflow/` is listed in the repository's `.gitignore`; if it is missing, ask the user for confirmation before adding it.
+- Never stage or commit `workflow/` or any files inside it. If `workflow/` is somehow already tracked, warn the user before untrack/cleanup operations.
+
+## Artifact Lifecycle
+
+### 0. `workflow/BACKLOG.md` — Capture Product Intent & Backlog (Conditional)
+
+Create or update `BACKLOG.md` when a Product Owner (or stakeholder) wants to frame a new feature, improvement, or bug fix—or maintain a prioritized mini-backlog of software evolutions—before engineering specification begins.
+
+- **Purpose**: Separate product discovery, priority, and user value (*why* and *who*) from technical design (`SPEC.md`).
+- **Template**: Start from [BACKLOG.md](./resources/BACKLOG.md).
+- **Rules**:
+  - Maintain an ordered **Product Backlog** table for candidate evolutions, features, and bug reports (`Idea`, `Refining`, `Ready`, `In Downstream`, `Done`).
+  - Complete the **Active Demand Brief** and **Definition of Ready (DoR)** before handing an item off to `SPEC.md`.
+  - Keep `BACKLOG.md` free of technical implementation details (file paths, schemas, or code).
+
+### 1. `workflow/<change-slug>/SPEC.md` — Define the Change
+
+Create `workflow/<change-slug>/SPEC.md` first for any new feature, bug fix, or architectural change.
+
+- **Purpose**: Align on scope, behavior, constraints, and acceptance criteria before writing code.
+- **Template**: Start from [SPEC.md](./resources/SPEC.md).
+- **Rules**:
+  - State both **Goals** and **Non-Goals** to prevent scope creep.
+  - Write testable **Acceptance Criteria** so completion is objective.
+  - For bug fixes, document reproduction steps, expected vs. actual behavior, and root cause (once known).
+
+### 2. `workflow/<change-slug>/PLAN.md` — Map Execution Steps
+
+Create `workflow/<change-slug>/PLAN.md` once `SPEC.md` is clear.
+
+- **Purpose**: Translate the specification into concrete, ordered engineering steps.
+- **Template**: Start from [PLAN.md](./resources/PLAN.md).
+- **Rules**:
+  - Reference `SPEC.md` requirements; do not duplicate the full spec.
+  - List affected files/modules, ordered implementation steps, and a concrete verification strategy (tests, linters, manual checks).
+  - Highlight risks, migrations, or rollback considerations if applicable.
+
+### 3. `workflow/<change-slug>/TASKS.md` — Shard Large or Parallel Work (Conditional)
+
+Create `workflow/<change-slug>/TASKS.md` **only** when at least one of these conditions holds:
+
+1. The `PLAN.md` is too large or comprehensive to execute cleanly in a single pass.
+2. The `PLAN.md` spans two or more distinct project scopes (e.g., frontend, backend, infra, or multiple packages), task types (`feature`, `bugfix`, `refactor`, `docs`), or independent deliverables that benefit from separate tracking.
+3. Work can be split into independent units executed **in parallel or asynchronously** by different agents or contributors.
+
+- **Template**: Start from [TASKS.md](./resources/TASKS.md).
+- **Rules**:
+  - Skip `TASKS.md` for small, linear changes where `PLAN.md` is sufficient.
+  - Every task must specify an ID, status (`pending`, `in_progress`, `blocked`, `done`), dependencies, owned files/scope (to avoid merge conflicts between parallel agents), and clear done criteria.
+  - Keep task statuses updated as work progresses.
+
+### 4. `workflow/<change-slug>/REVIEW.md` — Record Code Review Findings
+
+Create or update `workflow/<change-slug>/REVIEW.md` when a human or reviewing agent inspects the implemented changes.
+
+- **Purpose**: Centralize actionable review observations that require attention before merging.
+- **Template**: Start from [REVIEW.md](./resources/REVIEW.md).
+- **Rules**:
+  - Categorize every observation by severity (`blocker`, `major`, `minor`, `question`).
+  - Point to exact file paths, line ranges, or symbols, and explain *why* the issue matters.
+  - Track resolution status (`open`, `resolved`, `wontfix`) so nothing is lost across review rounds.
+
+### 5. `workflow/<change-slug>/VALIDATION.md` — Product Delivery Validation (Conditional)
+
+Create `workflow/<change-slug>/VALIDATION.md` after `REVIEW.md` is approved whenever `workflow/BACKLOG.md` was used or a Product Owner / stakeholder needs a structured handoff to validate the delivered value.
+
+- **Purpose**: Translate the completed engineering delivery back into plain-language product outcomes, validation steps, and formal acceptance sign-off.
+- **Template**: Start from [VALIDATION.md](./resources/VALIDATION.md).
+- **Rules**:
+  - Prepared by the Architect (or lead engineer) with a **Delivery Summary**, **Backlog Value Mapping**, and observable **How to Validate** scenarios.
+  - Reviewed and signed off by the Product Owner (`Approved` or `Changes Requested`) before closing the cycle.
+
+## Verification & Cleanup
+
+Before considering a change (`workflow/<change-slug>/`) complete:
+
+1. Every acceptance criterion in `workflow/<change-slug>/SPEC.md` is satisfied and verified by tests or explicit checks.
+2. All steps in `workflow/<change-slug>/PLAN.md` (and `workflow/<change-slug>/TASKS.md`, if used) are completed or explicitly deferred.
+3. All `blocker` and `major` items in `workflow/<change-slug>/REVIEW.md` are marked `resolved` (or `wontfix` with rationale).
+4. If `workflow/<change-slug>/VALIDATION.md` is used, the Product Owner has marked it `Approved` (and updated the corresponding item status in `workflow/BACKLOG.md` to `Done`).
+5. **Ask the user for final sign-off and cleanup**: Once the plan, tasks (if any), review, and validation (if used) are complete, explicitly ask the user if everything is ready and whether the completed `workflow/<change-slug>/` artifacts can be cleaned up.
+   - **Never delete** the root `workflow/` directory or `workflow/BACKLOG.md`.
+   - When the user confirms cleanup for a completed change, **delete the completed `workflow/<change-slug>/` subdirectory** (along with its `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, `VALIDATION.md`, and `assets/`), without touching other active `workflow/<other-slug>/` subdirectories.
+   - If `workflow/BACKLOG.md` was used, preserve the backlog table (keeping ongoing items), clear only the completed demand brief if appropriate, and remove completed-change files inside `workflow/assets/` that are no longer referenced by ongoing `BACKLOG.md` items.
+````
+
+## File: .agents/mcp.json
+````json
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "sequential-thinking": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ]
+    },
+    "memory": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ]
+    }
+  }
+}
 ````
 
 ## File: spec/MATRIX.md
@@ -19493,13 +19162,497 @@ All compiled examples below are produced from this canonical `.agents/mcp.json`:
 ```
 ````
 
+## File: src/commands/remove.command.ts
+````typescript
+/**
+ * `remove` command (§11).
+ *
+ * Remove a server from the canonical config and sync unless `--no-sync`.
+ * Unknown name → exit `1`.
+ */
+
+import { defineCommand } from 'citty'
+import {
+  createUiAndCtx,
+  configPath,
+  persistCanonicalConfig,
+  isDryRun,
+  isGlobalFlag,
+  isYesFlag,
+  loadSyncState,
+  persistSyncState,
+  isNoSyncFlag,
+  parseAgentsFlag,
+  formatConfigValidationError,
+  formatDryRunActions,
+} from '$/src/commands/util'
+import { runSync } from '$/src/commands/sync'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
+import type { ConfigScope } from '$/src/core/context'
+import { removeManagedPlugin } from '$/src/core/plugins'
+
+export const removeCommand = defineCommand({
+  meta: {
+    name: 'remove',
+    description: 'Remove a server and clean it from managed agent configs',
+  },
+  args: {
+    'no-sync': {
+      type: 'boolean',
+      description: 'Remove from canonical without running sync afterwards',
+    },
+  },
+  run: async ({ args, rawArgs }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
+    const path = configPath(scope, ctx)
+    const dryRun = isDryRun(args)
+    const noSync = isNoSyncFlag(args, rawArgs)
+    const yes = isYesFlag(args)
+    const agentsFlag = parseAgentsFlag(args, rawArgs)
+    const name = args._?.[0] as string | undefined
+
+    if (!name) {
+      ui.error('Usage: agents-mcp remove <name>')
+      process.exit(2)
+    }
+
+    // Load + validate canonical config, reporting ConfigValidationError cleanly.
+    let validated
+    try {
+      validated = loadValidatedConfig(scope, ctx)
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        ui.error(formatConfigValidationError(err))
+        process.exit(1)
+      }
+      throw err
+    }
+    if (!validated) {
+      ui.error(`No canonical config at ${path}. Run 'agents-mcp init' first.`)
+      process.exit(1)
+    }
+
+    const servers = {
+      ...(validated.config.mcpServers as Record<string, unknown>),
+    }
+    if (!(name in servers)) {
+      ui.error(`Unknown server \`${name}\`. Not found in canonical config.`)
+      process.exit(1)
+    }
+
+    // Load the state before changing the canonical config.
+    const stateResult = loadSyncState(scope, ctx)
+    const state = stateResult.state
+
+    delete servers[name]
+
+    // Planned file operations for the --dry-run preview (zero disk writes).
+    const planned: { type: 'write' | 'remove'; path: string }[] = []
+    planned.push({ type: 'write', path })
+
+    if (!dryRun) {
+      persistCanonicalConfig(scope, ctx, {
+        $schema: validated.config.$schema,
+        mcpServers: servers,
+      })
+    }
+
+    ui.note(`Removed server \`${name}\` from canonical config`)
+
+    if (dryRun) {
+      // Dry-run preview of planned file operations (zero disk writes).
+      ui.note(formatDryRunActions(planned))
+      return
+    }
+
+    if (noSync) {
+      const removal = removeManagedPlugin({
+        scope,
+        ctx,
+        name,
+        managedPlugins: state.managedPlugins,
+        dryRun: false,
+      })
+
+      if (removal.ok) {
+        const nextState = {
+          ...state,
+          scope,
+          targets: state.targets,
+          agents: { ...state.agents },
+          managedPlugins: state.managedPlugins.filter((n) => n !== name),
+        }
+        persistSyncState(scope, ctx, nextState)
+        if (removal.removed.length > 0) {
+          ui.note(
+            `Agent sync skipped (--no-sync): the managed plugin of \`${name}\` was cleaned. Run \`agents-mcp sync\` to sync agents later.`,
+          )
+        }
+      } else {
+        for (const err of removal.errors) {
+          ui.error(err)
+        }
+        ui.note(
+          `Server \`${name}\` was removed from canonical, but plugin files remain and will be reprocessed on the next \`sync\`.`,
+        )
+        process.exit(1)
+        return
+      }
+    } else {
+      const summary = await runSync({
+        scope,
+        ctx,
+        flag: agentsFlag,
+        dryRun: false,
+        yes,
+        // B7: removing a server in a project without targets succeeds and
+        // cleans up the managed plugin.
+        allowEmptyTargets: true,
+      })
+      if (summary.errors.length > 0) {
+        process.exit(1)
+      }
+    }
+  },
+})
+````
+
+## File: src/commands/sync.command.ts
+````typescript
+/**
+ * `sync` command definition for citty (§11).
+ *
+ * Reuses `runSync` from `./sync` and wires citty args into `SyncOptions`.
+ */
+
+import { defineCommand } from 'citty'
+import { runSync, type SyncOptions } from './sync'
+import {
+  createUiAndCtx,
+  isGlobalFlag,
+  isYesFlag,
+  parseAgentsFlag,
+} from '$/src/commands/util'
+
+export const syncCommand = defineCommand({
+  meta: {
+    name: 'sync',
+    description:
+      'Compile .agents/mcp.json into all targeted agent config files',
+  },
+  args: {},
+  run: async ({ args, rawArgs }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = isGlobalFlag(args) ? 'global' : 'project'
+    const flag = parseAgentsFlag(args, rawArgs)
+    const dryRun = args['dry-run'] === true
+
+    // Fail fast on positional arguments instead of silently falling back to
+    // stale state.targets (e.g. `npm run cli sync --agents cursor` without
+    // `--` makes npm consume the flag and pass a bare positional value).
+    if (Array.isArray(args._) && args._.length > 0) {
+      ui.error(
+        `Unexpected positional argument(s) for \`sync\`: ${args._.join(' ')}. To select agents, pass \`--agents <list>\` (when using \`npm run\`, add \`--\` before flags).`,
+      )
+      process.exit(2)
+      return
+    }
+
+    const summary = await runSync({
+      scope,
+      ctx,
+      flag,
+      dryRun,
+      yes: isYesFlag(args),
+      allowEmptyTargets: true,
+    })
+
+    if (summary.errors.length > 0 && !dryRun) {
+      process.exit(1)
+    }
+  },
+})
+````
+
+## File: src/commands/util.ts
+````typescript
+/**
+ * Shared helpers for the core commands (§11).
+ *
+ * Commands own the `RuntimeContext` + `PromptUi` creation and filesystem/state
+ * access. Adapters and compilers remain pure.
+ */
+
+import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import {
+  getConfigPath,
+  loadValidatedConfig,
+  writeConfig,
+  ConfigValidationError,
+} from '$/src/core/store'
+import {
+  getStatePath,
+  loadState,
+  writeState,
+  type LoadStateResult,
+  type SyncState,
+} from '$/src/core/state'
+import { resolveTargetsAsync } from '$/src/adapters/index'
+import { createUi } from '$/src/index'
+import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+import type { AgentId, AgentAdapter } from '$/src/adapters/types'
+import { getAdapter } from '$/src/adapters/index'
+import type { CanonicalServer, CanonicalMcpConfig } from '$/src/core/schema'
+import { AGENTS_DIR, CONFIG_FILE } from '$/src/config'
+
+export { writeFileAtomic } from '$/src/core/fs-atomic'
+
+/** Create the `RuntimeContext` and `PromptUi` for the current process. */
+export function createUiAndCtx({ yes = false }: { yes?: boolean } = {}): {
+  ctx: RuntimeContext
+  ui: ReturnType<typeof createUi>['ui']
+} {
+  const { ctx, ui } = createUi({ yes })
+  return { ctx, ui }
+}
+
+/** Path to the canonical config for a scope. */
+export function configPath(scope: ConfigScope, ctx: RuntimeContext): string {
+  return getConfigPath(scope, ctx)
+}
+
+/** Path to the sync state for a scope. */
+export function statePath(scope: ConfigScope, ctx: RuntimeContext): string {
+  return getStatePath(scope, ctx)
+}
+
+/** Load the canonical config for a scope. Null when absent. */
+export function loadCanonicalConfig(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): Awaited<ReturnType<typeof loadValidatedConfig>> | null {
+  return loadValidatedConfig(scope, ctx)
+}
+
+/** Format a `ConfigValidationError` into a clean, human-readable string. */
+export function formatConfigValidationError(
+  err: ConfigValidationError,
+): string {
+  const issues = err.issues
+    .map((issue) => `  • ${issue.path || 'root'} — ${issue.message}`)
+    .join('\n')
+  return `Invalid config at ${err.path}:\n${issues}`
+}
+
+/**
+ * Load the canonical config for a scope, exiting with a formatted error when
+ * it is missing or invalid. Shared by `add`, `sync`, `list`, `remove`, and
+ * `import` so every command reports `ConfigValidationError` consistently.
+ */
+export function loadCanonicalOrExit(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+  ui: ReturnType<typeof createUi>['ui'],
+): CanonicalMcpConfig {
+  try {
+    const validated = loadValidatedConfig(scope, ctx)
+    if (!validated) {
+      ui.error(
+        `No canonical config at ${configPath(scope, ctx)}. Run 'agents-mcp init' first.`,
+      )
+      process.exit(1)
+    }
+    return validated.config
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      ui.error(formatConfigValidationError(err))
+      process.exit(1)
+    }
+    throw err
+  }
+}
+
+/** Load the sync state (empty state when absent/corrupt). */
+export function loadSyncState(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): LoadStateResult {
+  return loadState(scope, ctx)
+}
+
+/** Persist the sync state atomically. */
+export function persistSyncState(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+  state: SyncState,
+): void {
+  writeState(scope, ctx, state)
+}
+
+/** Write the canonical config atomically (minimal serialization). */
+export function persistCanonicalConfig(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+  config: Record<string, unknown>,
+): void {
+  writeConfig({ scope, ctx, config })
+}
+
+/**
+ * Resolve target agents with precedence flag → state → detection.
+ */
+export async function resolveTargetAgents({
+  flag,
+  state,
+  ctx,
+}: {
+  flag: readonly string[] | undefined
+  state: SyncState
+  ctx: RuntimeContext
+}): Promise<AgentId[]> {
+  return resolveTargetsAsync({ flag, state, ctx })
+}
+
+/**
+ * Read the existing native file content for an adapter (null when absent).
+ */
+export async function readNativeContent(
+  adapter: AgentAdapter,
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): Promise<string | null> {
+  const path = adapter.getConfigPath(scope, ctx)
+  if (path === null) {
+    return null
+  }
+  return readTextFile(path)
+}
+
+/**
+ * Write native content for an adapter atomically.
+ */
+export async function writeNativeContent(
+  adapter: AgentAdapter,
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+  content: string,
+): Promise<void> {
+  const path = adapter.getConfigPath(scope, ctx)
+  if (path === null) {
+    return
+  }
+  writeFileAtomic(path, content)
+}
+
+/** Whether `dry-run` is active from the parsed citty args. */
+export function isDryRun(args: Record<string, unknown>): boolean {
+  return args['dry-run'] === true
+}
+
+/**
+ * Whether the global scope was requested, accepting both the long flag
+ * (`--global`) and the short alias (`-g`). Subcommands do not inherit the
+ * root command aliases, so the raw token may arrive as `args.g`.
+ */
+export function isGlobalFlag(args: Record<string, unknown>): boolean {
+  return args.global === true || args.g === true
+}
+
+/**
+ * Whether non-interactive mode was requested, accepting both the long flag
+ * (`--yes`) and the short alias (`-y`). Subcommands do not inherit the root
+ * command aliases, so the raw token may arrive as `args.y`.
+ */
+export function isYesFlag(args: Record<string, unknown>): boolean {
+  return args.yes === true || args.y === true
+}
+
+/** Format planned file operations for a `--dry-run` preview. */
+export function formatDryRunActions(
+  actions: { type: 'write' | 'remove'; path: string }[],
+): string {
+  return actions.map((a) => `[dry-run] ${a.type} ${a.path}`).join('\n')
+}
+
+/**
+ * Detects the `--no-sync` flag regardless of how citty parsed it.
+ *
+ * Citty consumes `--no-sync` before parsing and delivers `args.sync === false`
+ * (without the `no-sync` key). This helper covers all forms:
+ * `args['no-sync'] === true`, `args.sync === false` and `rawArgs.includes('--no-sync')`.
+ */
+export function isNoSyncFlag(
+  args: Record<string, unknown>,
+  rawArgs: readonly string[],
+): boolean {
+  return (
+    args['no-sync'] === true ||
+    args.sync === false ||
+    rawArgs.includes('--no-sync')
+  )
+}
+
+/** Normalizes a comma-separated list of agents. */
+function splitAgentList(value: string): string[] | undefined {
+  const ids = value
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0)
+  return ids.length > 0 ? ids : undefined
+}
+
+/**
+ * Extracts `--agents` from `args` (when citty already parsed the flag) and
+ * from `rawArgs` (forms `--agents=<list>` and `--agents <list>`).
+ *
+ * The `rawArgs` fallback covers subcommands that do not declare `agents` and
+ * the case where citty transforms `--agents <list>` into `true` + positional.
+ */
+export function parseAgentsFlag(
+  args: Record<string, unknown>,
+  rawArgs: readonly string[],
+): string[] | undefined {
+  const fromArgs = args.agents
+  if (typeof fromArgs === 'string') {
+    const parsed = splitAgentList(fromArgs)
+    if (parsed) {
+      return parsed
+    }
+  }
+
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+    if (token === '--') break
+    if (token.startsWith('--agents=')) {
+      return splitAgentList(token.slice('--agents='.length))
+    }
+    if (token === '--agents') {
+      const next = rawArgs[i + 1]
+      if (next !== undefined && !next.startsWith('-')) {
+        return splitAgentList(next)
+      }
+    }
+  }
+
+  return undefined
+}
+
+export { AGENTS_DIR, CONFIG_FILE, type CanonicalServer }
+````
+
 ## File: src/core/state.ts
 ````typescript
 import { z } from 'zod'
 import { AgentIdSchema } from '$/src/core/schema'
-import { AGENTS_DIR, STATE_FILE, STATE_VERSION } from '$/src/config'
+import {
+  AGENTS_DIR,
+  LEGACY_STATE_FILE,
+  STATE_FILE,
+  STATE_VERSION,
+} from '$/src/config'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
-import { ensureIgnored } from '$/src/core/gitignore'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
@@ -19522,6 +19675,8 @@ export interface SyncState {
 export interface LoadStateResult {
   state: SyncState
   warnings: string[]
+  /** Non-fatal hints surfaced to the user (e.g. a legacy file was imported). */
+  notices: string[]
 }
 
 const SyncStateAgentSchema = z.object({
@@ -19558,45 +19713,98 @@ export function getStatePath(scope: ConfigScope, ctx: RuntimeContext): string {
   return `${base}/${AGENTS_DIR}/${STATE_FILE}`
 }
 
+export function getLegacyStatePath(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): string {
+  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+  return `${base}/${AGENTS_DIR}/${LEGACY_STATE_FILE}`
+}
+
 /**
- * Load the sync state. Missing file → empty state, no warning.
- * Corrupt / unknown-version file → warn, treat as empty.
+ * Parse a sync state file with `SyncStateSchema`.
+ *
+ * The caller handles the missing-file case before calling this. Returns the
+ * parsed state on success, or a warning for corrupt JSON / invalid shape.
+ */
+function parseStateFile(
+  raw: string,
+  path: string,
+): { state: SyncState } | { warning: string } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { warning: `Corrupt sync state at ${path}; treating as empty` }
+  }
+
+  const result = SyncStateSchema.safeParse(parsed)
+  if (!result.success) {
+    return { warning: `Invalid sync state at ${path}; treating as empty` }
+  }
+
+  return { state: result.data }
+}
+
+/**
+ * Load the sync state with precedence: new lock (`.agents/mcp-lock.json`)
+ * → legacy file (`.mcp-sync-state.json`) → empty state.
+ *
+ * - Neither file present → empty state, no warning.
+ * - New lock present and valid → it wins; the legacy file is ignored silently.
+ * - New lock corrupt/invalid → warning + empty state; NO fallback to legacy
+ *   (avoid resurrecting stale state over a newer corrupt file).
+ * - New absent + legacy valid → legacy state plus a non-fatal notice.
+ * - New absent + legacy corrupt → warning + empty state.
  */
 export function loadState(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): LoadStateResult {
-  const path = getStatePath(scope, ctx)
-  const raw = readTextFile(path)
-  if (raw === null) {
-    return { state: emptyState(scope), warnings: [] }
+  const lockPath = getStatePath(scope, ctx)
+  const legacyPath = getLegacyStatePath(scope, ctx)
+
+  // 1. New lock file.
+  const lockRaw = readTextFile(lockPath)
+  if (lockRaw !== null) {
+    const parsed = parseStateFile(lockRaw, lockPath)
+    if ('state' in parsed) {
+      return { state: parsed.state, warnings: [], notices: [] }
+    }
+    // Corrupt/invalid new lock: warn + empty, never read the legacy file.
+    return { state: emptyState(scope), warnings: [parsed.warning], notices: [] }
   }
 
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
+  // 2. Legacy fallback: only when the new lock is absent.
+  const legacyRaw = readTextFile(legacyPath)
+  if (legacyRaw !== null) {
+    const parsed = parseStateFile(legacyRaw, legacyPath)
+    if ('state' in parsed) {
+      return {
+        state: parsed.state,
+        warnings: [],
+        notices: [
+          `Legacy sync state at ${legacyPath} was imported; it will be replaced by ${lockPath} on the next write. You can delete the legacy file.`,
+        ],
+      }
+    }
     return {
       state: emptyState(scope),
-      warnings: [`Corrupt sync state at ${path}; treating as empty`],
+      warnings: [parsed.warning],
+      notices: [],
     }
   }
 
-  const result = SyncStateSchema.safeParse(parsed)
-  if (!result.success) {
-    return {
-      state: emptyState(scope),
-      warnings: [`Invalid sync state at ${path}; treating as empty`],
-    }
-  }
-
-  return { state: result.data, warnings: [] }
+  // 3. Neither file exists → empty state.
+  return { state: emptyState(scope), warnings: [], notices: [] }
 }
 
 /**
- * Write the sync state atomically. No root-level `updatedAt` is emitted — the
- * per-agent `updatedAt` is updated only when that agent's `names`/`path`
- * actually changes, so identical states produce byte-identical files.
+ * Write the sync state (`.agents/mcp-lock.json`) atomically. No root-level
+ * `updatedAt` is emitted — the per-agent `updatedAt` is updated only when
+ * that agent's `names`/`path` actually changes, so identical states produce
+ * byte-identical files. Never touches `.gitignore` and never writes or
+ * deletes the legacy state file.
  */
 export function writeState(
   scope: ConfigScope,
@@ -19604,11 +19812,6 @@ export function writeState(
   state: SyncState,
 ): void {
   const path = getStatePath(scope, ctx)
-  // Lazily protect the project-scope sync state file inside the managed
-  // .gitignore block before writing it.
-  if (scope === 'project') {
-    ensureIgnored(ctx.cwd, [`${AGENTS_DIR}/${STATE_FILE}`])
-  }
   writeFileAtomic(path, JSON.stringify(state, null, 2) + '\n')
 }
 
@@ -19677,435 +19880,1469 @@ export function pruneAgentNames(
 }
 ````
 
-## File: src/index.ts
+## File: src/core/store.ts
 ````typescript
-/**
- * CLI entrypoint (§11).
- *
- * Creates the `RuntimeContext` once, selects the `PromptUi` (Clack on TTY,
- * Auto on `--yes`/`CI`), and runs the `citty` app with global flags and the
- * subcommands registered below. T8/T9 add subcommands (init, import, sync,
- * remove, list, add, doctor) additively to the `subCommands` record.
- */
+import { z } from 'zod'
+import type { ParseError } from 'jsonc-parser'
+import { parse, printParseErrorCode } from 'jsonc-parser'
+import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
+import type { RuntimeContext, ConfigScope } from '$/src/core/context'
+import { AGENTS_DIR, CONFIG_FILE, DEFAULT_SCHEMA_URL } from '$/src/config'
+import { CanonicalMcpConfigSchema, validateConfig } from '$/src/core/schema'
 
-import { defineCommand, runCommand, showUsage } from 'citty'
-import { realpathSync } from 'node:fs'
-import pkg from '$/package.json' with { type: 'json' }
-import { createRuntimeContext, type RuntimeContext } from '$/src/core/context'
-import { createClackUi, type PromptUi } from '$/src/ui/prompts'
-import { createAutoUi } from '$/src/ui/auto'
-import { syncCommand } from '$/src/commands/sync.command'
-import { initCommand } from '$/src/commands/init.command'
-import { removeCommand } from '$/src/commands/remove.command'
-import { listCommand } from '$/src/commands/list.command'
-import { importCommand } from '$/src/commands/import.command'
-import { addCommand } from '$/src/commands/add.command'
-import { doctorCommand } from '$/src/commands/doctor.command'
+export class ConfigValidationError extends Error {
+  readonly path: string
+  readonly issues: Array<{ path: string; message: string }>
 
-/** Global flags available on every command (§11). */
-const globalFlags = {
-  global: {
-    type: 'boolean',
-    alias: 'g',
-    description:
-      'Operate on the global agent configuration (~/.agents/mcp.json)',
-  },
-  yes: {
-    type: 'boolean',
-    alias: 'y',
-    description: 'Run non-interactively, accepting recommended defaults',
-  },
-  agents: {
-    type: 'string',
-    description: 'Comma-separated target agents to sync (e.g. cursor,vscode)',
-  },
-  'dry-run': {
-    type: 'boolean',
-    description: 'Simulate operations without writing to disk or state',
-  },
-} as const
-
-const app = defineCommand({
-  meta: {
-    name: pkg.name,
-    version: pkg.version,
-    description: pkg.description,
-  },
-  args: globalFlags,
-  subCommands: {
-    sync: syncCommand,
-    init: initCommand,
-    remove: removeCommand,
-    list: listCommand,
-    import: importCommand,
-    add: addCommand,
-    doctor: doctorCommand,
-  },
-})
-
-const SUBCOMMANDS = [
-  'sync',
-  'init',
-  'remove',
-  'list',
-  'import',
-  'add',
-  'doctor',
-]
-
-/**
- * Normaliza flags globais com valor separado por espaço para a forma
- * `--flag=<valor>`.
- *
- * O `citty` não repassa `args` globais para os subcomandos: sem isso,
- * `--agents antigravity` vira `agents: true` + posicional `antigravity`,
- * quebrando `sync`/`init`/`add`. A forma com `=` é parseada como string por
- * qualquer subcomando (mesmo os que não declaram `agents`).
- *
- * Tokens após `--` são preservados literalmente.
- */
-export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
-  const normalized: string[] = []
-  let literal = false
-
-  for (let i = 0; i < rawArgs.length; i++) {
-    const token = rawArgs[i]
-    if (token === undefined) continue
-
-    if (token === '--') {
-      literal = true
-      normalized.push(token)
-      continue
-    }
-
-    if (!literal && token === '--agents') {
-      const next = rawArgs[i + 1]
-      if (next !== undefined && !next.startsWith('-')) {
-        normalized.push(`--agents=${next}`)
-        i++
-        continue
-      }
-    }
-
-    normalized.push(token)
-  }
-
-  return normalized
-}
-
-/**
- * CLI entry point. Runs the citty app with `process.argv`.
- * Only executes when this module is run directly (not when imported by tests).
- */
-export async function main(): Promise<void> {
-  const rawArgs = normalizeGlobalArgs(process.argv.slice(2))
-
-  // Handle --version / -v at root level → exit 0.
-  if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
-    console.log(pkg.version)
-    return
-  }
-
-  // Handle --help / -h at root level (no subcommand specified) → exit 0.
-  const hasSubcommand = rawArgs.some((a) => SUBCOMMANDS.includes(a))
-  if (
-    !hasSubcommand &&
-    (rawArgs.includes('--help') || rawArgs.includes('-h'))
+  constructor(
+    message: string,
+    path: string,
+    issues: Array<{ path: string; message: string }> = [],
   ) {
-    await showUsage(app)
-    return
-  }
-
-  // Handle --help / -h with a subcommand → show subcommand help → exit 0.
-  const subcmd = rawArgs.find((a) => SUBCOMMANDS.includes(a))
-  if (subcmd && (rawArgs.includes('--help') || rawArgs.includes('-h'))) {
-    const subCommandDef = (app.subCommands as Record<string, unknown>)[subcmd]
-    if (subCommandDef) {
-      await showUsage(subCommandDef, app)
-      return
-    }
-  }
-
-  try {
-    await runCommand(app, { rawArgs })
-  } catch (err) {
-    // Never swallow errors silently: surface them on stderr before exiting.
-    const message = err instanceof Error ? err.message : String(err)
-    console.error(message)
-    // citty throws CLIError (E_UNKNOWN_COMMAND / E_INVALID_ARG / E_NO_COMMAND)
-    // for usage problems → exit 2. Runtime errors from commands → exit 1.
-    if ((err as Error)?.name === 'CLIError') {
-      process.exit(2)
-    } else {
-      process.exit(1)
-    }
+    super(message)
+    this.name = 'ConfigValidationError'
+    this.path = path
+    this.issues = issues
   }
 }
 
-/**
- * True when this file is executed directly (e.g. `node dist/index.js`), not
- * when imported as a module by tests. Uses argv[1] basename instead of
- * import.meta.url comparison, which breaks with symlinks (e.g. `npx`).
- */
-/**
- * True when this file is executed directly (e.g. `node dist/index.js`), not
- * when imported as a module by tests. Resolves symlinks via `realpathSync`
- * so invoking `agents-mcp` through an installed bin symlink executes
- * `main()` instead of exiting silently. Guarded against `VITEST` and
- * invalid/unreadable paths.
- */
-if (process.argv[1] && !process.env.VITEST) {
-  try {
-    const resolved = realpathSync(process.argv[1])
-    if (resolved.endsWith('index.js')) {
-      void main()
-    }
-  } catch {
-    // Unreadable/missing argv[1] (e.g. under some test runners): fall back
-    // to the literal basename check.
-    if (process.argv[1].endsWith('index.js')) {
-      void main()
-    }
-  }
+export function getConfigPath(scope: ConfigScope, ctx: RuntimeContext): string {
+  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+  return `${base}/${AGENTS_DIR}/${CONFIG_FILE}`
 }
 
-/**
- * Build the `RuntimeContext` and `PromptUi` for the current process. Called
- * once by each command (`src/commands/*.ts`). The UI choice (TTY vs
- * `--yes`/`CI`) is consistent across all commands.
- */
-export function createUi({ yes = false }: { yes?: boolean } = {}): {
+export interface ReadConfigResult {
+  config: Record<string, unknown>
+  raw: string
+}
+
+export function readConfig(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): ReadConfigResult | null {
+  const path = getConfigPath(scope, ctx)
+  const raw = readTextFile(path)
+  if (raw === null) {
+    return null
+  }
+
+  // jsonc-parser tolerates comments and trailing commas even in `.json` files.
+  // Collect parse errors so corrupt/truncated input is surfaced with a clear
+  // error instead of silently discarding the tail of the document.
+  const errors: ParseError[] = []
+  const config = parse(raw, errors, {
+    allowTrailingComma: true,
+    allowEmptyContent: true,
+  }) as unknown as Record<string, unknown>
+
+  if (errors.length > 0) {
+    const first = errors[0]!
+    const code = printParseErrorCode(first.error)
+    throw new ConfigValidationError(
+      `Invalid JSONC at ${path} (offset ${first.offset}): ${code}`,
+      path,
+      [
+        {
+          path: '',
+          message: `JSONC parse error at offset ${first.offset}: ${code}`,
+        },
+      ],
+    )
+  }
+
+  if (config === undefined) {
+    return { config: {}, raw }
+  }
+
+  return { config, raw }
+}
+
+export interface WriteConfigOptions {
+  scope: ConfigScope
   ctx: RuntimeContext
-  ui: PromptUi
-} {
-  const ctx = createRuntimeContext()
-  const isAuto = !ctx.isTTY || ctx.env.CI === 'true' || yes
-  const ui: PromptUi = isAuto
-    ? createAutoUi({ defaults: {}, log: undefined })
-    : createClackUi()
-  return { ctx, ui }
+  config: Record<string, unknown>
+}
+
+/**
+ * Write the canonical config atomically, serializing only `$schema` and
+ * `servers` (minimal, defaults not materialized). A user who omits `args`
+ * keeps omitting it, so `sync` stays idempotent and produces minimal diffs.
+ */
+export function writeConfig({ scope, ctx, config }: WriteConfigOptions): void {
+  const path = getConfigPath(scope, ctx)
+  const serialized = serializeMinimal(config)
+  // Never persist an invalid canonical document: validate before writing.
+  CanonicalMcpConfigSchema.parse(JSON.parse(serialized))
+  writeFileAtomic(path, serialized)
+}
+
+function serializeMinimal(config: Record<string, unknown>): string {
+  const mcpServers = config['mcpServers'] ?? {}
+  const document: Record<string, unknown> = {
+    $schema: DEFAULT_SCHEMA_URL,
+    mcpServers,
+  }
+  return JSON.stringify(document, null, 2) + '\n'
+}
+
+export interface LoadValidatedConfigResult {
+  config: ReturnType<typeof CanonicalMcpConfigSchema.parse>
+  warnings: string[]
+}
+
+export function loadValidatedConfig(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): LoadValidatedConfigResult | null {
+  const result = readConfig(scope, ctx)
+  if (result === null) {
+    return null
+  }
+
+  let config: ReturnType<typeof CanonicalMcpConfigSchema.parse>
+  try {
+    config = CanonicalMcpConfigSchema.parse(result.config)
+  } catch (err) {
+    const zodErr = err as z.ZodError
+    const issues = zodErr.issues.map((issue) => ({
+      path: issue.path.join('.'),
+      message: issue.message,
+    }))
+    const firstPath = issues[0]?.path ?? ''
+    throw new ConfigValidationError(
+      `Invalid canonical config at ${getConfigPath(
+        scope,
+        ctx,
+      )}: ${firstPath ? `${firstPath} — ` : ''}${zodErr.issues[0]?.message ?? ''}`,
+      getConfigPath(scope, ctx),
+      issues,
+    )
+  }
+
+  const { warnings } = validateConfig(result.config)
+  return { config, warnings }
 }
 ````
 
-## File: tests/core/schema.test.ts
+## File: tests/cli/entrypoint.test.ts
 ````typescript
-import { describe, expect, it } from 'vitest'
-import {
-  CanonicalMcpConfigSchema,
-  validateConfig,
-  AgentIdSchema,
-  isStdioServer,
-  isHttpServer,
-} from '$/src/core/schema'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import { describe, expect, it, vi, afterEach, afterAll } from 'vitest'
+import { runCommand } from 'citty'
+import { main, normalizeGlobalArgs } from '$/src/index'
+import { ConfigValidationError } from '$/src/core/store'
+import pkg from '$/package.json' with { type: 'json' }
 
-describe('canonical schema', () => {
-  it('rejects an unsupported type value (Zod)', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'websocket', url: 'https://example.com' },
-      },
-    })
-    expect(result.success).toBe(false)
+vi.mock('citty', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    runCommand: vi.fn(actual.runCommand as (...args: unknown[]) => unknown),
+    showUsage: vi.fn(actual.showUsage as (...args: unknown[]) => unknown),
+  }
+})
+
+describe('normalizeGlobalArgs', () => {
+  it('converte --agents <lista> em --agents=<lista>', () => {
+    expect(
+      normalizeGlobalArgs(['sync', '--agents', 'antigravity,cursor']),
+    ).toEqual(['sync', '--agents=antigravity,cursor'])
   })
 
-  it('rejects a missing type value (Zod)', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { url: 'https://example.com' },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('rejects a missing $schema (required)', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx' },
-      },
-    })
-    expect(result.success).toBe(false)
-    expect(result.error?.issues.some((i) => i.path.includes('$schema'))).toBe(
-      true,
-    )
-  })
-
-  it('rejects disabled field on server', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', disabled: true },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('rejects targets field on server', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', targets: ['claude-code'] },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('rejects PLUGIN_ROOT as an env key', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', env: { PLUGIN_ROOT: '/x' } },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('rejects PLUGIN_DATA as an env key', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', env: { PLUGIN_DATA: '/x' } },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('rejects cwd outside allowed plugin paths', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', cwd: '/absolute/path' },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('accepts cwd with ./ prefix', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', cwd: './subdir' },
-      },
-    })
-    expect(result.success).toBe(true)
-  })
-
-  it('accepts cwd with ${PLUGIN_ROOT}/ prefix', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_ROOT}/subdir' },
-      },
-    })
-    expect(result.success).toBe(true)
-  })
-
-  it('accepts cwd with ${PLUGIN_DATA}/ prefix', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/subdir' },
-      },
-    })
-    expect(result.success).toBe(true)
-  })
-
-  it('rejects $schema with a different URI', () => {
-    const result = CanonicalMcpConfigSchema.safeParse({
-      $schema: 'https://example.com/other.json',
-      mcpServers: {
-        github: { type: 'stdio', command: 'npx' },
-      },
-    })
-    expect(result.success).toBe(false)
-  })
-
-  it('AgentIdSchema enumerates the seven agents', () => {
-    expect(AgentIdSchema.options).toEqual([
-      'claude-code',
-      'cursor',
-      'vscode',
-      'opencode',
-      'windsurf',
-      'zed',
-      'antigravity',
+  it('preserva --agents=<lista>', () => {
+    expect(normalizeGlobalArgs(['sync', '--agents=antigravity'])).toEqual([
+      'sync',
+      '--agents=antigravity',
     ])
   })
 
-  it('parses a valid canonical config', () => {
-    const config = CanonicalMcpConfigSchema.parse({
-      $schema: DEFAULT_SCHEMA_URL,
+  it('não converte --agents sem valor', () => {
+    expect(normalizeGlobalArgs(['sync', '--agents'])).toEqual([
+      'sync',
+      '--agents',
+    ])
+  })
+
+  it('não converte --agents após o separador --', () => {
+    expect(
+      normalizeGlobalArgs(['sync', '--', '--agents', 'antigravity']),
+    ).toEqual(['sync', '--', '--agents', 'antigravity'])
+  })
+
+  it('move --agents <lista> de antes do subcomando para depois dele', () => {
+    expect(
+      normalizeGlobalArgs(['--agents', 'opencode,antigravity', 'sync']),
+    ).toEqual(['sync', '--agents=opencode,antigravity'])
+  })
+
+  it('move --agents=<lista> de antes do subcomando para depois dele', () => {
+    expect(normalizeGlobalArgs(['--agents=opencode', 'sync'])).toEqual([
+      'sync',
+      '--agents=opencode',
+    ])
+  })
+
+  it('canonicaliza flags globais curtas de antes do subcomando', () => {
+    expect(normalizeGlobalArgs(['-g', '--dry-run', 'sync'])).toEqual([
+      'sync',
+      '--global',
+      '--dry-run',
+    ])
+    expect(normalizeGlobalArgs(['-y', 'sync'])).toEqual(['sync', '--yes'])
+  })
+
+  it('não reposiciona nada quando o separador -- vem antes do subcomando', () => {
+    expect(normalizeGlobalArgs(['--agents', 'opencode', '--', 'sync'])).toEqual(
+      ['--agents=opencode', '--', 'sync'],
+    )
+  })
+
+  it('canonicaliza -g/-y depois do subcomando e preserva tokens após --', () => {
+    expect(normalizeGlobalArgs(['sync', '-g', '-y'])).toEqual([
+      'sync',
+      '--global',
+      '--yes',
+    ])
+    expect(normalizeGlobalArgs(['sync', '--', '-g', '-y'])).toEqual([
+      'sync',
+      '--',
+      '-g',
+      '-y',
+    ])
+  })
+
+  it('não canonicaliza -y usado como valor de uma flag de valor', () => {
+    expect(
+      normalizeGlobalArgs([
+        'add',
+        'x',
+        '--command',
+        'npx',
+        '--arg',
+        '-y',
+        '--arg',
+        'pkg',
+        '-g',
+      ]),
+    ).toEqual([
+      'add',
+      'x',
+      '--command',
+      'npx',
+      '--arg',
+      '-y',
+      '--arg',
+      'pkg',
+      '--global',
+    ])
+  })
+})
+
+describe('CLI entrypoint', () => {
+  const exitSpy = vi
+    .spyOn(process, 'exit')
+    .mockImplementation((() => {}) as NodeJS.Process['exit'])
+  const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+  afterEach(() => {
+    exitSpy.mockClear()
+    logSpy.mockClear()
+    errorSpy.mockClear()
+  })
+
+  afterAll(() => {
+    exitSpy.mockRestore()
+    logSpy.mockRestore()
+    errorSpy.mockRestore()
+  })
+
+  it('--version prints version and does not exit', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', '--version']
+    try {
+      await expect(main()).resolves.toBeUndefined()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('-v prints version and does not exit', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', '-v']
+    try {
+      await expect(main()).resolves.toBeUndefined()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('--help prints usage and does not exit', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', '--help']
+    try {
+      await expect(main()).resolves.toBeUndefined()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('-h prints usage and does not exit', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', '-h']
+    try {
+      await expect(main()).resolves.toBeUndefined()
+      expect(exitSpy).not.toHaveBeenCalled()
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('unknown command calls process.exit with 2', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', 'nonexistent-command']
+    try {
+      // Mock process.exit to prevent vitest from detecting it
+      const origExit = process.exit
+      let exitCode: number | undefined
+      process.exit = ((code: number) => {
+        exitCode = code
+      }) as unknown as NodeJS.Process['exit']
+      try {
+        await main()
+        expect(exitCode).toBe(2)
+      } finally {
+        process.exit = origExit
+      }
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('subcommand --help is not intercepted at root level', async () => {
+    const origArgv = process.argv
+    process.argv = ['node', 'index.js', 'sync', '--help']
+    try {
+      await expect(main()).resolves.toBeUndefined()
+    } finally {
+      process.argv = origArgv
+    }
+  })
+
+  it('executa main() quando argv[1] é um symlink para index.js (bin instalado)', async () => {
+    const { symlink, unlink } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    const { tmpdir } = await import('node:os')
+
+    const symlinkPath = join(tmpdir(), `agents-mcp-test-${Date.now()}`)
+    const target = join(process.cwd(), 'dist/index.js')
+
+    try {
+      await symlink(target, symlinkPath)
+    } catch {
+      // symlink pode já existir de uma execução anterior
+    }
+
+    const origArgv = process.argv
+    const origVitest = process.env.VITEST
+    const origExit = process.exit
+    const origLog = console.log
+    let exitCode: number | undefined
+    let logged: string[] = []
+    process.exit = ((code: number) => {
+      exitCode = code
+    }) as unknown as NodeJS.Process['exit']
+    console.log = ((msg: unknown) => {
+      logged.push(String(msg))
+    }) as unknown as typeof console.log
+
+    delete process.env.VITEST
+    process.argv = ['node', symlinkPath, '--version']
+
+    try {
+      await main()
+      expect(exitCode).toBeUndefined()
+      expect(logged.some((m) => m.includes(pkg.version))).toBe(true)
+    } finally {
+      process.env.VITEST = origVitest
+      process.argv = origArgv
+      process.exit = origExit
+      console.log = origLog
+      try {
+        await unlink(symlinkPath)
+      } catch {
+        // ignore
+      }
+    }
+  })
+
+  it('sync com argumento posicional imprime erro e sai com código 2 sem tocar o disco', async () => {
+    const origArgv = process.argv
+    const origExit = process.exit
+    const origError = console.error
+    let exitCode: number | undefined
+    const errors: string[] = []
+    process.exit = ((code: number) => {
+      exitCode = code
+    }) as unknown as NodeJS.Process['exit']
+    console.error = ((msg: unknown) => {
+      errors.push(String(msg))
+    }) as unknown as typeof console.error
+
+    process.argv = ['node', 'index.js', 'sync', 'opencode,antigravity']
+
+    try {
+      await main()
+      expect(exitCode).toBe(2)
+      expect(
+        errors.some((m) =>
+          m.includes('Unexpected positional argument(s) for `sync`'),
+        ),
+      ).toBe(true)
+    } finally {
+      process.argv = origArgv
+      process.exit = origExit
+      console.error = origError
+    }
+  })
+
+  it('imprime erro no stderr antes de sair com código 1 em erro de runtime (ConfigValidationError)', async () => {
+    const origArgv = process.argv
+    const origExit = process.exit
+    const origError = console.error
+    let exitCode: number | undefined
+    let errors: string[] = []
+    process.exit = ((code: number) => {
+      exitCode = code
+    }) as unknown as NodeJS.Process['exit']
+    console.error = ((msg: unknown) => {
+      errors.push(String(msg))
+    }) as unknown as typeof console.error
+
+    process.argv = ['node', 'index.js', 'add', 'x', '--command=npx']
+    vi.mocked(runCommand).mockRejectedValueOnce(
+      new ConfigValidationError(
+        'Invalid canonical config at /home/user/.agents/mcp.json: mcpServers — required',
+        '/home/user/.agents/mcp.json',
+      ),
+    )
+
+    try {
+      await main()
+      expect(exitCode).toBe(1)
+      expect(errors.some((m) => m.includes('Invalid canonical config'))).toBe(
+        true,
+      )
+    } finally {
+      process.argv = origArgv
+      process.exit = origExit
+      console.error = origError
+    }
+  })
+})
+````
+
+## File: tests/commands/plugins-sync.test.ts
+````typescript
+import { describe, expect, it, vi, afterAll } from 'vitest'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { runSync } from '$/src/commands/sync'
+import { main } from '$/src/index'
+import { createUiAndCtx, persistCanonicalConfig } from '$/src/commands/util'
+import { loadState, writeState, emptyState } from '$/src/core/state'
+import { getAdapter } from '$/src/adapters/index'
+import type { PromptUi } from '$/src/ui/prompts'
+import { createSandbox } from '$/tests/helpers/sandbox'
+
+vi.mock('$/src/commands/util', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return { ...actual, createUiAndCtx: vi.fn() }
+})
+
+const exitSpy = vi
+  .spyOn(process, 'exit')
+  .mockImplementation((() => {}) as NodeJS.Process['exit'])
+
+afterAll(() => {
+  exitSpy.mockRestore()
+})
+
+function setupUi(ctx: ReturnType<typeof createSandbox>['ctx']) {
+  const ui = {
+    error: vi.fn(),
+    warn: vi.fn(),
+    note: vi.fn(),
+  }
+  vi.mocked(createUiAndCtx).mockImplementation(() => ({
+    ctx,
+    ui: ui as unknown as PromptUi,
+  }))
+  return ui
+}
+
+function seedCanonicalAndCollision(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+) {
+  persistCanonicalConfig('project', ctx, {
+    $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+    mcpServers: {
+      taken: { type: 'stdio', command: 'npx', args: [] },
+    },
+  })
+
+  const pluginDir = join(ctx.cwd, '.agents/plugins/taken')
+  mkdirSync(pluginDir, { recursive: true })
+  const sentinelPath = join(pluginDir, 'sentinel.txt')
+  writeFileSync(sentinelPath, 'KEEP')
+  return { sentinelPath, pluginDir }
+}
+
+describe('commands sync (B3/T5: authoritative plugin adoption)', () => {
+  it('fresh clone: pre-existing plugin dir (sentinel) is adopted, sem lock, sem erro de plugin', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      const { sentinelPath, pluginDir } = seedCanonicalAndCollision(ctx)
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      // Nenhum erro de plugin: o nome e declarado no canônico, entao e adotado.
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
+      // Os arquivos gerenciados sao sobrescritos (adocao autoritativa).
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8')).mcpServers
+          .taken,
+      ).toBeDefined()
+      // O lock e criado no disco e registra o plugin como gerenciado.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('com antigravity direcionado, o mesmo diretorio pre-existente tambem recebe mcp_config.json sobrescrito', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      const { sentinelPath, pluginDir } = seedCanonicalAndCollision(ctx)
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor', 'antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      // mcp_config.json so e gravado quando antigravity esta entre os alvos.
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp_config.json'), 'utf8'))
+          .mcpServers.taken,
+      ).toBeDefined()
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('diretorio de plugin pre-existente cujo nome NAO e declarado no canônico nao e modificado, nao deletado e nao gera erro', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      // Apenas um servidor declarado no canônico.
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          web: { type: 'streamable-http', url: 'https://example.com/mcp' },
+        },
+      })
+      // Diretorio pre-existente com um nome que NAO esta no canônico.
+      const pluginDir = join(ctx.cwd, '.agents/plugins/undeclared')
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinelPath = join(pluginDir, 'sentinel.txt')
+      writeFileSync(sentinelPath, 'UNTOUCHED')
+      writeFileSync(join(pluginDir, 'plugin.json'), '{"name":"undeclared"}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('UNTOUCHED')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('undeclared')
+      expect(existsSync(pluginDir)).toBe(true)
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).not.toContain('undeclared')
+      expect(state.managedPlugins).toContain('web')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dry-run planeja as gravacoes de plugin mas nao escreve nenhum arquivo, lock ou .gitignore', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          web: { type: 'streamable-http', url: 'https://example.com/mcp' },
+        },
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: true,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      // Nenhum arquivo de plugin gravado no disco.
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web'))).toBe(false)
+      // Nenhum lock persistido.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(false)
+      // Nenhum .gitignore criado/tocado.
+      expect(existsSync(join(ctx.cwd, '.gitignore'))).toBe(false)
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('aceita --agents <lista> separado por espaço no sync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    const localExit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+    const originalCwd = process.cwd()
+    const originalArgv = process.argv
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          remote: {
+            type: 'streamable-http',
+            url: 'https://example.com/mcp',
+          },
+        },
+      })
+      process.chdir(ctx.cwd)
+      process.argv = ['node', 'index.js', 'sync', '--agents', 'antigravity']
+
+      await main()
+
+      expect(localExit).not.toHaveBeenCalled()
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/remote/mcp_config.json')),
+      ).toBe(true)
+    } finally {
+      process.chdir(originalCwd)
+      process.argv = originalArgv
+      localExit.mockRestore()
+      cleanup()
+    }
+  })
+})
+
+describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
+  function seedCanonical(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    persistCanonicalConfig('project', ctx, {
+      $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
       mcpServers: {
-        github: {
-          type: 'stdio',
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-github'],
-        },
-        linear: {
-          type: 'streamable-http',
-          url: 'https://mcp.linear.app/mcp',
-        },
-        'linear-sse': {
-          type: 'sse',
-          url: 'https://mcp.linear.app/sse',
-        },
+        web: { type: 'streamable-http', url: 'https://example.com/mcp' },
       },
     })
-    expect(isStdioServer(config.mcpServers.github!)).toBe(true)
-    if (isStdioServer(config.mcpServers.github!)) {
-      expect(config.mcpServers.github!.command).toBe('npx')
-    }
-    expect(isHttpServer(config.mcpServers.linear!)).toBe(true)
-    if (isHttpServer(config.mcpServers.linear!)) {
-      expect(config.mcpServers.linear!.type).toBe('streamable-http')
-    }
-    expect(isHttpServer(config.mcpServers['linear-sse']!)).toBe(true)
-    if (isHttpServer(config.mcpServers['linear-sse']!)) {
-      expect(config.mcpServers['linear-sse']!.type).toBe('sse')
+  }
+
+  it('allowEmptyTargets: zero targets nao sai com 1, gera plugin e emite nota de orientacao', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonical(ctx)
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        yes: true,
+        allowEmptyTargets: true,
+      })
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(summary.targets).toEqual([])
+      expect(summary.errors).toEqual([])
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('No target agents'))).toBe(true)
+      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
+      expect(notes.some((n) => n.includes('agents-mcp sync --agents'))).toBe(
+        true,
+      )
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(false)
+    } finally {
+      cleanup()
     }
   })
 
-  it('applies args default without materializing on write', () => {
-    const parsed = CanonicalMcpConfigSchema.parse({
-      $schema: DEFAULT_SCHEMA_URL,
+  it('skipAgentSync nao toca arquivos de agente nem state.targets/state.agents', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonical(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['cursor'],
+        managedPlugins: [],
+      })
+      const cursorPath = getAdapter('cursor').getConfigPath('project', ctx)
+      if (!cursorPath) {
+        throw new Error(
+          'cursor adapter nao tem caminho de configuracao no escopo do projeto',
+        )
+      }
+      const cursorDir = dirname(cursorPath)
+      mkdirSync(cursorDir, { recursive: true })
+      writeFileSync(cursorPath, '{"mcpServers":{}}')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+        skipAgentSync: true,
+      })
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(summary.targets).toEqual([])
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(cursorPath, 'utf8')).toBe('{"mcpServers":{}}')
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['cursor'])
+      expect(state.agents).toEqual({})
+      expect(state.managedPlugins).toEqual(['web'])
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
+      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('skipAgentSync com flag antigravity cria mcp_config.json e preserva targets', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonical(ctx)
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['antigravity'],
+        dryRun: false,
+        yes: true,
+        skipAgentSync: true,
+      })
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(summary.targets).toEqual([])
+      expect(summary.errors).toEqual([])
+
+      const pluginDir = join(ctx.cwd, '.agents/plugins/web')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual([])
+      expect(state.managedPlugins).toEqual(['web'])
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('skipAgentSync com antigravity em state.targets (sem flag) cria mcp_config.json', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      seedCanonical(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['antigravity'],
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        yes: true,
+        skipAgentSync: true,
+      })
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(summary.errors).toEqual([])
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['antigravity'])
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('--no-sync'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('allowEmptyTargets com nome declarado no canônico: diretorio pre-existente e adotado (sem erro de colisao), sentinel preservado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          taken: { type: 'stdio', command: 'npx', args: [] },
+        },
+      })
+      const pluginDir = join(ctx.cwd, '.agents/plugins/taken')
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinelPath = join(pluginDir, 'sentinel.txt')
+      writeFileSync(sentinelPath, 'KEEP')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+        allowEmptyTargets: true,
+      })
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      // Nome declarado: adotado autoritativamente, sem erro de colisao.
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8')).mcpServers
+          .taken,
+      ).toBeDefined()
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', () => {
+  const SCHEMA_URL = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+
+  function seedPluginFiles(
+    ctx: ReturnType<typeof createSandbox>['ctx'],
+    name: string,
+    extra: Record<string, string> = {},
+  ): string {
+    const pluginDir = join(ctx.cwd, '.agents/plugins', name)
+    mkdirSync(pluginDir, { recursive: true })
+    for (const file of ['plugin.json', 'mcp.json', 'mcp_config.json']) {
+      writeFileSync(join(pluginDir, file), '{}')
+    }
+    for (const [file, content] of Object.entries(extra)) {
+      writeFileSync(join(pluginDir, file), content)
+    }
+    return pluginDir
+  }
+
+  function seedManagedState(
+    ctx: ReturnType<typeof createSandbox>['ctx'],
+    managedPlugins: string[],
+  ) {
+    writeState('project', ctx, {
+      ...emptyState('project'),
+      managedPlugins,
+    })
+  }
+
+  function canonicalEmpty(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    persistCanonicalConfig('project', ctx, {
+      $schema: SCHEMA_URL,
+      mcpServers: {},
+    })
+  }
+
+  function canonicalWithWeb(ctx: ReturnType<typeof createSandbox>['ctx']) {
+    persistCanonicalConfig('project', ctx, {
+      $schema: SCHEMA_URL,
       mcpServers: {
-        github: { type: 'stdio', command: 'npx' },
+        web: { type: 'streamable-http', url: 'https://example.com/mcp' },
       },
     })
-    const github = parsed.mcpServers.github!
-    expect(isStdioServer(github)).toBe(true)
-    if (isStdioServer(github)) {
-      expect(github.args).toEqual([])
+  }
+
+  it('remove plugin obsoleto quando servidor sai do canônico (managedPlugins esvazia)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(pluginDir)).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual([])
+    } finally {
+      cleanup()
     }
   })
 
-  it('rejects unknown top-level keys (z.strictObject)', () => {
-    expect(() =>
-      CanonicalMcpConfigSchema.parse({
-        $schema: DEFAULT_SCHEMA_URL,
-        mcpServers: {},
-        bogus: true,
-      }),
-    ).toThrow()
+  it('preserva arquivo manual e diretorio de plugin obsoleto nao vazio', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha', {
+        'sentinel.txt': 'KEEP-ME',
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'sentinel.txt'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual([])
+    } finally {
+      cleanup()
+    }
   })
 
-  it('validateConfig warns on $schema mismatch but does not fail', () => {
-    const { warnings } = validateConfig({
-      $schema: 'https://example.com/other.json',
-      mcpServers: {},
-    })
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toContain(DEFAULT_SCHEMA_URL)
+  it('preserva mcp_config.json e state.agents.antigravity ao desselecionar antigravity (ADR-0013)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['antigravity'],
+        managedPlugins: ['web'],
+        agents: {
+          antigravity: {
+            path: join(ctx.cwd, '.agents/plugins'),
+            names: ['web'],
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      })
+      const pluginDir = seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      // Nao-destrutivo: mcp_config.json permanece mesmo sem antigravity nos alvos.
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+      // `--agents` e aditivo: cursor e anexado preservando a ordem existente.
+      expect(state.targets).toEqual(['antigravity', 'cursor'])
+      expect(state.agents.antigravity).toEqual({
+        path: join(ctx.cwd, '.agents/plugins'),
+        names: ['web'],
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+    } finally {
+      cleanup()
+    }
   })
 
-  it('validateConfig does not warn when $schema matches', () => {
-    const { warnings } = validateConfig({
-      $schema: DEFAULT_SCHEMA_URL,
-      mcpServers: {},
-    })
-    expect(warnings).toEqual([])
+  it('sync --agents antigravity e aditivo a state.targets existente', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['opencode'],
+        managedPlugins: [],
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['opencode', 'antigravity'])
+      expect(state.agents.antigravity?.names).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync sem argumentos sincroniza todos os state.targets (opencode + antigravity)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      writeState('project', ctx, {
+        ...emptyState('project'),
+        targets: ['opencode', 'antigravity'],
+        managedPlugins: [],
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(summary.targets).toEqual(['opencode', 'antigravity'])
+      expect(existsSync(join(ctx.cwd, 'opencode.json'))).toBe(true)
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.targets).toEqual(['opencode', 'antigravity'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('mantem mcp_config.json quando antigravity esta no alvo', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(
+        existsSync(join(ctx.cwd, '.agents/plugins/web/mcp_config.json')),
+      ).toBe(true)
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/plugin.json'))).toBe(
+        true,
+      )
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web/mcp.json'))).toBe(
+        true,
+      )
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dryRun nao remove nada no disco e nao persiste estado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = seedPluginFiles(ctx, 'alpha')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: true,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['alpha'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync repetido e idempotente: estado igual e segundo run sem erros', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      seedPluginFiles(ctx, 'web')
+
+      const summary1 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary1.errors).toEqual([])
+      const stateAfterFirst = loadState('project', ctx).state
+
+      const summary2 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary2.errors).toEqual([])
+      const stateAfterSecond = loadState('project', ctx).state
+
+      expect(stateAfterSecond).toEqual(stateAfterFirst)
+      expect(stateAfterSecond.managedPlugins).toEqual(['web'])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('skipAgentSync nao poda mcp_config.json preexistente de plugin gerenciado', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalWithWeb(ctx)
+      seedManagedState(ctx, ['web'])
+      const pluginDir = seedPluginFiles(ctx, 'web')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+        skipAgentSync: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toEqual(['web'])
+      expect(state.targets).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('erro de limpeza de plugin obsoleto: erro reportado, nome mantido em managedPlugins e retry no proximo sync', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
+      mkdirSync(join(pluginDir, 'plugin.json'))
+
+      // Primeiro run: falha na limpeza, erro reportado e nome preservado.
+      const summary1 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary1.errors).toHaveLength(1)
+      expect(summary1.errors[0]).toContain('Failed to remove plugin `alpha`')
+      expect(ui.error).toHaveBeenCalledWith(
+        expect.stringContaining('Partial sync completed with failures'),
+      )
+
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+
+      // Nome preservado para ser reprocessado no proximo sync.
+      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
+
+      // Segundo run: nome ainda gerenciado, o mesmo erro se repete (retry).
+      const summary2 = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+      expect(summary2.errors).toHaveLength(1)
+      expect(summary2.errors[0]).toContain('Failed to remove plugin `alpha`')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('erro de limpeza de plugin obsoleto faz o comando sync sair com codigo 1', async () => {
+    const { ctx, cleanup } = createSandbox()
+    setupUi(ctx)
+    const localExit = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => {}) as NodeJS.Process['exit'])
+    const originalCwd = process.cwd()
+    const originalArgv = process.argv
+    try {
+      canonicalEmpty(ctx)
+      seedManagedState(ctx, ['alpha'])
+      const pluginDir = join(ctx.cwd, '.agents/plugins/alpha')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+      writeFileSync(join(pluginDir, 'mcp_config.json'), '{}')
+      // plugin.json como diretorio provoca EISDIR ao tentar unlinkSync.
+      mkdirSync(join(pluginDir, 'plugin.json'))
+
+      process.chdir(ctx.cwd)
+      process.argv = ['node', 'index.js', 'sync', '--agents', 'cursor']
+
+      await main()
+
+      expect(localExit).toHaveBeenCalledWith(1)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'mcp_config.json'))).toBe(false)
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(pluginDir)).toBe(true)
+      expect(loadState('project', ctx).state.managedPlugins).toEqual(['alpha'])
+    } finally {
+      process.chdir(originalCwd)
+      process.argv = originalArgv
+      localExit.mockRestore()
+      cleanup()
+    }
+  })
+})
+
+describe('commands sync (B6/T2: fresh-clone native-config overwrite preservando manual)', () => {
+  const SCHEMA_URL = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+
+  it('claude-code: sem lock, sobrescride entradas canonicas e preserva top-level nao gerenciado + entrada manual', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: SCHEMA_URL,
+        mcpServers: {
+          web: { type: 'stdio', command: 'npx', args: ['run', 'web'] },
+        },
+      })
+
+      // Native arquivo ja existe (fresh clone: lock ausente) com uma
+      // configuracao top-level nao relacionada e uma entrada manual nao declarada.
+      const nativePath = join(ctx.cwd, '.mcp.json')
+      writeFileSync(
+        nativePath,
+        JSON.stringify(
+          {
+            unrelated: 'preserve-me',
+            mcpServers: {
+              'manual-server': { type: 'stdio', command: 'manual-cmd' },
+            },
+          },
+          null,
+          2,
+        ),
+      )
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+
+      const content = JSON.parse(readFileSync(nativePath, 'utf8'))
+      // Top-level nao gerenciado e preservado.
+      expect(content.unrelated).toBe('preserve-me')
+      // Entrada manual (nao declarada no canônico, nao gerenciada) e preservada.
+      expect(content.mcpServers['manual-server']).toMatchObject({
+        type: 'stdio',
+        command: 'manual-cmd',
+      })
+      // Entrada canonica sobrescrita.
+      expect(content.mcpServers.web).toMatchObject({
+        type: 'stdio',
+        command: 'npx',
+        args: ['run', 'web'],
+      })
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('web')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('vscode: sem lock, sobrescride entradas canonicas e preserva comentarios fora da raiz gerenciada + inputs + entrada manual', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: SCHEMA_URL,
+        mcpServers: {
+          web: { type: 'stdio', command: 'npx', args: ['run', 'web'] },
+        },
+      })
+
+      // Native JSONC ja existe (fresh clone: lock ausente) com comentario
+      // FORA da chave gerenciada, inputs e entrada manual nao declarada.
+      const nativeDir = join(ctx.cwd, '.vscode')
+      mkdirSync(nativeDir, { recursive: true })
+      const nativePath = join(nativeDir, 'mcp.json')
+      writeFileSync(
+        nativePath,
+        `// Configuracao do VS Code (fora de servers - comentario preservado)\n{\n  "inputs": [\n    { "id": "token", "type": "promptString", "label": "Token" }\n  ],\n  // Comentario dentro de servers pode ser normalizado\n  "servers": {\n    "manual-server": { "type": "stdio", "command": "manual-cmd" }\n  }\n}\n`,
+      )
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['vscode'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+
+      const content = readFileSync(nativePath, 'utf8')
+      // Comentario e inputs FORA da raiz gerenciada sobrevivem.
+      expect(content).toContain('Configuracao do VS Code')
+      expect(content).toContain('"inputs"')
+      expect(content).toContain('"token"')
+      // Entrada manual preservada (nao declarada no canônico).
+      expect(content).toContain('"manual-server"')
+      // Entrada canonica sobrescrita.
+      expect(content).toContain('"web"')
+      expect(content).toContain('"command": "npx"')
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('web')
+    } finally {
+      cleanup()
+    }
   })
 })
 ````
@@ -20117,6 +21354,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import {
   loadState,
   writeState,
+  getStatePath,
+  getLegacyStatePath,
   seedAgentNames,
   pruneAgentNames,
   emptyState,
@@ -20125,12 +21364,41 @@ import {
 import { createSandbox } from '$/tests/helpers/sandbox'
 
 describe('state', () => {
+  it('getStatePath returns the new lock path for project and global scope', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(getStatePath('project', ctx)).toBe(
+        `${ctx.cwd}/.agents/mcp-lock.json`,
+      )
+      expect(getStatePath('global', ctx)).toBe(
+        `${ctx.homeDir}/.agents/mcp-lock.json`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('getLegacyStatePath returns the legacy path for project and global scope', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(getLegacyStatePath('project', ctx)).toBe(
+        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
+      )
+      expect(getLegacyStatePath('global', ctx)).toBe(
+        `${ctx.homeDir}/.agents/.mcp-sync-state.json`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
   it('loadState returns empty state for missing file, no warning', () => {
     const { ctx, cleanup } = createSandbox()
     try {
       const result = loadState('project', ctx)
       expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -20143,6 +21411,7 @@ describe('state', () => {
       expect(result.state).toEqual(emptyState('global'))
       expect(result.state.scope).toBe('global')
       expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -20189,15 +21458,9 @@ describe('state', () => {
         managedPlugins: [],
       }
       writeState('project', ctx, state)
-      const first = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
-        'utf8',
-      )
+      const first = readFileSync(`${ctx.cwd}/.agents/mcp-lock.json`, 'utf8')
       writeState('project', ctx, state)
-      const second = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
-        'utf8',
-      )
+      const second = readFileSync(`${ctx.cwd}/.agents/mcp-lock.json`, 'utf8')
       expect(second).toBe(first)
     } finally {
       cleanup()
@@ -20206,7 +21469,7 @@ describe('state', () => {
 
   it('loadState treats corrupt file as empty with warning', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(path, '{ not valid json', 'utf8')
@@ -20215,6 +21478,8 @@ describe('state', () => {
       expect(result.state).toEqual(emptyState('project'))
       expect(result.warnings.length).toBeGreaterThan(0)
       expect(result.warnings[0]).toContain('Corrupt')
+      expect(result.warnings[0]).toContain(path)
+      expect(result.notices).toEqual([])
     } finally {
       cleanup()
     }
@@ -20222,7 +21487,7 @@ describe('state', () => {
 
   it('loadState treats unknown version as empty with warning', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -20247,7 +21512,7 @@ describe('state', () => {
 
   it('loadState rejects invalid agent id in targets', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -20271,7 +21536,7 @@ describe('state', () => {
 
   it('loadState treats missing agents key as empty state', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -20295,7 +21560,7 @@ describe('state', () => {
 
   it('loadState rejects unknown agent key in agents as corrupt state', () => {
     const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    const path = `${ctx.cwd}/.agents/mcp-lock.json`
     try {
       mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
       writeFileSync(
@@ -20394,7 +21659,152 @@ describe('state', () => {
     expect(pruned).toEqual(state)
   })
 
-  it("writeState('project') ensures state file is ignored in <cwd>/.gitignore", () => {
+  /* --- Legacy migration / precedence --- */
+
+  it('loads a legacy-only file with a single notice naming both paths', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {
+            'claude-code': {
+              path: `${ctx.cwd}/.mcp.json`,
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state.targets).toEqual(['claude-code'])
+      expect(result.state.agents['claude-code']!.names).toEqual(['github'])
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toHaveLength(1)
+      expect(result.notices[0]).toContain(legacyPath)
+      expect(result.notices[0]).toContain(lockPath)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('when both files exist the new lock wins and the legacy is ignored silently', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(
+        lockPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['opencode'],
+          agents: {},
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {
+            'claude-code': {
+              path: `${ctx.cwd}/.mcp.json`,
+              names: ['github'],
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          },
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state.targets).toEqual(['opencode'])
+      expect(result.state.agents).toEqual({})
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a corrupt new lock does NOT fall back to a valid legacy file', () => {
+    const { ctx, cleanup } = createSandbox()
+    const lockPath = `${ctx.cwd}/.agents/mcp-lock.json`
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(lockPath, '{ not valid json', 'utf8')
+      writeFileSync(
+        legacyPath,
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: ['claude-code'],
+          agents: {},
+          managedPlugins: [],
+        }),
+        'utf8',
+      )
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toHaveLength(1)
+      expect(result.warnings[0]).toContain(lockPath)
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a corrupt legacy file warns and yields empty state with no notices', () => {
+    const { ctx, cleanup } = createSandbox()
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      writeFileSync(legacyPath, '{ not valid json', 'utf8')
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toHaveLength(1)
+      expect(result.warnings[0]).toContain(legacyPath)
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('missing both files yields empty state with no warnings and no notices', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+
+      const result = loadState('project', ctx)
+      expect(result.state).toEqual(emptyState('project'))
+      expect(result.warnings).toEqual([])
+      expect(result.notices).toEqual([])
+    } finally {
+      cleanup()
+    }
+  })
+
+  /* --- .gitignore policy (writeState never touches .gitignore) --- */
+
+  it("writeState('project') writes only mcp-lock.json and never creates .gitignore", () => {
     const { ctx, cleanup } = createSandbox()
     try {
       const state: SyncState = {
@@ -20406,20 +21816,40 @@ describe('state', () => {
       }
       writeState('project', ctx, state)
 
-      const gitignore = readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')
-      expect(gitignore).toContain('# agents-mcp local (managed)')
-      expect(gitignore).toContain('.agents/.mcp-sync-state.json')
-      expect(gitignore).toContain('# end agents-mcp local (managed)')
+      expect(existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(true)
+      expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
+      expect(existsSync(`${ctx.cwd}/.agents/.mcp-sync-state.json`)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
 
-      const header = '# agents-mcp local (managed)'
-      const footer = '# end agents-mcp local (managed)'
-      const headerIdx = gitignore.indexOf(header)
-      const footerIdx = gitignore.indexOf(footer)
-      expect(headerIdx).toBeGreaterThanOrEqual(0)
-      expect(footerIdx).toBeGreaterThan(headerIdx)
-      expect(gitignore.slice(headerIdx, footerIdx)).toContain(
-        '.agents/.mcp-sync-state.json',
-      )
+  it("writeState('project') leaves a pre-existing legacy file untouched", () => {
+    const { ctx, cleanup } = createSandbox()
+    const legacyPath = `${ctx.cwd}/.agents/.mcp-sync-state.json`
+    try {
+      mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+      const legacyContent = JSON.stringify({
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      })
+      writeFileSync(legacyPath, legacyContent, 'utf8')
+
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['opencode'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('project', ctx, state)
+
+      expect(readFileSync(legacyPath, 'utf8')).toBe(legacyContent)
+      expect(existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(true)
+      expect(existsSync(`${ctx.cwd}/.gitignore`)).toBe(false)
     } finally {
       cleanup()
     }
@@ -20438,7 +21868,7 @@ describe('state', () => {
       writeState('global', ctx, state)
 
       expect(
-        readFileSync(`${ctx.homeDir}/.agents/.mcp-sync-state.json`, 'utf8'),
+        readFileSync(`${ctx.homeDir}/.agents/mcp-lock.json`, 'utf8'),
       ).toContain('"scope": "global"')
 
       // global scope must not create or modify <cwd>/.gitignore
@@ -20447,310 +21877,377 @@ describe('state', () => {
       cleanup()
     }
   })
+
+  it('writeState leaves a pre-existing <cwd>/.gitignore byte-identical', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      mkdirSync(ctx.cwd, { recursive: true })
+      const original = '# existing\n.env\n# custom\n'
+      writeFileSync(`${ctx.cwd}/.gitignore`, original, 'utf8')
+
+      const state: SyncState = {
+        version: 1,
+        scope: 'project',
+        targets: ['claude-code'],
+        agents: {},
+        managedPlugins: [],
+      }
+      writeState('project', ctx, state)
+
+      expect(readFileSync(`${ctx.cwd}/.gitignore`, 'utf8')).toBe(original)
+    } finally {
+      cleanup()
+    }
+  })
 })
 ````
 
-## File: .gitignore
+## File: tests/core/store.test.ts
+````typescript
+import { describe, expect, it } from 'vitest'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  getConfigPath,
+  readConfig,
+  writeConfig,
+  loadValidatedConfig,
+  ConfigValidationError,
+} from '$/src/core/store'
+import { DEFAULT_SCHEMA_URL } from '$/src/config'
+import { createSandbox } from '$/tests/helpers/sandbox'
+
+function writeRaw(
+  ctx: ReturnType<typeof createSandbox>['ctx'],
+  raw: string,
+): void {
+  mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
+  writeFileSync(`${ctx.cwd}/.agents/mcp.json`, raw, 'utf8')
+}
+
+describe('store', () => {
+  it('getConfigPath returns project and global paths', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(getConfigPath('project', ctx)).toBe(`${ctx.cwd}/.agents/mcp.json`)
+      expect(getConfigPath('global', ctx)).toBe(
+        `${ctx.homeDir}/.agents/mcp.json`,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig returns null for missing file', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(readConfig('project', ctx)).toBeNull()
+      expect(readConfig('global', ctx)).toBeNull()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig parses JSONC with comments and trailing commas', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/mcp.json`
+    const raw = `{\n  // comment\n  "mcpServers": {\n    "github": {\n      "type": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
+    try {
+      writeRaw(ctx, raw)
+
+      const result = readConfig('project', ctx)
+      expect(result).not.toBeNull()
+      expect(result!.raw).toBe(raw)
+      const mcpServers = (result!.config as Record<string, unknown>)
+        .mcpServers as Record<string, unknown>
+      expect((mcpServers.github as Record<string, unknown>).type).toBe('stdio')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig raises ConfigValidationError on truncated JSONC', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(ctx, '{ not valid json')
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(ctx, '{"$schema":"x","mcpServers":{}} >>> GARBAGE')
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('readConfig leaves file byte-identical after a failed load', () => {
+    const { ctx, cleanup } = createSandbox()
+    const path = `${ctx.cwd}/.agents/mcp.json`
+    const raw = '{ not valid json\n'
+    try {
+      writeRaw(ctx, raw)
+      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
+      expect(readFileSync(path, 'utf8')).toBe(raw)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfig writes atomically and round-trips', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeConfig({
+        scope: 'project',
+        ctx,
+        config: {
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            github: {
+              type: 'stdio',
+              command: 'npx',
+              args: ['-y', '@modelcontextprotocol/server-github'],
+            },
+          },
+        },
+      })
+
+      const result = readConfig('project', ctx)
+      expect(result).not.toBeNull()
+      const mcpServers = (result!.config as Record<string, unknown>)
+        .mcpServers as Record<string, unknown>
+      expect((mcpServers.github as Record<string, unknown>).command).toBe('npx')
+      expect(result!.config.$schema).toBe(DEFAULT_SCHEMA_URL)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfig does not materialize defaults (minimal serialization)', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeConfig({
+        scope: 'project',
+        ctx,
+        config: {
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
+          },
+        },
+      })
+
+      const result = readConfig('project', ctx)
+      const raw = result!.raw
+      // `args` has a default but should not be materialized on write.
+      expect(raw).not.toContain('"args"')
+      expect(raw).not.toContain('"env"')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfig defaults mcpServers to {} when undefined and never writes invalid document', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeConfig({
+        scope: 'project',
+        ctx,
+        config: {
+          $schema: DEFAULT_SCHEMA_URL,
+        },
+      })
+
+      const result = readConfig('project', ctx)
+      expect(result).not.toBeNull()
+      expect(result!.config.mcpServers).toEqual({})
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('writeConfig rejects invalid mcpServers before writing', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(() =>
+        writeConfig({
+          scope: 'project',
+          ctx,
+          config: {
+            $schema: DEFAULT_SCHEMA_URL,
+            mcpServers: { broken: { type: 'unknown' } },
+          },
+        }),
+      ).toThrow()
+      // Não deve ter gravado nada de inválido.
+      expect(readConfig('project', ctx)).toBeNull()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadValidatedConfig returns null for missing file', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      expect(loadValidatedConfig('project', ctx)).toBeNull()
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadValidatedConfig validates and returns warnings', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(
+        ctx,
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
+          },
+        }),
+      )
+
+      const result = loadValidatedConfig('project', ctx)
+      expect(result).not.toBeNull()
+      const mcpServers = (result!.config.mcpServers as Record<string, unknown>)
+        .github as Record<string, unknown>
+      expect(mcpServers.command).toBe('npx')
+      expect(result!.warnings.length).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('loadValidatedConfig throws ConfigValidationError on wrong $schema', () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeRaw(
+        ctx,
+        JSON.stringify({
+          $schema: 'https://example.com/other.json',
+          mcpServers: {
+            github: { type: 'stdio', command: 'npx' },
+          },
+        }),
+      )
+
+      try {
+        loadValidatedConfig('project', ctx)
+        throw new Error('should have thrown')
+      } catch (err) {
+        expect(err).toBeInstanceOf(ConfigValidationError)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+})
 ````
-# Dependencies
-node_modules/
 
-# Build output (published from dist/, never committed)
-dist/
+## File: tests/packaging/packaging.test.ts
+````typescript
+import { describe, expect, it, beforeAll } from 'vitest'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { execFileSync } from 'node:child_process'
 
-# Test artifacts
-coverage/
+const root = process.cwd()
+const distDir = resolve(root, 'dist')
 
-# Logs
-*.log
-npm-debug.log*
+// Ensure dist/ is populated by running dist:package before tests
+execFileSync('npm', ['run', 'dist:package'], {
+  cwd: root,
+  stdio: 'pipe',
+})
 
-# Local environment and secrets
-.env
-.env.*
-!.env.example
+describe('packaging', () => {
+  it('dist/package.json has exactly one bin, no dependencies/scripts, engines.node >= 22', () => {
+    const distPkg = JSON.parse(
+      readFileSync(resolve(distDir, 'package.json'), 'utf8'),
+    )
 
-# agents-mcp local sync state (when running the CLI on this repository)
-.agents/.mcp-sync-state.json
+    // Exactly one binary
+    expect(Object.keys(distPkg.bin)).toEqual(['agents-mcp'])
+    expect(distPkg.bin['agents-mcp']).toBe('./index.js')
 
-# Package artifacts
-*.tgz
+    // No dependencies, scripts, devDependencies
+    expect(distPkg.dependencies).toBeUndefined()
+    expect(distPkg.devDependencies).toBeUndefined()
+    expect(distPkg.scripts).toBeUndefined()
 
-# Local workflow artifacts (never published or tracked)
-workflow/
+    // main/exports point to ./index.js
+    expect(distPkg.main).toBe('./index.js')
+    expect(distPkg.exports['.']).toBe('./index.js')
+
+    // engines.node >= 22
+    expect(distPkg.engines.node).toBe('>=22')
+
+    // Explicit files
+    expect(distPkg.files).toEqual(['index.js'])
+  })
+
+  it('dist/ contains expected files and index.js starts with shebang', () => {
+    const actualFiles = readdirSync(distDir).sort()
+    expect(actualFiles).toEqual(
+      [
+        'CHANGELOG.md',
+        'LICENSE',
+        'README.md',
+        'index.js',
+        'package.json',
+      ].sort(),
+    )
+
+    const indexJs = readFileSync(resolve(distDir, 'index.js'), 'utf8')
+    expect(indexJs.startsWith('#!/usr/bin/env node')).toBe(true)
+  })
+
+  it('dist:package script runs without errors', () => {
+    expect(() => {
+      execFileSync('npm', ['run', 'dist:package'], {
+        cwd: root,
+        stdio: 'pipe',
+      })
+    }).not.toThrow()
+  })
+})
 ````
 
-## File: .agents/skills/architect-worker/SKILL.md
+## File: docs/decisions/README.md
 ````markdown
----
-name: architect-worker
-description: >-
-  Role-based multi-agent software engineering pattern separating high-level
-  architecture, specification, planning, and code review (Architect) from
-  focused code implementation and verification (Worker). Use this skill whenever
-  assigned the Architect or Worker role (in any language), or when coordinating
-  work between planning/review agents and implementation agents via `workflow/`.
----
-
-# Architect & Worker Pattern
-
-Separate software engineering responsibilities into two complementary agent roles synchronized through the `workflow/` directory (`spec-driven-workflow`), optionally preceded and validated by the **Product Owner** role (`product-owner`):
-
-- **Product Owner** *(optional, via `product-owner`)* — Owns product intent, priority, and value validation through `workflow/BACKLOG.md` (the only root file in `workflow/`) and `workflow/<change-slug>/VALIDATION.md`.
-- **Architect** — Owns specifications, high-level architecture, execution planning, task sharding, code review, quality control, and delivery handoff inside `workflow/<change-slug>/`.
-- **Worker** — Owns code implementation, testing, and remediation for a given `workflow/<change-slug>/`, strictly following the Architect's specifications and all project documentation and skills.
-
-> **Parallelism**: Because each initiative lives in its own `workflow/<change-slug>/` subdirectory, the Architect can specify and plan new items in `workflow/<other-slug>/` while a Worker implements an already-ready plan in `workflow/<change-slug>/`, and multiple Workers can execute non-conflicting plans concurrently.
-
-## Role Activation
-
-1. **Explicit Role Assignment**: Adopt the role specified by the user (e.g., *"Act as the Architect"* or *"Act as the Worker"*, including equivalent role names in the user's language).
-2. **Role Persistence**: Maintain the assigned role for the entire session unless the user explicitly instructs a role switch.
-3. **Missing Role Clarification**: If this skill is invoked without a clear role assignment, ask the user whether to proceed as **Architect** or **Worker** before taking action.
-
----
-
-## Role 1: The Architect
-
-The Architect governs **what** is built, **how** it is structured, and **whether** the result meets quality standards.
-
-### Responsibilities
-
-1. **Specification (`workflow/<change-slug>/SPEC.md`)**
-   - Read `workflow/BACKLOG.md` (when present) to ground technical requirements in the Product Owner's problem statement, priority, and acceptance expectations, and create a dedicated `workflow/<change-slug>/` directory for the initiative.
-   - Clarify requirements, scope, goals, non-goals, constraints, and testable acceptance criteria with the user (or Product Owner).
-2. **Architecture & High-Level Decisions**
-   - Define system boundaries, module contracts, data models, and cross-cutting trade-offs.
-   - Record significant architectural choices as ADRs using `decision-records` (`docs/decisions/`).
-3. **Planning & Task Breakdown (`workflow/<change-slug>/PLAN.md` & `TASKS.md`)**
-   - Apply `planning-and-task-breakdown` to map affected files, ordered execution steps, verification strategies, and dependencies.
-   - Shard large or parallelizable plans into `workflow/<change-slug>/TASKS.md` with disjoint scopes so one or more Worker agents can execute safely.
-4. **Code Review & Quality Control (`workflow/<change-slug>/REVIEW.md`)**
-   - Apply `code-review` to inspect the Worker's implementation against `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, and engineering standards.
-   - Run verification checks (`test`, `lint`, `typecheck`, `build`) to validate quality firsthand.
-   - Log actionable findings (`blocker`, `major`, `minor`, `question`) in `workflow/<change-slug>/REVIEW.md` and set the review status (`Changes Requested` or `Approved`).
-   - Once `REVIEW.md` is `Approved`, if `workflow/BACKLOG.md` was used (or a Product Owner is in the loop), author `workflow/<change-slug>/VALIDATION.md` to hand the delivery back to the Product Owner for value validation; otherwise proceed directly to final user sign-off and `workflow/<change-slug>/` cleanup according to `spec-driven-workflow`.
-
-### Architect Guardrails
-
-- **Never write or modify production/application code or test suites.** Leave all implementation edits to the Worker.
-- **Only create or edit governance artifacts**: `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, `workflow/<change-slug>/TASKS.md`, `workflow/<change-slug>/REVIEW.md`, `workflow/<change-slug>/VALIDATION.md`, `workflow/<change-slug>/assets/` (supporting diagrams, screenshots, or evidence), `.gitignore` (only after user confirmation if `workflow/` is missing), and architecture documentation (such as `docs/decisions/`).
-- **Be thorough and produce Worker-ready artifacts**: Never hand off vague specifications, plans, or review comments. Every requirement in `SPEC.md`, step in `PLAN.md`, task in `TASKS.md`, and finding in `REVIEW.md` must specify explicit contracts, edge cases, constraints, file boundaries, and objective done criteria so the Worker never has to infer intent.
-
----
-
-## Role 2: The Worker
-
-The Worker turns the Architect's specifications and plans into clean, well-tested, production-ready code.
-
-### Responsibilities
-
-1. **Load Context Before Coding**
-   - Read `workflow/<change-slug>/SPEC.md`, `workflow/<change-slug>/PLAN.md`, `workflow/<change-slug>/TASKS.md` (if present), and `workflow/<change-slug>/REVIEW.md` (if addressing review feedback), along with any linked evidence in `workflow/<change-slug>/assets/`.
-   - Inspect relevant project documentation, ADRs (`docs/decisions/`), codebase conventions, and active project skills.
-   - If assigned a specific task ID (e.g., `T2` in `workflow/<change-slug>/TASKS.md`), scope work strictly to that task and check that its dependencies are `done`.
-2. **Execute & Verify Incrementally**
-   - Follow `incremental-implementation` to build in small, verifiable slices.
-   - Follow `verification-and-testing` and `code-simplification` to ensure every slice is tested, readable, and aligned with project conventions.
-   - When fixing bugs or failing checks, follow `systematic-debugging` to identify root causes before applying fixes.
-3. **Address Review Feedback**
-   - When `workflow/<change-slug>/REVIEW.md` has open items (`blocker`, `major`, `minor`, or `question`), resolve each item in code/tests strictly as directed and update its status in `workflow/<change-slug>/REVIEW.md` (or provide answers to questions). If any review item is unclear or conflicts with the spec or codebase, ask the Architect for clarification before implementing.
-4. **Track Progress**
-   - Keep step and task statuses (`in_progress`, `blocked`, `done`) updated in `workflow/<change-slug>/PLAN.md` and `workflow/<change-slug>/TASKS.md`.
-
-### Worker Guardrails
-
-- **No unrequested work or scope drift**: Keep local, low-level implementation decisions (e.g., internal helpers, naming, test structure) within the assigned boundaries, **but never** make unrequested refactors, "improvements", or changes outside what is explicitly specified in `workflow/<change-slug>/SPEC.md`, `PLAN.md`, `TASKS.md`, and `REVIEW.md`. Do not alter requirements in `SPEC.md` or redesign the architecture in `PLAN.md`.
-- **Ask when anything is unclear — never guess**: If `SPEC.md`, `PLAN.md`, `TASKS.md`, or `REVIEW.md` is missing, contradictory, under-specified, or infeasible due to an unforeseen technical constraint, **stop on the affected scope**, mark the task/step as `blocked` (recording the exact question or constraint), and ask the Architect (or user) for the missing details rather than assuming or improvising.
-- **Follow review directives strictly**: Address every open item in `workflow/<change-slug>/REVIEW.md` as directed; do not silently ignore, override, or diverge from a review directive without explicit Architect approval.
-- **Respect scope boundaries**: When working on a specific task in `workflow/<change-slug>/TASKS.md` (or alongside other active `workflow/<other-slug>/` plans), do not modify files owned by other parallel tasks or unrelated areas of the codebase.
-- **Never commit `workflow/`**: Ensure `workflow/` remains untracked by Git per `spec-driven-workflow`.
-
----
-
-## Handoff Lifecycle
-
-The Architect and Worker (and optionally the Product Owner via `product-owner`) coordinate asynchronously or sequentially through `workflow/`:
-
-```text
-[Product Owner] 0. Discover & Frame  -> (Optional) Writes workflow/BACKLOG.md
-       │
-       ▼
-[Architect]     1. Specify & Plan    -> Reads BACKLOG.md (if any), writes workflow/<change-slug>/SPEC.md, PLAN.md (+ TASKS.md)
-       │
-       ▼
-[Worker]        2. Implement & Verify-> Executes workflow/<change-slug>/PLAN.md / TASKS.md, runs tests, marks done
-       │
-       ▼
-[Architect]     3. Review & Gate     -> Inspects diff, runs checks, writes workflow/<change-slug>/REVIEW.md
-       │
-       ├── If Changes Requested ──────► [Worker] resolves open items in REVIEW.md
-       │
-       ▼
-[Architect]     4. Delivery Handoff  -> (If PO in loop) Writes workflow/<change-slug>/VALIDATION.md for PO
-       │
-       ├── If PO Requests Changes ────► [Architect] refines SPEC.md/PLAN.md for Worker
-       │
-       ▼
-[PO / Architect]5. Sign-Off & Cleanup-> Confirms with user/PO, deletes workflow/<change-slug>/, updates BACKLOG.md
-```
-````
-
-## File: .agents/skills/spec-driven-workflow/SKILL.md
-````markdown
----
-name: spec-driven-workflow
-description: >-
-  Default software engineering workflow using a `workflow/` directory where
-  `workflow/BACKLOG.md` is the only root file and every change lives in its own
-  scoped subdirectory `workflow/<change-slug>/` (`SPEC.md`, `PLAN.md`,
-  `TASKS.md`, `REVIEW.md`, and conditional `VALIDATION.md`). Use this skill as
-  the standard process whenever starting a feature, bug fix, refactoring,
-  architecture change, or code review—to capture product intent, specify
-  requirements, plan execution, coordinate parallel work, track review
-  findings, and validate delivery.
----
-
-# Spec-Driven Workflow
-
-Adopt this workflow as the **standard software engineering process** for any non-trivial change. Do not jump straight into writing code; follow the gated lifecycle below using the `workflow/` directory to separate **why/value** (`BACKLOG.md`), **what** needs to change (`SPEC.md`), **how** it will be built (`PLAN.md`), **who** executes independent pieces (`TASKS.md`), **what** needs attention after implementation (`REVIEW.md`), and **whether** the delivered value meets product expectations (`VALIDATION.md`).
-
-## Standard Operating Flow
-
-Follow these phases in order:
-
-0. **Discover & Frame (`BACKLOG.md`, conditional)** — Capture product intent, user value, priority, or a prioritized mini-backlog of evolutions/bugs (typically owned by the `product-owner` role) before technical specification.
-1. **Specify (`SPEC.md`)** — Define the problem, scope, constraints, and acceptance criteria (consuming `BACKLOG.md` when present) before designing or coding.
-2. **Plan (`PLAN.md`)** — Map the technical approach, affected files, ordered steps, and verification strategy.
-3. **Shard (`TASKS.md`, conditional)** — Break the plan into trackable tasks only when complexity, multi-scope work, or parallel execution warrants it.
-4. **Implement** — Execute against `PLAN.md` (or `TASKS.md`), keeping artifact statuses current as work progresses.
-5. **Review (`REVIEW.md`)** — Record code review findings (human or agent) and resolve blockers/major issues before completion.
-6. **Validate (`VALIDATION.md`, conditional)** — Hand the approved delivery back to the Product Owner (or stakeholder) with plain-language summary and validation scenarios to confirm product value before cleanup.
-
-> **Trivial changes exception**: Skip `workflow/` artifacts only for trivial, self-contained edits (e.g., typo fixes, single-line formatting, or minor comment updates) where specification and planning add no value.
-
-## Directory Layout
-
-Keep **`workflow/BACKLOG.md` as the only file at the `workflow/` root**. Always place all implementation-related artifacts (`SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, `VALIDATION.md`, and change-specific assets) inside a dedicated subdirectory `workflow/<change-slug>/` named with a concise kebab-case slug identifying the feature, bug fix, refactor, or backlog item (e.g., `workflow/b1-checkout-fix/`, `workflow/user-authentication/`):
-
-```text
-workflow/
-├── BACKLOG.md                # Optional: Only file at workflow/ root (Product Owner backlog & Ready briefs)
-├── assets/                   # Optional: Backlog-level screenshots, mockups, or supporting evidence
-└── <change-slug>/            # Required per non-trivial change (e.g., b1-checkout-fix, user-auth)
-    ├── assets/               # Optional: Change-specific screenshots, diagrams, logs, and evidence
-    ├── SPEC.md               # Required for any non-trivial change
-    ├── PLAN.md               # Required before implementation starts
-    ├── TASKS.md              # Optional: only for large plans or parallel/async agent work
-    ├── REVIEW.md             # Created during human or agent code review
-    └── VALIDATION.md         # Optional: Architect-to-PO delivery handoff and value sign-off
-```
-
-- **Why `<change-slug>/` is mandatory**: Isolating every initiative in its own `workflow/<change-slug>/` directory allows multiple agents to work in parallel on different plans (as long as their code scopes do not conflict), and allows an Architect to specify and plan upcoming items in `workflow/<slug-b>/` while a Worker implements an already-approved plan in `workflow/<slug-a>/`.
-- **Never place `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md` directly in `workflow/` root.**
-
-If `workflow/`, `workflow/<change-slug>/`, or any required artifact does not exist yet, **create the directory and initialize the missing files automatically** using the templates in `./resources/`.
-
-### Supporting Assets & Evidence
-
-Any agent or contributor in **any phase** (`BACKLOG.md`, `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md`) may attach screenshots (e.g., annotated UI bug captures), diagrams, logs, or other supporting files to enrich context for downstream or peer agents:
-
-- **Storage location**:
-  - Store backlog-level evidence referenced by `workflow/BACKLOG.md` in `workflow/assets/`.
-  - Store change-specific evidence referenced by `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, or `VALIDATION.md` in `workflow/<change-slug>/assets/`.
-  - Never scatter temporary evidence files in the repository root, source directories, or tracked `docs/` folders.
-- **Naming**: Use clear, descriptive filenames (preferably kebab-case, prefixed with the related item/finding ID when applicable, such as `b1-checkout-bug-annotated.png` or `r2-mobile-overflow.png`).
-- **Linking**: Reference attached files from any Markdown document using relative links or image embeds (e.g., `![Annotated checkout bug](./assets/b1-checkout-bug-annotated.png)` or `[Failure log](./assets/test-failure.log)`).
-
-### Version Control
-
-The `workflow/` directory—including `workflow/assets/` and all subdirectories—contains local process-management and guidance artifacts and **must never be tracked by Git**:
-
-- Check whether `workflow/` is listed in the repository's `.gitignore`; if it is missing, ask the user for confirmation before adding it.
-- Never stage or commit `workflow/` or any files inside it. If `workflow/` is somehow already tracked, warn the user before untrack/cleanup operations.
-
-## Artifact Lifecycle
-
-### 0. `workflow/BACKLOG.md` — Capture Product Intent & Backlog (Conditional)
-
-Create or update `BACKLOG.md` when a Product Owner (or stakeholder) wants to frame a new feature, improvement, or bug fix—or maintain a prioritized mini-backlog of software evolutions—before engineering specification begins.
-
-- **Purpose**: Separate product discovery, priority, and user value (*why* and *who*) from technical design (`SPEC.md`).
-- **Template**: Start from [BACKLOG.md](./resources/BACKLOG.md).
-- **Rules**:
-  - Maintain an ordered **Product Backlog** table for candidate evolutions, features, and bug reports (`Idea`, `Refining`, `Ready`, `In Downstream`, `Done`).
-  - Complete the **Active Demand Brief** and **Definition of Ready (DoR)** before handing an item off to `SPEC.md`.
-  - Keep `BACKLOG.md` free of technical implementation details (file paths, schemas, or code).
-
-### 1. `workflow/<change-slug>/SPEC.md` — Define the Change
-
-Create `workflow/<change-slug>/SPEC.md` first for any new feature, bug fix, or architectural change.
-
-- **Purpose**: Align on scope, behavior, constraints, and acceptance criteria before writing code.
-- **Template**: Start from [SPEC.md](./resources/SPEC.md).
-- **Rules**:
-  - State both **Goals** and **Non-Goals** to prevent scope creep.
-  - Write testable **Acceptance Criteria** so completion is objective.
-  - For bug fixes, document reproduction steps, expected vs. actual behavior, and root cause (once known).
-
-### 2. `workflow/<change-slug>/PLAN.md` — Map Execution Steps
-
-Create `workflow/<change-slug>/PLAN.md` once `SPEC.md` is clear.
-
-- **Purpose**: Translate the specification into concrete, ordered engineering steps.
-- **Template**: Start from [PLAN.md](./resources/PLAN.md).
-- **Rules**:
-  - Reference `SPEC.md` requirements; do not duplicate the full spec.
-  - List affected files/modules, ordered implementation steps, and a concrete verification strategy (tests, linters, manual checks).
-  - Highlight risks, migrations, or rollback considerations if applicable.
-
-### 3. `workflow/<change-slug>/TASKS.md` — Shard Large or Parallel Work (Conditional)
-
-Create `workflow/<change-slug>/TASKS.md` **only** when at least one of these conditions holds:
-
-1. The `PLAN.md` is too large or comprehensive to execute cleanly in a single pass.
-2. The `PLAN.md` spans two or more distinct project scopes (e.g., frontend, backend, infra, or multiple packages), task types (`feature`, `bugfix`, `refactor`, `docs`), or independent deliverables that benefit from separate tracking.
-3. Work can be split into independent units executed **in parallel or asynchronously** by different agents or contributors.
-
-- **Template**: Start from [TASKS.md](./resources/TASKS.md).
-- **Rules**:
-  - Skip `TASKS.md` for small, linear changes where `PLAN.md` is sufficient.
-  - Every task must specify an ID, status (`pending`, `in_progress`, `blocked`, `done`), dependencies, owned files/scope (to avoid merge conflicts between parallel agents), and clear done criteria.
-  - Keep task statuses updated as work progresses.
-
-### 4. `workflow/<change-slug>/REVIEW.md` — Record Code Review Findings
-
-Create or update `workflow/<change-slug>/REVIEW.md` when a human or reviewing agent inspects the implemented changes.
-
-- **Purpose**: Centralize actionable review observations that require attention before merging.
-- **Template**: Start from [REVIEW.md](./resources/REVIEW.md).
-- **Rules**:
-  - Categorize every observation by severity (`blocker`, `major`, `minor`, `question`).
-  - Point to exact file paths, line ranges, or symbols, and explain *why* the issue matters.
-  - Track resolution status (`open`, `resolved`, `wontfix`) so nothing is lost across review rounds.
-
-### 5. `workflow/<change-slug>/VALIDATION.md` — Product Delivery Validation (Conditional)
-
-Create `workflow/<change-slug>/VALIDATION.md` after `REVIEW.md` is approved whenever `workflow/BACKLOG.md` was used or a Product Owner / stakeholder needs a structured handoff to validate the delivered value.
-
-- **Purpose**: Translate the completed engineering delivery back into plain-language product outcomes, validation steps, and formal acceptance sign-off.
-- **Template**: Start from [VALIDATION.md](./resources/VALIDATION.md).
-- **Rules**:
-  - Prepared by the Architect (or lead engineer) with a **Delivery Summary**, **Backlog Value Mapping**, and observable **How to Validate** scenarios.
-  - Reviewed and signed off by the Product Owner (`Approved` or `Changes Requested`) before closing the cycle.
-
-## Verification & Cleanup
-
-Before considering a change (`workflow/<change-slug>/`) complete:
-
-1. Every acceptance criterion in `workflow/<change-slug>/SPEC.md` is satisfied and verified by tests or explicit checks.
-2. All steps in `workflow/<change-slug>/PLAN.md` (and `workflow/<change-slug>/TASKS.md`, if used) are completed or explicitly deferred.
-3. All `blocker` and `major` items in `workflow/<change-slug>/REVIEW.md` are marked `resolved` (or `wontfix` with rationale).
-4. If `workflow/<change-slug>/VALIDATION.md` is used, the Product Owner has marked it `Approved` (and updated the corresponding item status in `workflow/BACKLOG.md` to `Done`).
-5. **Ask the user for final sign-off and cleanup**: Once the plan, tasks (if any), review, and validation (if used) are complete, explicitly ask the user if everything is ready and whether the completed `workflow/<change-slug>/` artifacts can be cleaned up.
-   - **Never delete** the root `workflow/` directory or `workflow/BACKLOG.md`.
-   - When the user confirms cleanup for a completed change, **delete the completed `workflow/<change-slug>/` subdirectory** (along with its `SPEC.md`, `PLAN.md`, `TASKS.md`, `REVIEW.md`, `VALIDATION.md`, and `assets/`), without touching other active `workflow/<other-slug>/` subdirectories.
-   - If `workflow/BACKLOG.md` was used, preserve the backlog table (keeping ongoing items), clear only the completed demand brief if appropriate, and remove completed-change files inside `workflow/assets/` that are no longer referenced by ongoing `BACKLOG.md` items.
+# Architecture Decision Records
+
+Immutable records of the choices that shape `agents-mcp`. Each ADR states the
+context, the decision, the alternatives rejected, and the accepted trade-offs.
+
+| ADR | Title | Status |
+| :--- | :--- | :--- |
+| [0001](./0001-canonical-transports.md) | Canonical transports are `stdio` and `http` | Superseded by ADR-0010 |
+| [0002](./0002-schema-source-and-versioning.md) | Zod 4 is the schema source of truth; publish Draft-07 | Superseded by ADR-0010 |
+| [0003](./0003-bundler-tsup.md) | Bundle the CLI with `tsup` (esbuild), no declarations | Accepted |
+| [0004](./0004-runtime-context-and-pure-compilers.md) | Injected runtime context and pure native compilers | Accepted |
+| [0005](./0005-local-sync-state.md) | Local sync state and persisted agent targets | Partially superseded by ADR-0014 |
+| [0006](./0006-non-destructive-compilation.md) | Preserve native files in place | Accepted |
+| [0007](./0007-env-and-secrets.md) | `.env` precedence and safe secret extraction | Accepted |
+| [0008](./0008-packaging-and-runtime-floor.md) | Node 22 floor, single binary, publish from `dist/` only | Accepted |
+| [0009](./0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths` | Accepted |
+| [0010](./0010-adopt-agent-plugins-mcp-schema.md) | Adotar o padrão Agent Plugins MCP 1.0.0 | Accepted |
+| [0011](./0011-plugin-lifecycle-and-safe-cleanup.md) | Ciclo de vida de plugins e limpeza segura | Accepted |
+| [0012](./0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`) | Accepted |
+| [0013](./0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets` | Accepted |
+| [0014](./0014-mcp-lock-and-authoritative-sync.md) | `mcp-lock.json` and authoritative `sync` | Accepted |
+
+## Conventions
+
+- One decision per file, numbered sequentially.
+- Never edit an accepted ADR's intent; supersede it with a new record.
+- Every ADR is referenced from [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md) §19 and,
+  when relevant, from the package documentation.
 ````
 
 ## File: spec/SPEC.md
@@ -20941,10 +22438,10 @@ AI coding agent maintainers wishing to adopt native support for `.agents/mcp.jso
 
 The specification defines a canonical, shareable file; tooling state MUST NOT leak into it.
 
-1. **Sync state:** Implementations MAY keep a local state file at `.agents/.mcp-sync-state.json` (project scope) and `~/.agents/.mcp-sync-state.json` (global scope). Its format is implementation-defined. It MUST be listed in `.gitignore` and MUST NOT be required by conformant readers of `.agents/mcp.json`.
+1. **Sync state:** Implementations MAY keep a local lock file at `.agents/mcp-lock.json` (project scope) and `~/.agents/mcp-lock.json` (global scope). A legacy file at `.agents/.mcp-sync-state.json` is read as a fallback. Its format is implementation-defined. Implementations MUST NOT add the lock file (or its legacy name) to `.gitignore` automatically; implementers MAY version it. The lock MUST NOT be required by conformant readers of `.agents/mcp.json`.
 2. **Secrets:** Real values live only in `.env` (project scope) or `~/.agents/.env` (global scope), never in `.agents/mcp.json`. `.env.example` contains key names only.
 3. **Agent files:** Native agent configuration files belong to the user. Compilers MUST NOT add them to `.gitignore`, and MUST NOT delete or move them.
-4. **Gitignore changes:** The only entries a compiler may add to `.gitignore` are `.env` and the sync-state file, and only when it is about to write those files.
+4. **Gitignore changes:** The only entry a compiler may add to `.gitignore` is `.env`, and only when it is about to write that file.
 
 ## 10. Compiler Safety Guarantees
 
@@ -20961,557 +22458,327 @@ A conformant compiler:
 The `$schema` URI is the single version identifier. It MUST resolve to `https://agent-plugins.org/schemas/1.0.0/mcp.schema.json` (the major.minor.patch segment follows the Agent Plugins version without a `v` prefix), and the published schema document MUST set its `$id` to that same URI. Implementations SHOULD accept any structurally valid file and SHOULD warn — not fail — when `$schema` points to a different version than the one they implement. There is no `version` property inside the file.
 ````
 
-## File: src/commands/sync.ts
+## File: src/index.ts
 ````typescript
 /**
- * `sync` command (§11).
+ * CLI entrypoint (§11).
  *
- * Validate canonical config → resolve targets → compile per adapter → write
- * native files → update sync state → print summary. Byte-idempotent: a second
- * run produces no byte changes. Exports `runSync` for reuse by `add`/`remove`.
+ * Creates the `RuntimeContext` once, selects the `PromptUi` (Clack on TTY,
+ * Auto on `--yes`/`CI`), and runs the `citty` app with global flags and the
+ * subcommands registered below. T8/T9 add subcommands (init, import, sync,
+ * remove, list, add, doctor) additively to the `subCommands` record.
  */
 
-import { join } from 'node:path'
-import {
-  createUiAndCtx,
-  configPath,
-  formatConfigValidationError,
-  formatDryRunActions,
-  writeFileAtomic,
-  persistSyncState,
-  loadSyncState,
-} from '$/src/commands/util'
-import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
-import type { AgentId } from '$/src/adapters/types'
-import { AGENTS_DIR } from '$/src/config'
-import type { CanonicalServer } from '$/src/core/schema'
-import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
-import { readTextFile } from '$/src/core/fs-atomic'
-import {
-  syncPluginFiles,
-  isUnmanagedPluginCollision,
-  removeManagedPlugin,
-  removeAntigravityPluginConfig,
-} from '$/src/core/plugins'
+import { defineCommand, runCommand, showUsage } from 'citty'
+import { realpathSync } from 'node:fs'
+import pkg from '$/package.json' with { type: 'json' }
+import { createRuntimeContext, type RuntimeContext } from '$/src/core/context'
+import { createClackUi, type PromptUi } from '$/src/ui/prompts'
+import { createAutoUi } from '$/src/ui/auto'
+import { syncCommand } from '$/src/commands/sync.command'
+import { initCommand } from '$/src/commands/init.command'
+import { removeCommand } from '$/src/commands/remove.command'
+import { listCommand } from '$/src/commands/list.command'
+import { importCommand } from '$/src/commands/import.command'
+import { addCommand } from '$/src/commands/add.command'
+import { doctorCommand } from '$/src/commands/doctor.command'
 
-export interface SyncOptions {
-  scope: ConfigScope
-  ctx: RuntimeContext
-  flag: readonly string[] | undefined
-  dryRun: boolean
-  yes: boolean
-  /**
-   * When `true`, does not print the plugin error block. Used by `add`,
-   * which reports the same failures once in its own summary.
-   */
-  quietErrors?: boolean
-  /**
-   * `add --no-sync`: generates only the plugin; does not resolve or write agents.
-   * `state.targets` and `state.agents` are preserved.
-   */
-  skipAgentSync?: boolean
-  /**
-   * `add`: allows zero resolvable targets; keeps generating plugins.
-   * Without it, zero targets keeps current behavior (error + exit 1).
-   */
-  allowEmptyTargets?: boolean
-  /**
-   * B8: when defined, `sync` writes/validates only plugins whose names are in
-   * this list. Used by `add` to never fail because of an unmanaged unrelated
-   * plugin.
-   */
-  onlyPluginNames?: readonly string[]
+/** Global flags available on every command (§11). */
+const globalFlags = {
+  global: {
+    type: 'boolean',
+    alias: 'g',
+    description:
+      'Operate on the global agent configuration (~/.agents/mcp.json)',
+  },
+  yes: {
+    type: 'boolean',
+    alias: 'y',
+    description: 'Run non-interactively, accepting recommended defaults',
+  },
+  agents: {
+    type: 'string',
+    description: 'Comma-separated target agents to sync (e.g. cursor,vscode)',
+  },
+  'dry-run': {
+    type: 'boolean',
+    description: 'Simulate operations without writing to disk or state',
+  },
+} as const
+
+const app = defineCommand({
+  meta: {
+    name: pkg.name,
+    version: pkg.version,
+    description: pkg.description,
+  },
+  args: globalFlags,
+  subCommands: {
+    sync: syncCommand,
+    init: initCommand,
+    remove: removeCommand,
+    list: listCommand,
+    import: importCommand,
+    add: addCommand,
+    doctor: doctorCommand,
+  },
+})
+
+const SUBCOMMANDS = [
+  'sync',
+  'init',
+  'remove',
+  'list',
+  'import',
+  'add',
+  'doctor',
+]
+
+/** Boolean global flags accepted before or after the subcommand token. */
+const GLOBAL_BOOLEAN_FLAGS = new Set(['--global', '--yes', '--dry-run'])
+
+/** Short aliases canonicalized to their long form for subcommand parsing. */
+const SHORT_GLOBAL_FLAGS: Readonly<Record<string, string>> = {
+  '-g': '--global',
+  '-y': '--yes',
 }
 
-export interface SyncSummary {
-  scope: ConfigScope
-  targets: AgentId[]
-  written: string[]
-  warnings: string[]
-  errors: string[]
+/**
+ * Long flags that consume the following token as a value. Aliases like `-y`
+ * must not be canonicalized when they are actually an argument value (e.g.
+ * `add x --command npx --arg -y`).
+ */
+const VALUE_FLAGS = new Set([
+  '--arg',
+  '--env',
+  '--header',
+  '--command',
+  '--http',
+  '--sse',
+  '--cwd',
+  '--name',
+])
+
+/** Index of the first subcommand token, ignoring tokens after `--`. */
+function findSubcommandIndex(rawArgs: readonly string[]): number {
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === '--') return -1
+    if (token !== undefined && SUBCOMMANDS.includes(token)) return i
+  }
+  return -1
 }
 
-export async function runSync(options: SyncOptions): Promise<SyncSummary> {
-  const {
-    scope,
-    ctx,
-    flag,
-    dryRun,
-    yes,
-    quietErrors = false,
-    skipAgentSync = false,
-    allowEmptyTargets = false,
-    onlyPluginNames = undefined,
-  } = options
-  const { ui } = createUiAndCtx({ yes })
+/**
+ * Normaliza tokens de flag: converte `--agents <valor>` em `--agents=<valor>` e
+ * canonicaliza os aliases globais (`-g` → `--global`, `-y` → `--yes`), já que
+ * os subcomandos do `citty` não herdam os aliases do comando raiz. Tokens após
+ * `--` são preservados literalmente.
+ */
+function normalizeFlagTokens(rawArgs: readonly string[]): string[] {
+  const normalized: string[] = []
+  let literal = false
+  let previousWasValueFlag = false
 
-  // 1. Load + validate canonical config.
-  let validated
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+
+    if (token === '--') {
+      literal = true
+      normalized.push(token)
+      continue
+    }
+
+    if (!literal) {
+      // The token is the value of a preceding `--flag <value>`; never rewrite it.
+      if (previousWasValueFlag) {
+        normalized.push(token)
+        previousWasValueFlag = false
+        continue
+      }
+
+      if (token === '--agents') {
+        const next = rawArgs[i + 1]
+        if (next !== undefined && !next.startsWith('-')) {
+          normalized.push(`--agents=${next}`)
+          i++
+          continue
+        }
+        normalized.push(token)
+        continue
+      }
+
+      if (VALUE_FLAGS.has(token)) {
+        normalized.push(token)
+        previousWasValueFlag = true
+        continue
+      }
+
+      const longForm = SHORT_GLOBAL_FLAGS[token]
+      if (longForm !== undefined) {
+        normalized.push(longForm)
+        continue
+      }
+    }
+
+    normalized.push(token)
+  }
+
+  return normalized
+}
+
+/**
+ * Normaliza `rawArgs` para o `citty`.
+ *
+ * Além de converter `--agents <valor>` em `--agents=<valor>` e canonicalizar
+ * `-g`/`-y` para `--global`/`--yes`, move flags globais posicionadas **antes**
+ * do subcomando para logo depois dele: o `citty` corta `rawArgs` no índice do
+ * subcomando e descarta tudo o que vem antes. Sem isso,
+ * `agents-mcp --agents opencode sync` e `agents-mcp -g sync` perderiam as flags
+ * silenciosamente.
+ *
+ * Exemplo: `['--agents', 'opencode,antigravity', 'sync']` →
+ * `['sync', '--agents=opencode,antigravity']`.
+ *
+ * Tokens após `--` são preservados literalmente.
+ */
+export function normalizeGlobalArgs(rawArgs: readonly string[]): string[] {
+  const subcommandIndex = findSubcommandIndex(rawArgs)
+  if (subcommandIndex === -1) {
+    return normalizeFlagTokens(rawArgs)
+  }
+
+  const prefix = normalizeFlagTokens(rawArgs.slice(0, subcommandIndex))
+  const rest = normalizeFlagTokens(rawArgs.slice(subcommandIndex))
+  const subcommand = rest[0] as string
+
+  // Tokens que não são flags globais conhecidas permanecem antes do
+  // subcomando, na ordem original.
+  const leading: string[] = []
+  const movedGlobals: string[] = []
+
+  for (let i = 0; i < prefix.length; i++) {
+    const token = prefix[i] as string
+
+    if (GLOBAL_BOOLEAN_FLAGS.has(token)) {
+      movedGlobals.push(token)
+      continue
+    }
+
+    if (token === '--agents') {
+      const next = prefix[i + 1]
+      if (next !== undefined && !next.startsWith('-')) {
+        movedGlobals.push(`--agents=${next}`)
+        i++
+      } else {
+        movedGlobals.push(token)
+      }
+      continue
+    }
+
+    if (token.startsWith('--agents=')) {
+      movedGlobals.push(token)
+      continue
+    }
+
+    leading.push(token)
+  }
+
+  return [...leading, subcommand, ...movedGlobals, ...rest.slice(1)]
+}
+
+/**
+ * CLI entry point. Runs the citty app with `process.argv`.
+ * Only executes when this module is run directly (not when imported by tests).
+ */
+export async function main(): Promise<void> {
+  const rawArgs = normalizeGlobalArgs(process.argv.slice(2))
+
+  // Handle --version / -v at root level → exit 0.
+  if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
+    console.log(pkg.version)
+    return
+  }
+
+  // Handle --help / -h at root level (no subcommand specified) → exit 0.
+  const hasSubcommand = rawArgs.some((a) => SUBCOMMANDS.includes(a))
+  if (
+    !hasSubcommand &&
+    (rawArgs.includes('--help') || rawArgs.includes('-h'))
+  ) {
+    await showUsage(app)
+    return
+  }
+
+  // Handle --help / -h with a subcommand → show subcommand help → exit 0.
+  const subcmd = rawArgs.find((a) => SUBCOMMANDS.includes(a))
+  if (subcmd && (rawArgs.includes('--help') || rawArgs.includes('-h'))) {
+    const subCommandDef = (app.subCommands as Record<string, unknown>)[subcmd]
+    if (subCommandDef) {
+      await showUsage(subCommandDef, app)
+      return
+    }
+  }
+
   try {
-    validated = loadValidatedConfig(scope, ctx)
+    await runCommand(app, { rawArgs })
   } catch (err) {
-    if (err instanceof ConfigValidationError) {
-      ui.error(formatConfigValidationError(err))
+    // Never swallow errors silently: surface them on stderr before exiting.
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(message)
+    // citty throws CLIError (E_UNKNOWN_COMMAND / E_INVALID_ARG / E_NO_COMMAND)
+    // for usage problems → exit 2. Runtime errors from commands → exit 1.
+    if ((err as Error)?.name === 'CLIError') {
+      process.exit(2)
+    } else {
       process.exit(1)
     }
-    throw err
   }
-  if (!validated) {
-    ui.note(
-      `No canonical config at ${configPath(scope, ctx)}. Nothing to sync.`,
-    )
-    return { scope, targets: [], written: [], warnings: [], errors: [] }
-  }
-  const { config, warnings: configWarnings } = validated
-
-  // 2. Resolve targets: flag → state → detection.
-  // In `skipAgentSync` (`add --no-sync`) there is no agent resolution: the
-  // plugin phase still runs, but without native files and without touching
-  // agent state.
-  const stateResult = loadSyncState(scope, ctx)
-  const state = stateResult.state
-  const targets = skipAgentSync
-    ? []
-    : await resolveTargetsAsync({ flag, state, ctx })
-
-  if (!skipAgentSync && targets.length === 0 && !allowEmptyTargets) {
-    // Comportamento atual inalterado para `sync`/`remove`/`import`.
-    ui.error(
-      'No resolvable target agents. Pass --agents <list> (e.g. --agents cursor,vscode).',
-    )
-    process.exit(1)
-  }
-
-  const allWarnings: Array<{ code: string; agent?: string; message: string }> =
-    [
-      ...configWarnings.map((w) => ({
-        code: 'SCHEMA',
-        agent: undefined,
-        message: w,
-      })),
-    ]
-
-  // 3. Compile + write per target adapter.
-  const written: string[] = []
-  // Planned file operations for the --dry-run preview (zero disk writes).
-  const planned: { type: 'write' | 'remove'; path: string }[] = []
-  // Preserve existing agent records; only overwrite the agents being synced.
-  const nextAgents: Record<
-    string,
-    { path: string; names: string[]; updatedAt: string }
-  > = { ...state.agents }
-  const now = new Date().toISOString()
-
-  for (const agentId of targets) {
-    const adapter = getAdapter(agentId)
-    const nativePath = adapter.getConfigPath(scope, ctx)
-    if (nativePath === null) {
-      // antigravity writes per-plugin files (no single native config path);
-      // it is handled by the plugin sync phase below, not here.
-      if (agentId !== 'antigravity') {
-        allWarnings.push({
-          code: 'SCOPE_UNSUPPORTED',
-          agent: agentId,
-          message: `${agentId} does not support ${scope} scope`,
-        })
-      }
-      continue
-    }
-
-    const serversForAgent: Record<string, CanonicalServer> = {}
-    for (const [name, server] of Object.entries(config.mcpServers)) {
-      serversForAgent[name] = server
-    }
-
-    const previous = new Set<string>(state.agents[agentId]?.names ?? [])
-    const existing = readTextFile(nativePath)
-
-    const { content, managedNames, warnings } = adapter.applyServers(
-      existing,
-      serversForAgent,
-      {
-        ...ctx,
-        scope,
-        previousManagedNames: previous,
-      },
-    )
-    allWarnings.push(...warnings)
-
-    planned.push({ type: 'write', path: nativePath })
-    if (!dryRun) {
-      writeFileAtomic(nativePath, content)
-      written.push(nativePath)
-    }
-
-    const existingAgent = state.agents[agentId]
-    const namesChanged =
-      !existingAgent ||
-      existingAgent.path !== nativePath ||
-      existingAgent.names.length !== managedNames.length ||
-      managedNames.some((n) => !existingAgent.names.includes(n))
-    // Refresh per-agent updatedAt only when names/path actually change
-    // (byte-idempotence of state).
-    nextAgents[agentId] = {
-      path: nativePath,
-      names: [...managedNames],
-      updatedAt: namesChanged ? now : (existingAgent?.updatedAt ?? now),
-    }
-  }
-
-  // 3b. Plugin sync: generate .agents/plugins/<name>/ for every canonical
-  // server (plugin.json + mcp.json always; mcp_config.json when antigravity
-  // is targeted). Skip unmanaged pre-existing plugin dirs.
-  const includeAntigravity = skipAgentSync
-    ? Boolean(
-        flag?.includes('antigravity') || state.targets.includes('antigravity'),
-      )
-    : targets.includes('antigravity')
-  const canonicalNames = Object.keys(config.mcpServers)
-  const nextManagedPlugins = new Set<string>(
-    state.managedPlugins.filter((n) => canonicalNames.includes(n)),
-  )
-  /** Canonical names whose plugin (including `mcp_config.json` when antigravity
-   * is targeted) was written successfully this run. */
-  const syncedPluginNames = new Set<string>()
-  for (const [name, server] of Object.entries(config.mcpServers)) {
-    // B8: when `onlyPluginNames` is set, generate only the requested plugins
-    // requested (e.g. `add` writes only the plugin for the newly added server).
-    if (onlyPluginNames && !onlyPluginNames.includes(name)) {
-      continue
-    }
-    if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
-      allWarnings.push({
-        code: 'PLUGIN_UNMANAGED',
-        agent: undefined,
-        message: `.agents/plugins/${name}/ pre-exists and is not managed by the CLI; skipped in sync. Use a different name.`,
-      })
-      continue
-    }
-
-    const result = syncPluginFiles({
-      name,
-      server,
-      scope,
-      ctx,
-      includeAntigravity,
-      dryRun,
-    })
-
-    if (result.ok) {
-      nextManagedPlugins.add(name)
-      syncedPluginNames.add(name)
-      if (!dryRun) {
-        written.push(...result.written)
-      } else {
-        for (const p of result.written) {
-          planned.push({ type: 'write', path: p })
-        }
-      }
-    } else {
-      allWarnings.push({
-        code: 'PLUGIN_WRITE_ERROR',
-        agent: undefined,
-        message: `Failed to generate plugin \`${name}\`: ${result.errors.join('; ')}`,
-      })
-    }
-  }
-
-  // Prune stale plugins: servers that left the canonical (removed by `remove`
-  // or manually) clean their managed files and leave the managed-plugins state.
-  // Manual files and non-empty directories are preserved by `removeManagedPlugin`.
-  const stalePlugins = state.managedPlugins.filter(
-    (n) => !canonicalNames.includes(n),
-  )
-  for (const name of stalePlugins) {
-    const result = removeManagedPlugin({
-      scope,
-      ctx,
-      name,
-      managedPlugins: state.managedPlugins,
-      dryRun,
-    })
-    if (!result.ok) {
-      // Cleanup failure (e.g. plugin.json became a directory -> EISDIR): keep
-      // the name in nextManagedPlugins so the next `sync` retries, instead of
-      // dropping the plugin from state and leaving the directory orphaned without
-      // reprocessing. The error is already in allWarnings and will be reported
-      // in summary.errors (and exit 1 via sync.command).
-      nextManagedPlugins.add(name)
-      allWarnings.push({
-        code: 'PLUGIN_CLEANUP_ERROR',
-        agent: undefined,
-        message: `Failed to remove plugin \`${name}\`: ${result.errors.join('; ')}`,
-      })
-    } else {
-      for (const p of result.removed) {
-        planned.push({ type: 'remove', path: p })
-      }
-    }
-  }
-
-  // When antigravity is no longer targeted, remove mcp_config.json from managed
-  // plugins (preserving plugin.json and mcp.json). In skipAgentSync
-  // (`add --no-sync`) existing mcp_config.json is not touched.
-  if (!skipAgentSync && !includeAntigravity) {
-    for (const name of nextManagedPlugins) {
-      const result = removeAntigravityPluginConfig({
-        scope,
-        ctx,
-        name,
-        managedPlugins: [...nextManagedPlugins],
-        dryRun,
-      })
-      if (!result.ok) {
-        allWarnings.push({
-          code: 'PLUGIN_CLEANUP_ERROR',
-          agent: undefined,
-          message: `Failed to remove mcp_config.json of \`${name}\`: ${result.errors.join('; ')}`,
-        })
-      } else {
-        for (const p of result.removed) {
-          planned.push({ type: 'remove', path: p })
-        }
-      }
-    }
-  }
-
-  // 4a. Antigravity agent-state lifecycle: record `state.agents.antigravity`
-  // when antigravity is targeted (path = .agents/plugins dir, names = plugins
-  // whose sync succeeded this run); delete it when antigravity is deselected
-  // (its mcp_config.json files were cleaned up in the block above).
-  if (!skipAgentSync) {
-    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-    const antigravityPath = join(base, AGENTS_DIR, 'plugins')
-    if (targets.includes('antigravity')) {
-      const existing = state.agents['antigravity']
-      const names = [...syncedPluginNames]
-      const namesChanged =
-        !existing ||
-        existing.path !== antigravityPath ||
-        existing.names.length !== names.length ||
-        names.some((n) => !existing.names.includes(n))
-      nextAgents['antigravity'] = {
-        path: antigravityPath,
-        names,
-        updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
-      }
-    } else {
-      delete nextAgents['antigravity']
-    }
-  }
-
-  // 4. Update sync state (persist targets + per-agent managed names + plugins).
-  const nextState = {
-    ...state,
-    scope,
-    targets: skipAgentSync ? state.targets : targets,
-    agents: nextAgents,
-    managedPlugins: [...nextManagedPlugins],
-  }
-  if (!dryRun) {
-    persistSyncState(scope, ctx, nextState)
-  }
-
-  // --dry-run preview: show planned file operations, zero disk writes.
-  if (dryRun && planned.length > 0) {
-    ui.note(formatDryRunActions(planned))
-  }
-
-  // 5. Print summary.
-  const isPluginError = (code: string): boolean =>
-    code === 'PLUGIN_WRITE_ERROR' ||
-    code === 'PLUGIN_UNMANAGED' ||
-    code === 'PLUGIN_CLEANUP_ERROR'
-  const pluginErrors = allWarnings
-    .filter((w) => isPluginError(w.code))
-    .map((w) => w.message)
-  const summaryWarnings = allWarnings
-    .filter((w) => !isPluginError(w.code))
-    .map((w) => w.message)
-
-  if (pluginErrors.length > 0) {
-    if (!quietErrors) {
-      ui.error(
-        `Partial sync completed with failures: ${pluginErrors.length} plugin(s) could not be synced.`,
-      )
-      for (const e of pluginErrors) {
-        ui.error(e)
-      }
-      ui.note(
-        'Re-run `agents-mcp sync` after resolving the issues above. .agents/mcp.json was kept.',
-      )
-    }
-  } else if (skipAgentSync) {
-    // `add --no-sync`: agents were not synced, only plugins.
-    ui.note(
-      'Agent sync skipped (--no-sync): plugin files were updated in .agents/plugins/ and no agent was synced.',
-    )
-  } else if (targets.length === 0 && allowEmptyTargets) {
-    // `add` without targets: completed with default plugin, no target agents.
-    ui.note(
-      'No target agents configured or detected: the default Agent Plugins plugin was generated in .agents/plugins/, but no agent was synced. To sync later, run `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).',
-    )
-  } else {
-    ui.note(
-      `Synced ${targets.length} target(s) across ${written.length} file(s)`,
-    )
-  }
-  for (const w of summaryWarnings) {
-    ui.warn(w)
-  }
-
-  return {
-    scope,
-    targets,
-    written,
-    warnings: summaryWarnings,
-    errors: pluginErrors,
-  }
-}
-````
-
-## File: src/core/store.ts
-````typescript
-import { z } from 'zod'
-import type { ParseError } from 'jsonc-parser'
-import { parse, printParseErrorCode } from 'jsonc-parser'
-import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
-import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import { AGENTS_DIR, CONFIG_FILE, DEFAULT_SCHEMA_URL } from '$/src/config'
-import { CanonicalMcpConfigSchema, validateConfig } from '$/src/core/schema'
-
-export class ConfigValidationError extends Error {
-  readonly path: string
-  readonly issues: Array<{ path: string; message: string }>
-
-  constructor(
-    message: string,
-    path: string,
-    issues: Array<{ path: string; message: string }> = [],
-  ) {
-    super(message)
-    this.name = 'ConfigValidationError'
-    this.path = path
-    this.issues = issues
-  }
-}
-
-export function getConfigPath(scope: ConfigScope, ctx: RuntimeContext): string {
-  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
-  return `${base}/${AGENTS_DIR}/${CONFIG_FILE}`
-}
-
-export interface ReadConfigResult {
-  config: Record<string, unknown>
-  raw: string
-}
-
-export function readConfig(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): ReadConfigResult | null {
-  const path = getConfigPath(scope, ctx)
-  const raw = readTextFile(path)
-  if (raw === null) {
-    return null
-  }
-
-  // jsonc-parser tolerates comments and trailing commas even in `.json` files.
-  // Collect parse errors so corrupt/truncated input is surfaced with a clear
-  // error instead of silently discarding the tail of the document.
-  const errors: ParseError[] = []
-  const config = parse(raw, errors, {
-    allowTrailingComma: true,
-    allowEmptyContent: true,
-  }) as unknown as Record<string, unknown>
-
-  if (errors.length > 0) {
-    const first = errors[0]!
-    const code = printParseErrorCode(first.error)
-    throw new ConfigValidationError(
-      `Invalid JSONC at ${path} (offset ${first.offset}): ${code}`,
-      path,
-      [
-        {
-          path: '',
-          message: `JSONC parse error at offset ${first.offset}: ${code}`,
-        },
-      ],
-    )
-  }
-
-  if (config === undefined) {
-    return { config: {}, raw }
-  }
-
-  return { config, raw }
-}
-
-export interface WriteConfigOptions {
-  scope: ConfigScope
-  ctx: RuntimeContext
-  config: Record<string, unknown>
 }
 
 /**
- * Write the canonical config atomically, serializing only `$schema` and
- * `servers` (minimal, defaults not materialized). A user who omits `args`
- * keeps omitting it, so `sync` stays idempotent and produces minimal diffs.
+ * True when this file is executed directly (e.g. `node dist/index.js`), not
+ * when imported as a module by tests. Uses argv[1] basename instead of
+ * import.meta.url comparison, which breaks with symlinks (e.g. `npx`).
  */
-export function writeConfig({ scope, ctx, config }: WriteConfigOptions): void {
-  const path = getConfigPath(scope, ctx)
-  const serialized = serializeMinimal(config)
-  // Never persist an invalid canonical document: validate before writing.
-  CanonicalMcpConfigSchema.parse(JSON.parse(serialized))
-  writeFileAtomic(path, serialized)
-}
-
-function serializeMinimal(config: Record<string, unknown>): string {
-  const mcpServers = config['mcpServers'] ?? {}
-  const document: Record<string, unknown> = {
-    $schema: DEFAULT_SCHEMA_URL,
-    mcpServers,
-  }
-  return JSON.stringify(document, null, 2) + '\n'
-}
-
-export interface LoadValidatedConfigResult {
-  config: ReturnType<typeof CanonicalMcpConfigSchema.parse>
-  warnings: string[]
-}
-
-export function loadValidatedConfig(
-  scope: ConfigScope,
-  ctx: RuntimeContext,
-): LoadValidatedConfigResult | null {
-  const result = readConfig(scope, ctx)
-  if (result === null) {
-    return null
-  }
-
-  let config: ReturnType<typeof CanonicalMcpConfigSchema.parse>
+/**
+ * True when this file is executed directly (e.g. `node dist/index.js`), not
+ * when imported as a module by tests. Resolves symlinks via `realpathSync`
+ * so invoking `agents-mcp` through an installed bin symlink executes
+ * `main()` instead of exiting silently. Guarded against `VITEST` and
+ * invalid/unreadable paths.
+ */
+if (process.argv[1] && !process.env.VITEST) {
   try {
-    config = CanonicalMcpConfigSchema.parse(result.config)
-  } catch (err) {
-    const zodErr = err as z.ZodError
-    const issues = zodErr.issues.map((issue) => ({
-      path: issue.path.join('.'),
-      message: issue.message,
-    }))
-    const firstPath = issues[0]?.path ?? ''
-    throw new ConfigValidationError(
-      `Invalid canonical config at ${getConfigPath(
-        scope,
-        ctx,
-      )}: ${firstPath ? `${firstPath} — ` : ''}${zodErr.issues[0]?.message ?? ''}`,
-      getConfigPath(scope, ctx),
-      issues,
-    )
+    const resolved = realpathSync(process.argv[1])
+    if (resolved.endsWith('index.js')) {
+      void main()
+    }
+  } catch {
+    // Unreadable/missing argv[1] (e.g. under some test runners): fall back
+    // to the literal basename check.
+    if (process.argv[1].endsWith('index.js')) {
+      void main()
+    }
   }
+}
 
-  const { warnings } = validateConfig(result.config)
-  return { config, warnings }
+/**
+ * Build the `RuntimeContext` and `PromptUi` for the current process. Called
+ * once by each command (`src/commands/*.ts`). The UI choice (TTY vs
+ * `--yes`/`CI`) is consistent across all commands.
+ */
+export function createUi({ yes = false }: { yes?: boolean } = {}): {
+  ctx: RuntimeContext
+  ui: PromptUi
+} {
+  const ctx = createRuntimeContext()
+  const isAuto = !ctx.isTTY || ctx.env.CI === 'true' || yes
+  const ui: PromptUi = isAuto
+    ? createAutoUi({ defaults: {}, log: undefined })
+    : createClackUi()
+  return { ctx, ui }
 }
 ````
 
@@ -22029,6 +23296,48 @@ describe('commands add (B3/T5: --agents, --no-sync and plugin generation)', () =
       cleanup()
     }
   })
+
+  it('plugin dir existente com nome declarado no canônico e adotado por add --force (sem bloqueio; arquivos sobrescritos; registrado em managedPlugins)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      // Declara `my-tool` no canônico e deixa um diretorio de plugin pre-existente.
+      persistCanonicalConfig('project', ctx, {
+        $schema: DEFAULT_SCHEMA_URL,
+        mcpServers: {
+          'my-tool': { type: 'stdio', command: 'npx', args: [] },
+        },
+      })
+      const pluginDir = join(ctx.cwd, '.agents/plugins/my-tool')
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinelPath = join(pluginDir, 'sentinel.txt')
+      writeFileSync(sentinelPath, 'ADOTADO')
+
+      await addCommand.run!({
+        args: baseArgs({ force: true, name: 'my-tool' }),
+        rawArgs: ['--command=npx', '--force'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(ui.error).not.toHaveBeenCalled()
+
+      // O sentinel (arquivo nao gerenciado) e preservado pela sincronizacao.
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('ADOTADO')
+      // Os arquivos gerenciados sao sobrescritos/adotados.
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('my-tool')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8'))
+          .mcpServers['my-tool'],
+      ).toBeDefined()
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('my-tool')
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('commands add (T6: integridade do índice canônico)', () => {
@@ -22383,844 +23692,389 @@ describe('commands add (B5: plugin criado independentemente de sync/targets)', (
 })
 ````
 
-## File: tests/core/store.test.ts
-````typescript
-import { describe, expect, it } from 'vitest'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import {
-  getConfigPath,
-  readConfig,
-  writeConfig,
-  loadValidatedConfig,
-  ConfigValidationError,
-} from '$/src/core/store'
-import { DEFAULT_SCHEMA_URL } from '$/src/config'
-import { createSandbox } from '$/tests/helpers/sandbox'
-
-function writeRaw(
-  ctx: ReturnType<typeof createSandbox>['ctx'],
-  raw: string,
-): void {
-  mkdirSync(`${ctx.cwd}/.agents`, { recursive: true })
-  writeFileSync(`${ctx.cwd}/.agents/mcp.json`, raw, 'utf8')
-}
-
-describe('store', () => {
-  it('getConfigPath returns project and global paths', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      expect(getConfigPath('project', ctx)).toBe(`${ctx.cwd}/.agents/mcp.json`)
-      expect(getConfigPath('global', ctx)).toBe(
-        `${ctx.homeDir}/.agents/mcp.json`,
-      )
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('readConfig returns null for missing file', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      expect(readConfig('project', ctx)).toBeNull()
-      expect(readConfig('global', ctx)).toBeNull()
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('readConfig parses JSONC with comments and trailing commas', () => {
-    const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/mcp.json`
-    const raw = `{\n  // comment\n  "mcpServers": {\n    "github": {\n      "type": "stdio",\n      "command": "npx",\n    },\n  },\n}\n`
-    try {
-      writeRaw(ctx, raw)
-
-      const result = readConfig('project', ctx)
-      expect(result).not.toBeNull()
-      expect(result!.raw).toBe(raw)
-      const mcpServers = (result!.config as Record<string, unknown>)
-        .mcpServers as Record<string, unknown>
-      expect((mcpServers.github as Record<string, unknown>).type).toBe('stdio')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('readConfig raises ConfigValidationError on truncated JSONC', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeRaw(ctx, '{ not valid json')
-      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('readConfig raises ConfigValidationError on valid-prefix plus trailing garbage', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeRaw(ctx, '{"$schema":"x","mcpServers":{}} >>> GARBAGE')
-      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('readConfig leaves file byte-identical after a failed load', () => {
-    const { ctx, cleanup } = createSandbox()
-    const path = `${ctx.cwd}/.agents/mcp.json`
-    const raw = '{ not valid json\n'
-    try {
-      writeRaw(ctx, raw)
-      expect(() => readConfig('project', ctx)).toThrow(ConfigValidationError)
-      expect(readFileSync(path, 'utf8')).toBe(raw)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('writeConfig writes atomically and round-trips', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeConfig({
-        scope: 'project',
-        ctx,
-        config: {
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            github: {
-              type: 'stdio',
-              command: 'npx',
-              args: ['-y', '@modelcontextprotocol/server-github'],
-            },
-          },
-        },
-      })
-
-      const result = readConfig('project', ctx)
-      expect(result).not.toBeNull()
-      const mcpServers = (result!.config as Record<string, unknown>)
-        .mcpServers as Record<string, unknown>
-      expect((mcpServers.github as Record<string, unknown>).command).toBe('npx')
-      expect(result!.config.$schema).toBe(DEFAULT_SCHEMA_URL)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('writeConfig does not materialize defaults (minimal serialization)', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeConfig({
-        scope: 'project',
-        ctx,
-        config: {
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            github: { type: 'stdio', command: 'npx' },
-          },
-        },
-      })
-
-      const result = readConfig('project', ctx)
-      const raw = result!.raw
-      // `args` has a default but should not be materialized on write.
-      expect(raw).not.toContain('"args"')
-      expect(raw).not.toContain('"env"')
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('writeConfig defaults mcpServers to {} when undefined and never writes invalid document', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeConfig({
-        scope: 'project',
-        ctx,
-        config: {
-          $schema: DEFAULT_SCHEMA_URL,
-        },
-      })
-
-      const result = readConfig('project', ctx)
-      expect(result).not.toBeNull()
-      expect(result!.config.mcpServers).toEqual({})
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('writeConfig rejects invalid mcpServers before writing', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      expect(() =>
-        writeConfig({
-          scope: 'project',
-          ctx,
-          config: {
-            $schema: DEFAULT_SCHEMA_URL,
-            mcpServers: { broken: { type: 'unknown' } },
-          },
-        }),
-      ).toThrow()
-      // Não deve ter gravado nada de inválido.
-      expect(readConfig('project', ctx)).toBeNull()
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('loadValidatedConfig returns null for missing file', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      expect(loadValidatedConfig('project', ctx)).toBeNull()
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('loadValidatedConfig validates and returns warnings', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeRaw(
-        ctx,
-        JSON.stringify({
-          $schema: DEFAULT_SCHEMA_URL,
-          mcpServers: {
-            github: { type: 'stdio', command: 'npx' },
-          },
-        }),
-      )
-
-      const result = loadValidatedConfig('project', ctx)
-      expect(result).not.toBeNull()
-      const mcpServers = (result!.config.mcpServers as Record<string, unknown>)
-        .github as Record<string, unknown>
-      expect(mcpServers.command).toBe('npx')
-      expect(result!.warnings.length).toBe(0)
-    } finally {
-      cleanup()
-    }
-  })
-
-  it('loadValidatedConfig throws ConfigValidationError on wrong $schema', () => {
-    const { ctx, cleanup } = createSandbox()
-    try {
-      writeRaw(
-        ctx,
-        JSON.stringify({
-          $schema: 'https://example.com/other.json',
-          mcpServers: {
-            github: { type: 'stdio', command: 'npx' },
-          },
-        }),
-      )
-
-      try {
-        loadValidatedConfig('project', ctx)
-        throw new Error('should have thrown')
-      } catch (err) {
-        expect(err).toBeInstanceOf(ConfigValidationError)
-      }
-    } finally {
-      cleanup()
-    }
-  })
-})
-````
-
-## File: tests/packaging/packaging.test.ts
-````typescript
-import { describe, expect, it, beforeAll } from 'vitest'
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
-import { execFileSync } from 'node:child_process'
-
-const root = process.cwd()
-const distDir = resolve(root, 'dist')
-
-// Ensure dist/ is populated by running dist:package before tests
-execFileSync('npm', ['run', 'dist:package'], {
-  cwd: root,
-  stdio: 'pipe',
-})
-
-describe('packaging', () => {
-  it('dist/package.json has exactly one bin, no dependencies/scripts, engines.node >= 22', () => {
-    const distPkg = JSON.parse(
-      readFileSync(resolve(distDir, 'package.json'), 'utf8'),
-    )
-
-    // Exactly one binary
-    expect(Object.keys(distPkg.bin)).toEqual(['agents-mcp'])
-    expect(distPkg.bin['agents-mcp']).toBe('./index.js')
-
-    // No dependencies, scripts, devDependencies
-    expect(distPkg.dependencies).toBeUndefined()
-    expect(distPkg.devDependencies).toBeUndefined()
-    expect(distPkg.scripts).toBeUndefined()
-
-    // main/exports point to ./index.js
-    expect(distPkg.main).toBe('./index.js')
-    expect(distPkg.exports['.']).toBe('./index.js')
-
-    // engines.node >= 22
-    expect(distPkg.engines.node).toBe('>=22')
-
-    // Explicit files
-    expect(distPkg.files).toEqual(['index.js'])
-  })
-
-  it('dist/ contains expected files and index.js starts with shebang', () => {
-    const actualFiles = readdirSync(distDir).sort()
-    expect(actualFiles).toEqual(
-      [
-        'CHANGELOG.md',
-        'LICENSE',
-        'README.md',
-        'index.js',
-        'package.json',
-      ].sort(),
-    )
-
-    const indexJs = readFileSync(resolve(distDir, 'index.js'), 'utf8')
-    expect(indexJs.startsWith('#!/usr/bin/env node')).toBe(true)
-  })
-
-  it('dist:package script runs without errors', () => {
-    expect(() => {
-      execFileSync('npm', ['run', 'dist:package'], {
-        cwd: root,
-        stdio: 'pipe',
-      })
-    }).not.toThrow()
-  })
-})
-````
-
-## File: src/commands/add.command.ts
+## File: src/commands/sync.ts
 ````typescript
 /**
- * `add` command (§11) — direct-source variant (T9).
+ * `sync` command (§11).
  *
- * Resolve direct flags (--command/--arg/--http/--env/--header/--cwd/--name),
- * prompt/accept `--name`, write canonical, then `runSync` unless `--no-sync`.
- * Idempotent: same name + same definition → exit 0, no write.
- * Conflict: same name + different definition → exit 1 with diff; `--force`
- * overwrites.
- * `--env KEY=VALUE` writes to `.env` and uses `${KEY}` in canonical.
- * `--env KEY` references only; warns when unresolved.
+ * Validate canonical config → resolve targets → compile per adapter → write
+ * native files → update sync state → print summary. Byte-idempotent: a second
+ * run produces no byte changes. Exports `runSync` for reuse by `add`/`remove`.
  */
 
-import { defineCommand } from 'citty'
 import { join } from 'node:path'
 import {
   createUiAndCtx,
   configPath,
-  persistCanonicalConfig,
-  persistSyncState,
-  isDryRun,
-  parseAgentsFlag,
-  statePath,
+  formatConfigValidationError,
   formatDryRunActions,
+  writeFileAtomic,
+  persistSyncState,
+  loadSyncState,
 } from '$/src/commands/util'
-import { runSync } from '$/src/commands/sync'
-import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
-import { resolveDirect } from '$/src/sources/direct'
-import { resolveSource } from '$/src/sources/index'
-import type { Candidate } from '$/src/sources/types'
-import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
-import { loadState, writeState } from '$/src/core/state'
-import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
-import {
-  appendToDotenv,
-  applySecretExtraction,
-  planSecretExtraction,
-  syncEnvExample,
-} from '$/src/core/env'
+import { resolveTargetsAsync, getAdapter } from '$/src/adapters/index'
+import type { AgentId } from '$/src/adapters/types'
+import { AGENTS_DIR } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
-import { isUnmanagedPluginCollision } from '$/src/core/plugins'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
+import { readTextFile } from '$/src/core/fs-atomic'
+import { syncPluginFiles, removeManagedPlugin } from '$/src/core/plugins'
 
-function diffValues(a: unknown, b: unknown): string {
-  const aStr = JSON.stringify(a, null, 2)
-  const bStr = JSON.stringify(b, null, 2)
-  if (aStr === bStr) {
-    return ''
-  }
-  return `- ${aStr}\n+ ${bStr}`
+export interface SyncOptions {
+  scope: ConfigScope
+  ctx: RuntimeContext
+  flag: readonly string[] | undefined
+  dryRun: boolean
+  yes: boolean
+  /**
+   * When `true`, does not print the plugin error block. Used by `add`,
+   * which reports the same failures once in its own summary.
+   */
+  quietErrors?: boolean
+  /**
+   * `add --no-sync`: generates only the plugin; does not resolve or write agents.
+   * `state.targets` and `state.agents` are preserved.
+   */
+  skipAgentSync?: boolean
+  /**
+   * `add`: allows zero resolvable targets; keeps generating plugins.
+   * Without it, zero targets keeps current behavior (error + exit 1).
+   */
+  allowEmptyTargets?: boolean
+  /**
+   * B8: when defined, `sync` writes/validates only plugins whose names are in
+   * this list. Used by `add` to never fail because of an unmanaged unrelated
+   * plugin.
+   */
+  onlyPluginNames?: readonly string[]
 }
 
-/**
- * Coleta ocorrências de uma flag repetível (`--arg`, `--env`, `--header`)
- * diretamente de `rawArgs`.
- *
- * O `citty` (`parseArgs`) não acumula `type: 'string'` repetidas em um
- * array — sobrescreve com a última ocorrência (bloqueador [R53]). Esta
- * leitura direta preserva todas as ocorrências.
- *
- * Suporta:
- * - `--flag=valor` (o valor é tudo depois do primeiro `=`)
- * - `--flag valor` (o próximo token é o valor, mesmo começando com `-`,
- *   ex. `--arg -y`; um próximo token que começa com `--` não é consumido)
- */
-function collectRepeatableFlags(rawArgs: string[], flag: string): string[] {
-  const values: string[] = []
-  const longFlag = `--${flag}`
-  for (let i = 0; i < rawArgs.length; i++) {
-    const token = rawArgs[i]
-    if (token === undefined) continue
-    if (token.startsWith(longFlag + '=')) {
-      values.push(token.slice(longFlag.length + 1))
-    } else if (token === longFlag) {
-      const next = rawArgs[i + 1]
-      if (next !== undefined && !next.startsWith('--')) {
-        values.push(next)
-        i++ // consome o valor do próximo token
-      }
-    }
-  }
-  return values
+export interface SyncSummary {
+  scope: ConfigScope
+  targets: AgentId[]
+  written: string[]
+  warnings: string[]
+  errors: string[]
 }
 
-export const addCommand = defineCommand({
-  meta: {
-    name: 'add',
-    description: 'Install an MCP server from direct flags',
-  },
-  args: {
-    command: {
-      type: 'string',
-      description: 'Executable command for command-based MCP server',
-    },
-    arg: { type: 'string', description: 'Argument token (repeatable)' },
-    http: { type: 'string' },
-    sse: { type: 'string' },
-    env: { type: 'string', description: 'KEY=VALUE (repeatable)' },
-    header: { type: 'string', description: '"Name: Value" (repeatable)' },
-    cwd: { type: 'string' },
-    name: { type: 'string', description: 'Server name override' },
-    'no-sync': {
-      type: 'boolean',
-      description: 'Skip agent sync; Agent Plugins files are still generated',
-    },
-    force: { type: 'boolean', alias: 'f' },
-    'extract-secrets': {
-      type: 'boolean',
-      description: 'Write detected secrets to .env',
-    },
-  },
-  run: async ({ args, rawArgs }) => {
-    const { ctx, ui } = createUiAndCtx({ yes: args.yes === true })
-    const scope = (args.global ? 'global' : 'project') as ConfigScope
-    const path = configPath(scope, ctx)
-    const dryRun = isDryRun(args)
-    // `citty`/`mri` converte `--no-sync` em `args.sync === false`; a checagem
-    // direta em `rawArgs` cobre subcomandos que não declaram `sync`.
-    const noSync =
-      args['no-sync'] === true ||
-      (args as Record<string, unknown>).sync === false ||
-      rawArgs.includes('--no-sync')
-    const agentsFlag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
-    const force = args.force === true
-    const extractSecrets = args['extract-secrets'] === true
+export async function runSync(options: SyncOptions): Promise<SyncSummary> {
+  const {
+    scope,
+    ctx,
+    flag,
+    dryRun,
+    yes,
+    quietErrors = false,
+    skipAgentSync = false,
+    allowEmptyTargets = false,
+    onlyPluginNames = undefined,
+  } = options
+  const { ui } = createUiAndCtx({ yes })
 
-    // NOTE (R53): `citty`'s `parseArgs` does not accumulate repeated
-    // `type: 'string'` flags into an array — it overwrites with the last
-    // occurrence. Collect `--arg`, `--env` and `--header` directly from
-    // `rawArgs` so every occurrence is preserved.
-    const options = {
-      command: args.command as string | undefined,
-      arg: collectRepeatableFlags(rawArgs, 'arg'),
-      http: args.http as string | undefined,
-      sse: args.sse as string | undefined,
-      env: collectRepeatableFlags(rawArgs, 'env'),
-      header: collectRepeatableFlags(rawArgs, 'header'),
-      cwd: args.cwd as string | undefined,
-      name: args.name as string | undefined,
+  // 1. Load + validate canonical config.
+  let validated
+  try {
+    validated = loadValidatedConfig(scope, ctx)
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      ui.error(formatConfigValidationError(err))
+      process.exit(1)
     }
+    throw err
+  }
+  if (!validated) {
+    ui.note(
+      `No canonical config at ${configPath(scope, ctx)}. Nothing to sync.`,
+    )
+    return { scope, targets: [], written: [], warnings: [], errors: [] }
+  }
+  const { config, warnings: configWarnings } = validated
 
-    // Dispatch between flag-driven mode and the interactive wizard. A direct
-    // source is any of --command/--http/--sse/--arg; without one, a positional
-    // `<name>` alone is not enough to build a server.
-    const positionalArgs = (args._ as string[] | undefined) ?? []
-    const hasDirectSource =
-      Boolean(options.command || options.http || options.sse) ||
-      options.arg.length > 0
-    const isInteractive =
-      ctx.isTTY && ctx.env.CI !== 'true' && args.yes !== true
+  // 2. Resolve targets: flag → state → detection.
+  // In `skipAgentSync` (`add --no-sync`) there is no agent resolution: the
+  // plugin phase still runs, but without native files and without touching
+  // agent state.
+  const stateResult = loadSyncState(scope, ctx)
+  const state = stateResult.state
+  const targets = skipAgentSync
+    ? []
+    : await resolveTargetsAsync({ flag, state, ctx })
 
-    /**
-     * Determine if a positional argument looks like an external source reference
-     * (GitHub URL, owner/repo, @scope/pkg, or npm package) rather than a
-     * simple server name for the interactive wizard.
-     */
-    function isExternalSourceRef(arg: string): boolean {
-      // Remote URL
-      if (/^https?:\/\//.test(arg)) return true
-      // GitHub owner/repo[#ref] or owner/repo format
-      if (/^[\w-]+\/[\w.-]+(#.*)?$/.test(arg)) return true
-      // npm scoped package @scope/pkg or bare package name with version @pkg@version
-      if (/^@[\w-]+\/[\w.-]+(@.*)?$/.test(arg)) return true
-      // Bare npm package (contains @ for version or is a known pattern)
-      // We treat any arg with @ not at start as potentially a versioned package
-      if (/^[\w-]+@[\w.-]+$/.test(arg)) return true
-      return false
-    }
+  if (!skipAgentSync && targets.length === 0 && !allowEmptyTargets) {
+    // Strict default: direct `runSync` callers, `remove`, and `import` keep
+    // exiting 1. The `sync` command opts in via `allowEmptyTargets`.
+    ui.error(
+      'No resolvable target agents. Pass --agents <list> (e.g. --agents cursor,vscode).',
+    )
+    process.exit(1)
+  }
 
-    let validated: ReturnType<typeof loadValidatedConfig> | null = null
-    try {
-      validated = loadValidatedConfig(scope, ctx)
-    } catch (err) {
-      if (err instanceof ConfigValidationError) {
-        ui.error(
-          `Invalid config at ${err.path}: ${err.issues
-            .map((i) => `${i.path || 'root'} — ${i.message}`)
-            .join(
-              '; ',
-            )}. Run \`agents-mcp init --force\` or ensure \`mcpServers\` is defined in .agents/mcp.json.`,
-        )
-        process.exit(1)
-        return
+  const allWarnings: Array<{ code: string; agent?: string; message: string }> =
+    [
+      ...configWarnings.map((w) => ({
+        code: 'SCHEMA',
+        agent: undefined,
+        message: w,
+      })),
+    ]
+  // Surface sync-state notices (e.g. a legacy file was imported) as non-fatal
+  // STATE warnings, once per sync.
+  for (const notice of stateResult.notices) {
+    allWarnings.push({ code: 'STATE', agent: undefined, message: notice })
+  }
+
+  // 3. Compile + write per target adapter.
+  const written: string[] = []
+  // Planned file operations for the --dry-run preview (zero disk writes).
+  const planned: { type: 'write' | 'remove'; path: string }[] = []
+  // Preserve existing agent records; only overwrite the agents being synced.
+  const nextAgents: Record<
+    string,
+    { path: string; names: string[]; updatedAt: string }
+  > = { ...state.agents }
+  const now = new Date().toISOString()
+
+  for (const agentId of targets) {
+    const adapter = getAdapter(agentId)
+    const nativePath = adapter.getConfigPath(scope, ctx)
+    if (nativePath === null) {
+      // antigravity writes per-plugin files (no single native config path);
+      // it is handled by the plugin sync phase below, not here.
+      if (agentId !== 'antigravity') {
+        allWarnings.push({
+          code: 'SCOPE_UNSUPPORTED',
+          agent: agentId,
+          message: `${agentId} does not support ${scope} scope`,
+        })
       }
-      throw err
-    }
-    let canonical: Record<string, CanonicalServer> = {}
-    let schemaUrl = DEFAULT_SCHEMA_URL
-    if (validated) {
-      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
-      canonical = {
-        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
-      }
+      continue
     }
 
-    // Carrega o estado de sincronizacao antecipadamente para verificacao de
-    // colisao de plugin (gera ou nao o fluxo interativo).
-    const stateResult = loadState(scope, ctx)
-    const state = stateResult.state
-
-    let resolved: ReturnType<typeof resolveDirect>
-    let name: string
-    let interactiveAdd = false
-
-    // Determine source resolution mode:
-    // 1. Direct flags (--command/--http/--sse/--arg) -> resolveDirect
-    // 2. Positional <source> arg that looks like external ref -> resolveSource
-    // 3. No source at all -> interactive wizard (TTY) or usage error
-    const positionalSource = positionalArgs[0]?.trim()
-    const positionalIsSource =
-      positionalSource && isExternalSourceRef(positionalSource)
-
-    if (hasDirectSource) {
-      // Explicit flags take precedence
-      resolved = resolveDirect(options)
-      name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
-    } else if (positionalIsSource) {
-      // Positional <source> argument (GitHub, npm, Registry, URL)
-      resolved = await resolveSource(
-        {
-          source: positionalSource,
-          name: options.name,
-          env: options.env,
-          header: options.header,
-          cwd: options.cwd,
-        },
-        {
-          fetch: globalThis.fetch,
-          yes: args.yes === true,
-          selectCandidate:
-            isInteractive && !args.yes
-              ? async (candidates: Candidate[]) => {
-                  if (candidates.length === 0) return null
-                  // Exact name match wins automatically
-                  const exact = candidates.find(
-                    (c: Candidate) =>
-                      c.name.toLowerCase() === positionalSource.toLowerCase(),
-                  )
-                  if (exact) return exact
-                  // Multiple candidates in TTY -> prompt user
-                  const choice = await ui.select({
-                    message: `Multiple candidates found for "${positionalSource}". Choose one:`,
-                    options: candidates.map((c: Candidate) => ({
-                      label: c.name,
-                      value: c,
-                      hint: c.ref,
-                    })),
-                  })
-                  return choice ?? null
-                }
-              : undefined,
-        },
-      )
-      name = options.name ?? resolved.suggestedName
-    } else {
-      // No source specified
-      if (!isInteractive) {
-        ui.error(
-          'Usage: agents-mcp add <name> --command <cmd> [--arg <token>...] | --http <url>',
-        )
-        process.exit(2)
-        return
-      }
-      const result = await collectInteractiveAddOptions({
-        ui,
-        initialName: options.name ?? positionalArgs[0],
-        checkConflict: (candidate) => {
-          if (candidate in canonical && !force) {
-            return 'canonical'
-          }
-          // Unmanaged plugin collision: re-prompt for a different name.
-          if (
-            isUnmanagedPluginCollision(
-              scope,
-              ctx,
-              candidate,
-              state.managedPlugins,
-            )
-          ) {
-            return 'unmanaged'
-          }
-          return false
-        },
-      })
-      interactiveAdd = true
-      name = result.name
-      resolved = resolveDirect(result.options)
+    const serversForAgent: Record<string, CanonicalServer> = {}
+    for (const [name, server] of Object.entries(config.mcpServers)) {
+      serversForAgent[name] = server
     }
 
-    /**
-     * Fase de plugins (+ agentes, quando aplicável) — única fonte via `runSync`.
-     * `skipAgentSync: noSync` (`--no-sync` gera só plugin, sem mexer em agentes);
-     * `allowEmptyTargets: true` permite `add` sem targets resolvidos.
-     */
-    const runPluginAndAgentSync = (skipAgentSync: boolean) =>
-      runSync({
+    const previous = new Set<string>(state.agents[agentId]?.names ?? [])
+    const existing = readTextFile(nativePath)
+
+    const { content, managedNames, warnings } = adapter.applyServers(
+      existing,
+      serversForAgent,
+      {
+        ...ctx,
         scope,
-        ctx,
-        flag: agentsFlag,
-        dryRun,
-        yes: args.yes === true,
-        quietErrors: true,
-        skipAgentSync,
-        allowEmptyTargets: true,
-        onlyPluginNames: [name],
-      })
+        previousManagedNames: previous,
+      },
+    )
+    allWarnings.push(...warnings)
 
-    /** Reports partial plugin failure and exits with code 1. */
-    const reportSyncFailures = (errors: string[]): void => {
-      ui.error(
-        `Server \`${name}\` added to .agents/mcp.json, but failed to generate ${errors.length} plugin(s).`,
+    planned.push({ type: 'write', path: nativePath })
+    if (!dryRun) {
+      writeFileAtomic(nativePath, content)
+      written.push(nativePath)
+    }
+
+    const existingAgent = state.agents[agentId]
+    const namesChanged =
+      !existingAgent ||
+      existingAgent.path !== nativePath ||
+      existingAgent.names.length !== managedNames.length ||
+      managedNames.some((n) => !existingAgent.names.includes(n))
+    // Refresh per-agent updatedAt only when names/path actually change
+    // (byte-idempotence of state).
+    nextAgents[agentId] = {
+      path: nativePath,
+      names: [...managedNames],
+      updatedAt: namesChanged ? now : (existingAgent?.updatedAt ?? now),
+    }
+  }
+
+  // 3b. Plugin sync: .agents/mcp.json is authoritative — for every canonical
+  // server generate/overwrite .agents/plugins/<name>/ (plugin.json +
+  // mcp.json always; mcp_config.json when antigravity is targeted) and adopt
+  // the name into managedPlugins, regardless of pre-existing directories or
+  // lock membership. Files in the plugin directory other than the three
+  // managed filenames are never touched. Names not declared in .agents/mcp.json
+  // are never visited (unmanaged dirs outside the canonical config stay
+  // untouched and unreported).
+  const includeAntigravity = skipAgentSync
+    ? Boolean(
+        flag?.includes('antigravity') || state.targets.includes('antigravity'),
       )
-      for (const e of errors) {
+    : targets.includes('antigravity')
+  const canonicalNames = Object.keys(config.mcpServers)
+  const nextManagedPlugins = new Set<string>(
+    state.managedPlugins.filter((n) => canonicalNames.includes(n)),
+  )
+  /** Canonical names whose plugin (including `mcp_config.json` when antigravity
+   * is targeted) was written successfully this run. */
+  const syncedPluginNames = new Set<string>()
+  for (const [name, server] of Object.entries(config.mcpServers)) {
+    // B8: when `onlyPluginNames` is set, generate only the requested plugins
+    // requested (e.g. `add` writes only the plugin for the newly added server).
+    if (onlyPluginNames && !onlyPluginNames.includes(name)) {
+      continue
+    }
+
+    const result = syncPluginFiles({
+      name,
+      server,
+      scope,
+      ctx,
+      includeAntigravity,
+      dryRun,
+    })
+
+    if (result.ok) {
+      nextManagedPlugins.add(name)
+      syncedPluginNames.add(name)
+      if (!dryRun) {
+        written.push(...result.written)
+      } else {
+        for (const p of result.written) {
+          planned.push({ type: 'write', path: p })
+        }
+      }
+    } else {
+      allWarnings.push({
+        code: 'PLUGIN_WRITE_ERROR',
+        agent: undefined,
+        message: `Failed to generate plugin \`${name}\`: ${result.errors.join('; ')}`,
+      })
+    }
+  }
+
+  // Prune stale plugins: servers that left the canonical (removed by `remove`
+  // or manually) clean their managed files and leave the managed-plugins state.
+  // Manual files and non-empty directories are preserved by `removeManagedPlugin`.
+  const stalePlugins = state.managedPlugins.filter(
+    (n) => !canonicalNames.includes(n),
+  )
+  for (const name of stalePlugins) {
+    const result = removeManagedPlugin({
+      scope,
+      ctx,
+      name,
+      managedPlugins: state.managedPlugins,
+      dryRun,
+    })
+    if (!result.ok) {
+      // Cleanup failure (e.g. plugin.json became a directory -> EISDIR): keep
+      // the name in nextManagedPlugins so the next `sync` retries, instead of
+      // dropping the plugin from state and leaving the directory orphaned without
+      // reprocessing. The error is already in allWarnings and will be reported
+      // in summary.errors (and exit 1 via sync.command).
+      nextManagedPlugins.add(name)
+      allWarnings.push({
+        code: 'PLUGIN_CLEANUP_ERROR',
+        agent: undefined,
+        message: `Failed to remove plugin \`${name}\`: ${result.errors.join('; ')}`,
+      })
+    } else {
+      for (const p of result.removed) {
+        planned.push({ type: 'remove', path: p })
+      }
+    }
+  }
+
+  // 4a. Antigravity agent-state lifecycle: record `state.agents.antigravity`
+  // when antigravity is targeted (path = .agents/plugins dir, names = plugins
+  // whose sync succeeded this run). When antigravity is not targeted, its
+  // state is preserved non-destructively (ADR-0013), symmetrically with all
+  // other adapters. `mcp_config.json` files are only removed when their owning
+  // server leaves the canonical config (stale plugin cleanup above).
+  if (!skipAgentSync && targets.includes('antigravity')) {
+    const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+    const antigravityPath = join(base, AGENTS_DIR, 'plugins')
+    const existing = state.agents['antigravity']
+    const names = [...syncedPluginNames]
+    const namesChanged =
+      !existing ||
+      existing.path !== antigravityPath ||
+      existing.names.length !== names.length ||
+      names.some((n) => !existing.names.includes(n))
+    nextAgents['antigravity'] = {
+      path: antigravityPath,
+      names,
+      updatedAt: namesChanged ? now : (existing?.updatedAt ?? now),
+    }
+  }
+
+  // 4. Update sync state (persist targets + per-agent managed names + plugins).
+  // `--agents <list>` is additive: append newly requested valid targets to the
+  // persisted list (deduplicated, preserving order) instead of overwriting it
+  // (ADR-0013). Plain `sync` keeps the resolved targets (state.targets, or the
+  // auto-detected ones when state.targets was empty).
+  const nextTargets = skipAgentSync
+    ? state.targets
+    : [...state.targets, ...targets.filter((id) => !state.targets.includes(id))]
+  const nextState = {
+    ...state,
+    scope,
+    targets: nextTargets,
+    agents: nextAgents,
+    managedPlugins: [...nextManagedPlugins],
+  }
+  if (!dryRun) {
+    persistSyncState(scope, ctx, nextState)
+  }
+
+  // --dry-run preview: show planned file operations, zero disk writes.
+  if (dryRun && planned.length > 0) {
+    ui.note(formatDryRunActions(planned))
+  }
+
+  // 5. Print summary.
+  const isPluginError = (code: string): boolean =>
+    code === 'PLUGIN_WRITE_ERROR' || code === 'PLUGIN_CLEANUP_ERROR'
+  const pluginErrors = allWarnings
+    .filter((w) => isPluginError(w.code))
+    .map((w) => w.message)
+  const summaryWarnings = allWarnings
+    .filter((w) => !isPluginError(w.code))
+    .map((w) => w.message)
+
+  if (pluginErrors.length > 0) {
+    if (!quietErrors) {
+      ui.error(
+        `Partial sync completed with failures: ${pluginErrors.length} plugin(s) could not be synced.`,
+      )
+      for (const e of pluginErrors) {
         ui.error(e)
       }
       ui.note(
-        '.agents/mcp.json was kept. Re-run `agents-mcp sync` after resolving the issues above.',
+        'Re-run `agents-mcp sync` after resolving the issues above. .agents/mcp.json was kept.',
       )
-      process.exit(1)
     }
-
-    if (name in canonical && !force) {
-      const same =
-        JSON.stringify(canonical[name]) === JSON.stringify(resolved.definition)
-      if (same) {
-        // Definicao identica: nao grava nada de agente, mas garante os
-        // arquivos base do plugin (e o registro em managedPlugins) mesmo
-        // sem targets e sem sincronizacao de agentes.
-        if (!dryRun) {
-          const result = await runPluginAndAgentSync(true)
-          if (result.errors.length > 0) {
-            reportSyncFailures(result.errors)
-            return
-          }
-        }
-        ui.note(`Server \`${name}\` already present with identical definition.`)
-        return
-      }
-      ui.error(
-        `Conflicting definition for \`${name}\`:\n${diffValues(
-          canonical[name],
-          resolved.definition,
-        )}Use --force to overwrite.`,
-      )
-      process.exit(1)
-    }
-
-    // Non-interactive: fail on unmanaged plugin collision (no auto-rename,
-    // no overwrite).
-    if (
-      !interactiveAdd &&
-      isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)
-    ) {
-      ui.error(
-        `The name \`${name}\` is already in use by an unmanaged plugin at .agents/plugins/${name}/. Pass a different --name.`,
-      )
-      process.exit(1)
-    }
-
-    // Secret extraction plan.
-    const { writes, replacements, warnings } = planSecretExtraction(
-      name,
-      resolved.definition,
-      { policy: extractSecrets ? 'extract' : 'warn' },
+  } else if (skipAgentSync) {
+    // `add --no-sync`: agents were not synced, only plugins.
+    ui.note(
+      'Agent sync skipped (--no-sync): plugin files were updated in .agents/plugins/ and no agent was synced.',
     )
-    for (const w of warnings) {
-      ui.warn(w)
-    }
+  } else if (targets.length === 0 && allowEmptyTargets) {
+    // `add` without targets: completed with default plugin, no target agents.
+    ui.note(
+      'No target agents configured or detected: the default Agent Plugins plugin was generated in .agents/plugins/, but no agent was synced. To sync later, run `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).',
+    )
+  } else {
+    ui.note(
+      `Synced ${targets.length} target(s) across ${written.length} file(s)`,
+    )
+  }
+  for (const w of summaryWarnings) {
+    ui.warn(w)
+  }
 
-    // Apply secret extraction (pure, never mutates input). Only replaces when
-    // extracting; warn-only leaves the definition unchanged.
-    const definition = extractSecrets
-      ? applySecretExtraction(resolved.definition, {
-          writes,
-          replacements,
-          warnings,
-        })
-      : { ...resolved.definition }
-
-    if (!dryRun && extractSecrets && writes.length > 0) {
-      const dotenvPath =
-        scope === 'project'
-          ? join(ctx.cwd, '.env')
-          : join(ctx.homeDir, '.agents', '.env')
-      const examplePath =
-        scope === 'project'
-          ? join(ctx.cwd, '.env.example')
-          : join(ctx.homeDir, '.agents', '.env.example')
-      appendToDotenv(dotenvPath, writes)
-      syncEnvExample(
-        examplePath,
-        writes.map((w) => w.key),
-      )
-    }
-
-    canonical[name] = definition
-
-    // Planned file operations for the --dry-run preview.
-    const planned: { type: 'write' | 'remove'; path: string }[] = []
-
-    if (!dryRun) {
-      persistCanonicalConfig(scope, ctx, {
-        $schema: schemaUrl,
-        mcpServers: canonical,
-      })
-    } else {
-      planned.push({ type: 'write', path })
-    }
-
-    if (!dryRun) {
-      const nextState = {
-        ...state,
-        scope,
-        targets: state.targets,
-        agents: { ...state.agents },
-      }
-      writeState(scope, ctx, nextState)
-    } else {
-      planned.push({ type: 'write', path: statePath(scope, ctx) })
-    }
-
-    const syncResult = await runPluginAndAgentSync(noSync)
-    if (syncResult.errors.length > 0) {
-      reportSyncFailures(syncResult.errors)
-      return
-    }
-
-    // --dry-run preview: show planned file operations, zero disk writes.
-    if (dryRun && planned.length > 0) {
-      ui.note(formatDryRunActions(planned))
-    }
-
-    if (!dryRun) {
-      ui.note(`Added server \`${name}\``)
-    }
-
-    if (interactiveAdd && !dryRun) {
-      ui.outro(`Server \`${name}\` added.`)
-    }
-  },
-})
-````
-
-## File: CHANGELOG.md
-````markdown
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Added
-
-- `antigravity` agent adapter and plugin sync support: per-plugin layouts under `.agents/plugins/<name>/` (`plugin.json`, `mcp.json`, plus `mcp_config.json` when `antigravity` is targeted), with `stdio` → `{ command, args?, env? }` and `streamable-http`/`sse` → `{ serverUrl, headers? }` mapping.
-- Interactive `add` wizard (`agents-mcp add`) for server name, connection type (local command or HTTP URL), args, env vars, and headers.
-- `add` now always creates/updates the base Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected.
-- `--extract-secrets` opt-in flag on `add`: writes detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replaces them with `${VAR}` placeholders in `.agents/mcp.json`; without it, secrets are only warned about.
-- Source resolvers for `add`: direct flags (`--command`/`--http`/`--sse`/`--arg`/`--env`/`--header`), GitHub URL/`owner/repo`, npm package, MCP Registry, and remote URLs.
-- Repeatable `--arg`, `--env`, `--header` flags accumulated from `rawArgs`.
-- `import` scans existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, and generates `.agents/mcp.json`.
-
-### Changed
-
-- Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`.
-- Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0.
-- Transport discriminators are `stdio`, `streamable-http`, and `sse`; obsolete `http` transport name removed.
-
-### Removed
-
-- Project-specific JSON Schema publication and Draft-07 schema generation; the Agent Plugins MCP 1.0.0 schema is the single normative reference.
-- `disabled` and `targets` fields from the canonical server definition (per-agent targeting remains in the local sync state).
-- Obsolete `"enabled": false` from OpenCode compiled output example.
-
-### Fixed
-
-- `remove` now preserves the other servers in the canonical config when deleting one (fixes silent data loss: previously all other servers were wiped).
-- `remove --no-sync` respects the flag and does not sync agents: writes only canonical, cleans managed plugin files locally, and preserves `state.targets`/`state.agents`.
-- Managed plugin file cleanup on server removal (`plugin.json`, `mcp.json`, `mcp_config.json`, deleting the directory only if empty) and `mcp_config.json` removal when deselecting `antigravity` on `sync`.
-- Plugin cleanup failures on `sync` are reported with exit code `1`, and the plugin remains registered for retry on the next `sync`.
-
-## [0.1.1] - 2026-11-19
-
-### Added
-
-- Initial `agents-mcp` CLI implementation: single-source `.agents/mcp.json` compiler for AI coding agents (Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, Antigravity)
-- Canonical `.agents/mcp.json` format aligned with the Agent Plugins MCP 1.0.0 JSON Schema (`https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`): `mcpServers` root key, `type` discriminator, and `stdio`, `streamable-http`, and `sse` transports
-- `init` command: scaffold canonical config and select target agents
-- `import` command: consolidate existing agent MCP configs into canonical
-- `sync` command: compile canonical config into all targeted agent config files (byte-idempotent)
-- `remove` command: remove a server and clean from managed agent configs
-- `list` command: inspect configured servers, targets, and sync status
-- `add` command: install an MCP server via interactive wizard (`agents-mcp add <name>`) or direct flags (`--command`, `--arg`, `--http`, `--sse`, `--env`, `--header`, `--cwd`, `--name`)
-- Automatic Agent Plugins directory generation (`.agents/plugins/<name>/plugin.json` and `mcp.json`) on `add` and `sync`, plus `mcp_config.json` when `antigravity` is targeted
-- `doctor` command: audit schema validity, env vars, runtime binaries, semantic drift, state, hygiene
-- Non-destructive JSONC AST edits (jsonc-parser) preserving comments, unrelated keys, and manual MCP entries
-- Secret hygiene: symbolic `${VAR}` placeholders in versioned files, real values only in `.env` (mode 0600)
-- Atomic writes with temp+rename and Windows rename fallback
-- Per-agent targeting persisted in the local sync state
-
-### Changed
-
-- Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`
-- Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0
-
-### Removed
-
-- Project-specific JSON Schema publication and Draft-07 schema generation; the Agent Plugins MCP 1.0.0 schema is the single normative reference
-- `disabled` and `targets` fields from the canonical server definition (per-agent targeting remains in the local sync state)
-
-### Fixed
-
-- `agents-mcp add` now always creates/updates the standard Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected; `sync` remains responsible for agent files and, when `antigravity` is targeted, `mcp_config.json`.
-
-### Security
-
-- `.env` and `.mcp-sync-state.json` added to `.gitignore` (lazy, managed block)
-- `.env` written with mode `0600`; existing keys never overwritten
-- Secret values never reach canonical/native files, logs, errors, or `--dry-run` output
+  return {
+    scope,
+    targets,
+    written,
+    warnings: summaryWarnings,
+    errors: pluginErrors,
+  }
+}
 ````
 
 ## File: skills-lock.json
@@ -23337,81 +24191,550 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 }
 ````
 
-## File: package.json
-````json
-{
-  "name": "agents-mcp",
-  "version": "0.1.1",
-  "description": "One .agents/mcp.json to rule them all. A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across any AI agent.",
-  "keywords": [
-    "mcp",
-    "model-context-protocol",
-    "mcp-server",
-    "mcp-config",
-    "ai-agents",
-    "coding-agents",
-    "agents",
-    "claude-code",
-    "cursor",
-    "vscode",
-    "opencode",
-    "windsurf",
-    "zed",
-    "cli",
-    "config-sync",
-    "jsonc",
-    "dotenv",
-    "devtools"
-  ],
-  "homepage": "https://github.com/agents-mcp/cli#readme",
-  "bugs": {
-    "url": "https://github.com/agents-mcp/cli/issues"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/agents-mcp/cli.git"
-  },
-  "license": "MIT",
-  "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
-  "type": "module",
-  "engines": {
-    "node": ">=22"
-  },
-  "scripts": {
-    "build": "tsup",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "format": "prettier --write .",
-    "format:check": "prettier --check .",
-    "verify": "run-s typecheck format:check test build",
-    "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
-    "dist:build": "npm run verify",
-    "dist:package": "tsx scripts/dist-package.ts",
-    "dist:publish": "npm publish ./dist",
-    "dist": "run-s dist:*",
-    "cli": "node dist/index.js"
-  },
-  "dependencies": {
-    "@clack/prompts": "^1.9.0",
-    "citty": "^0.2.2",
-    "jsonc-parser": "^3.3.1",
-    "string-argv": "^0.4.0",
-    "zod": "^4.6.0"
-  },
-  "devDependencies": {
-    "@types/node": "^22.13.10",
-    "@vitest/coverage-v8": "^5.1.0",
-    "ajv": "^8.20.0",
-    "ajv-formats": "^3.0.1",
-    "npm-run-all2": "^9.0.4",
-    "prettier": "^3.10.1",
-    "tsup": "^9.0.0",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
-    "vitest": "^5.1.0"
+## File: src/commands/add.command.ts
+````typescript
+/**
+ * `add` command (§11) — direct-source variant (T9).
+ *
+ * Resolve direct flags (--command/--arg/--http/--env/--header/--cwd/--name),
+ * prompt/accept `--name`, write canonical, then `runSync` unless `--no-sync`.
+ * Idempotent: same name + same definition → exit 0, no write.
+ * Conflict: same name + different definition → exit 1 with diff; `--force`
+ * overwrites.
+ * `--env KEY=VALUE` writes to `.env` and uses `${KEY}` in canonical.
+ * `--env KEY` references only; warns when unresolved.
+ */
+
+import { defineCommand } from 'citty'
+import { join } from 'node:path'
+import {
+  createUiAndCtx,
+  configPath,
+  persistCanonicalConfig,
+  persistSyncState,
+  isDryRun,
+  isGlobalFlag,
+  isYesFlag,
+  parseAgentsFlag,
+  statePath,
+  formatDryRunActions,
+} from '$/src/commands/util'
+import { runSync } from '$/src/commands/sync'
+import { collectInteractiveAddOptions } from '$/src/commands/add-interactive'
+import { resolveDirect } from '$/src/sources/direct'
+import { resolveSource } from '$/src/sources/index'
+import type { Candidate } from '$/src/sources/types'
+import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
+import { loadState, writeState } from '$/src/core/state'
+import { DEFAULT_SCHEMA_URL, AGENT_ORDER } from '$/src/config'
+import {
+  appendToDotenv,
+  applySecretExtraction,
+  planSecretExtraction,
+  syncEnvExample,
+} from '$/src/core/env'
+import type { CanonicalServer } from '$/src/core/schema'
+import type { ConfigScope, RuntimeContext } from '$/src/core/context'
+import { isUnmanagedPluginCollision } from '$/src/core/plugins'
+
+function diffValues(a: unknown, b: unknown): string {
+  const aStr = JSON.stringify(a, null, 2)
+  const bStr = JSON.stringify(b, null, 2)
+  if (aStr === bStr) {
+    return ''
   }
+  return `- ${aStr}\n+ ${bStr}`
 }
+
+/**
+ * Coleta ocorrências de uma flag repetível (`--arg`, `--env`, `--header`)
+ * diretamente de `rawArgs`.
+ *
+ * O `citty` (`parseArgs`) não acumula `type: 'string'` repetidas em um
+ * array — sobrescreve com a última ocorrência (bloqueador [R53]). Esta
+ * leitura direta preserva todas as ocorrências.
+ *
+ * Suporta:
+ * - `--flag=valor` (o valor é tudo depois do primeiro `=`)
+ * - `--flag valor` (o próximo token é o valor, mesmo começando com `-`,
+ *   ex. `--arg -y`; um próximo token que começa com `--` não é consumido)
+ */
+function collectRepeatableFlags(rawArgs: string[], flag: string): string[] {
+  const values: string[] = []
+  const longFlag = `--${flag}`
+  for (let i = 0; i < rawArgs.length; i++) {
+    const token = rawArgs[i]
+    if (token === undefined) continue
+    if (token.startsWith(longFlag + '=')) {
+      values.push(token.slice(longFlag.length + 1))
+    } else if (token === longFlag) {
+      const next = rawArgs[i + 1]
+      if (next !== undefined && !next.startsWith('--')) {
+        values.push(next)
+        i++ // consome o valor do próximo token
+      }
+    }
+  }
+  return values
+}
+
+export const addCommand = defineCommand({
+  meta: {
+    name: 'add',
+    description: 'Install an MCP server from direct flags',
+  },
+  args: {
+    command: {
+      type: 'string',
+      description: 'Executable command for command-based MCP server',
+    },
+    arg: { type: 'string', description: 'Argument token (repeatable)' },
+    http: { type: 'string' },
+    sse: { type: 'string' },
+    env: { type: 'string', description: 'KEY=VALUE (repeatable)' },
+    header: { type: 'string', description: '"Name: Value" (repeatable)' },
+    cwd: { type: 'string' },
+    name: { type: 'string', description: 'Server name override' },
+    'no-sync': {
+      type: 'boolean',
+      description: 'Skip agent sync; Agent Plugins files are still generated',
+    },
+    force: { type: 'boolean', alias: 'f' },
+    'extract-secrets': {
+      type: 'boolean',
+      description: 'Write detected secrets to .env',
+    },
+  },
+  run: async ({ args, rawArgs }) => {
+    const { ctx, ui } = createUiAndCtx({ yes: isYesFlag(args) })
+    const scope = (isGlobalFlag(args) ? 'global' : 'project') as ConfigScope
+    const path = configPath(scope, ctx)
+    const dryRun = isDryRun(args)
+    // `citty`/`mri` converte `--no-sync` em `args.sync === false`; a checagem
+    // direta em `rawArgs` cobre subcomandos que não declaram `sync`.
+    const noSync =
+      args['no-sync'] === true ||
+      (args as Record<string, unknown>).sync === false ||
+      rawArgs.includes('--no-sync')
+    const agentsFlag = parseAgentsFlag(args as Record<string, unknown>, rawArgs)
+    const force = args.force === true
+    const extractSecrets = args['extract-secrets'] === true
+
+    // NOTE (R53): `citty`'s `parseArgs` does not accumulate repeated
+    // `type: 'string'` flags into an array — it overwrites with the last
+    // occurrence. Collect `--arg`, `--env` and `--header` directly from
+    // `rawArgs` so every occurrence is preserved.
+    const options = {
+      command: args.command as string | undefined,
+      arg: collectRepeatableFlags(rawArgs, 'arg'),
+      http: args.http as string | undefined,
+      sse: args.sse as string | undefined,
+      env: collectRepeatableFlags(rawArgs, 'env'),
+      header: collectRepeatableFlags(rawArgs, 'header'),
+      cwd: args.cwd as string | undefined,
+      name: args.name as string | undefined,
+    }
+
+    // Dispatch between flag-driven mode and the interactive wizard. A direct
+    // source is any of --command/--http/--sse/--arg; without one, a positional
+    // `<name>` alone is not enough to build a server.
+    const positionalArgs = (args._ as string[] | undefined) ?? []
+    const hasDirectSource =
+      Boolean(options.command || options.http || options.sse) ||
+      options.arg.length > 0
+    const isInteractive = ctx.isTTY && ctx.env.CI !== 'true' && !isYesFlag(args)
+
+    /**
+     * Determine if a positional argument looks like an external source reference
+     * (GitHub URL, owner/repo, @scope/pkg, or npm package) rather than a
+     * simple server name for the interactive wizard.
+     */
+    function isExternalSourceRef(arg: string): boolean {
+      // Remote URL
+      if (/^https?:\/\//.test(arg)) return true
+      // GitHub owner/repo[#ref] or owner/repo format
+      if (/^[\w-]+\/[\w.-]+(#.*)?$/.test(arg)) return true
+      // npm scoped package @scope/pkg or bare package name with version @pkg@version
+      if (/^@[\w-]+\/[\w.-]+(@.*)?$/.test(arg)) return true
+      // Bare npm package (contains @ for version or is a known pattern)
+      // We treat any arg with @ not at start as potentially a versioned package
+      if (/^[\w-]+@[\w.-]+$/.test(arg)) return true
+      return false
+    }
+
+    let validated: ReturnType<typeof loadValidatedConfig> | null = null
+    try {
+      validated = loadValidatedConfig(scope, ctx)
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        ui.error(
+          `Invalid config at ${err.path}: ${err.issues
+            .map((i) => `${i.path || 'root'} — ${i.message}`)
+            .join(
+              '; ',
+            )}. Run \`agents-mcp init --force\` or ensure \`mcpServers\` is defined in .agents/mcp.json.`,
+        )
+        process.exit(1)
+        return
+      }
+      throw err
+    }
+    let canonical: Record<string, CanonicalServer> = {}
+    let schemaUrl = DEFAULT_SCHEMA_URL
+    if (validated) {
+      schemaUrl = validated.config.$schema ?? DEFAULT_SCHEMA_URL
+      canonical = {
+        ...(validated.config.mcpServers as Record<string, CanonicalServer>),
+      }
+    }
+
+    // Carrega o estado de sincronizacao antecipadamente para verificacao de
+    // colisao de plugin (gera ou nao o fluxo interativo).
+    const stateResult = loadState(scope, ctx)
+    const state = stateResult.state
+
+    let resolved: ReturnType<typeof resolveDirect>
+    let name: string
+    let interactiveAdd = false
+
+    // Determine source resolution mode:
+    // 1. Direct flags (--command/--http/--sse/--arg) -> resolveDirect
+    // 2. Positional <source> arg that looks like external ref -> resolveSource
+    // 3. No source at all -> interactive wizard (TTY) or usage error
+    const positionalSource = positionalArgs[0]?.trim()
+    const positionalIsSource =
+      positionalSource && isExternalSourceRef(positionalSource)
+
+    if (hasDirectSource) {
+      // Explicit flags take precedence
+      resolved = resolveDirect(options)
+      name = options.name ?? positionalArgs[0] ?? resolved.suggestedName
+    } else if (positionalIsSource) {
+      // Positional <source> argument (GitHub, npm, Registry, URL)
+      resolved = await resolveSource(
+        {
+          source: positionalSource,
+          name: options.name,
+          env: options.env,
+          header: options.header,
+          cwd: options.cwd,
+        },
+        {
+          fetch: globalThis.fetch,
+          yes: isYesFlag(args),
+          selectCandidate:
+            isInteractive && !isYesFlag(args)
+              ? async (candidates: Candidate[]) => {
+                  if (candidates.length === 0) return null
+                  // Exact name match wins automatically
+                  const exact = candidates.find(
+                    (c: Candidate) =>
+                      c.name.toLowerCase() === positionalSource.toLowerCase(),
+                  )
+                  if (exact) return exact
+                  // Multiple candidates in TTY -> prompt user
+                  const choice = await ui.select({
+                    message: `Multiple candidates found for "${positionalSource}". Choose one:`,
+                    options: candidates.map((c: Candidate) => ({
+                      label: c.name,
+                      value: c,
+                      hint: c.ref,
+                    })),
+                  })
+                  return choice ?? null
+                }
+              : undefined,
+        },
+      )
+      name = options.name ?? resolved.suggestedName
+    } else {
+      // No source specified
+      if (!isInteractive) {
+        ui.error(
+          'Usage: agents-mcp add <name> --command <cmd> [--arg <token>...] | --http <url>',
+        )
+        process.exit(2)
+        return
+      }
+      const result = await collectInteractiveAddOptions({
+        ui,
+        initialName: options.name ?? positionalArgs[0],
+        checkConflict: (candidate) => {
+          if (candidate in canonical && !force) {
+            return 'canonical'
+          }
+          // Unmanaged plugin collision: re-prompt only for names NOT declared
+          // in .agents/mcp.json — declared names can be adopted by sync.
+          if (
+            !(candidate in canonical) &&
+            isUnmanagedPluginCollision(
+              scope,
+              ctx,
+              candidate,
+              state.managedPlugins,
+            )
+          ) {
+            return 'unmanaged'
+          }
+          return false
+        },
+      })
+      interactiveAdd = true
+      name = result.name
+      resolved = resolveDirect(result.options)
+    }
+
+    /**
+     * Fase de plugins (+ agentes, quando aplicável) — única fonte via `runSync`.
+     * `skipAgentSync: noSync` (`--no-sync` gera só plugin, sem mexer em agentes);
+     * `allowEmptyTargets: true` permite `add` sem targets resolvidos.
+     */
+    const runPluginAndAgentSync = (skipAgentSync: boolean) =>
+      runSync({
+        scope,
+        ctx,
+        flag: agentsFlag,
+        dryRun,
+        yes: isYesFlag(args),
+        quietErrors: true,
+        skipAgentSync,
+        allowEmptyTargets: true,
+        onlyPluginNames: [name],
+      })
+
+    /** Reports partial plugin failure and exits with code 1. */
+    const reportSyncFailures = (errors: string[]): void => {
+      ui.error(
+        `Server \`${name}\` added to .agents/mcp.json, but failed to generate ${errors.length} plugin(s).`,
+      )
+      for (const e of errors) {
+        ui.error(e)
+      }
+      ui.note(
+        '.agents/mcp.json was kept. Re-run `agents-mcp sync` after resolving the issues above.',
+      )
+      process.exit(1)
+    }
+
+    if (name in canonical && !force) {
+      const same =
+        JSON.stringify(canonical[name]) === JSON.stringify(resolved.definition)
+      if (same) {
+        // Definicao identica: nao grava nada de agente, mas garante os
+        // arquivos base do plugin (e o registro em managedPlugins) mesmo
+        // sem targets e sem sincronizacao de agentes.
+        if (!dryRun) {
+          const result = await runPluginAndAgentSync(true)
+          if (result.errors.length > 0) {
+            reportSyncFailures(result.errors)
+            return
+          }
+        }
+        ui.note(`Server \`${name}\` already present with identical definition.`)
+        return
+      }
+      ui.error(
+        `Conflicting definition for \`${name}\`:\n${diffValues(
+          canonical[name],
+          resolved.definition,
+        )}Use --force to overwrite.`,
+      )
+      process.exit(1)
+    }
+
+    // Non-interactive: fail on unmanaged plugin collision (no auto-rename,
+    // no overwrite), but only when the name is NOT declared in
+    // .agents/mcp.json — declared names can be adopted by sync.
+    if (
+      !interactiveAdd &&
+      !(name in canonical) &&
+      isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)
+    ) {
+      ui.error(
+        `The name \`${name}\` is already in use by an unmanaged plugin at .agents/plugins/${name}/. Pass a different --name.`,
+      )
+      process.exit(1)
+    }
+
+    // Secret extraction plan.
+    const { writes, replacements, warnings } = planSecretExtraction(
+      name,
+      resolved.definition,
+      { policy: extractSecrets ? 'extract' : 'warn' },
+    )
+    for (const w of warnings) {
+      ui.warn(w)
+    }
+
+    // Apply secret extraction (pure, never mutates input). Only replaces when
+    // extracting; warn-only leaves the definition unchanged.
+    const definition = extractSecrets
+      ? applySecretExtraction(resolved.definition, {
+          writes,
+          replacements,
+          warnings,
+        })
+      : { ...resolved.definition }
+
+    if (!dryRun && extractSecrets && writes.length > 0) {
+      const dotenvPath =
+        scope === 'project'
+          ? join(ctx.cwd, '.env')
+          : join(ctx.homeDir, '.agents', '.env')
+      const examplePath =
+        scope === 'project'
+          ? join(ctx.cwd, '.env.example')
+          : join(ctx.homeDir, '.agents', '.env.example')
+      appendToDotenv(dotenvPath, writes)
+      syncEnvExample(
+        examplePath,
+        writes.map((w) => w.key),
+      )
+    }
+
+    canonical[name] = definition
+
+    // Planned file operations for the --dry-run preview.
+    const planned: { type: 'write' | 'remove'; path: string }[] = []
+
+    if (!dryRun) {
+      persistCanonicalConfig(scope, ctx, {
+        $schema: schemaUrl,
+        mcpServers: canonical,
+      })
+    } else {
+      planned.push({ type: 'write', path })
+    }
+
+    if (!dryRun) {
+      const nextState = {
+        ...state,
+        scope,
+        targets: state.targets,
+        agents: { ...state.agents },
+      }
+      writeState(scope, ctx, nextState)
+    } else {
+      planned.push({ type: 'write', path: statePath(scope, ctx) })
+    }
+
+    const syncResult = await runPluginAndAgentSync(noSync)
+    if (syncResult.errors.length > 0) {
+      reportSyncFailures(syncResult.errors)
+      return
+    }
+
+    // --dry-run preview: show planned file operations, zero disk writes.
+    if (dryRun && planned.length > 0) {
+      ui.note(formatDryRunActions(planned))
+    }
+
+    if (!dryRun) {
+      ui.note(`Added server \`${name}\``)
+    }
+
+    if (interactiveAdd && !dryRun) {
+      ui.outro(`Server \`${name}\` added.`)
+    }
+  },
+})
+````
+
+## File: CHANGELOG.md
+````markdown
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Changed
+
+- Sync state renamed to `.agents/mcp-lock.json` (project) and `~/.agents/mcp-lock.json` (global); `STATE_VERSION` stays `1` with a legacy read fallback for `.mcp-sync-state.json`.
+- Lock file is no longer auto-added to `.gitignore`; teams choose whether to version it. `.env` remains the only auto-protected entry.
+- `sync` is authoritative from `.agents/mcp.json`: it adopts declared plugin dirs (overwriting `plugin.json`/`mcp.json`/`mcp_config.json` while preserving extra files), overwrites canonical native entries, and preserves manual content.
+- Zero-target `sync` succeeds: it materializes plugins, prints guidance, and exits `0`.
+
+### Fixed
+
+- Fresh-clone `sync` no longer fails with "pre-exists and is not managed by the CLI"; `add` still blocks undeclared unmanaged plugin names.
+
+## [0.2.0] - 2026-11-25
+
+### Added
+
+- `antigravity` agent adapter and plugin sync support: per-plugin layouts under `.agents/plugins/<name>/` (`plugin.json`, `mcp.json`, plus `mcp_config.json` when `antigravity` is targeted), with `stdio` → `{ command, args?, env? }` and `streamable-http`/`sse` → `{ serverUrl, headers? }` mapping.
+- Interactive `add` wizard (`agents-mcp add`) for server name, connection type (local command or HTTP URL), args, env vars, and headers.
+- `add` now always creates/updates the base Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected.
+- `--extract-secrets` opt-in flag on `add`: writes detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replaces them with `${VAR}` placeholders in `.agents/mcp.json`; without it, secrets are only warned about.
+- Source resolvers for `add`: direct flags (`--command`/`--http`/`--sse`/`--arg`/`--env`/`--header`), GitHub URL/`owner/repo`, npm package, MCP Registry, and remote URLs.
+- Repeatable `--arg`, `--env`, `--header` flags accumulated from `rawArgs`.
+- `import` scans existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, and generates `.agents/mcp.json`.
+
+### Changed
+
+- Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`.
+- Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0.
+- Transport discriminators are `stdio`, `streamable-http`, and `sse`; obsolete `http` transport name removed.
+
+### Removed
+
+- Project-specific JSON Schema publication and Draft-07 schema generation; the Agent Plugins MCP 1.0.0 schema is the single normative reference.
+- `disabled` and `targets` fields from the canonical server definition (per-agent targeting remains in the local sync state).
+- Obsolete `"enabled": false` from OpenCode compiled output example.
+
+### Fixed
+
+- `remove` now preserves the other servers in the canonical config when deleting one (fixes silent data loss: previously all other servers were wiped).
+- `remove --no-sync` respects the flag and does not sync agents: writes only canonical, cleans managed plugin files locally, and preserves `state.targets`/`state.agents`.
+- Managed plugin file cleanup when a server leaves the canonical config (`plugin.json`, `mcp.json`, `mcp_config.json`, deleting the directory only if empty); deselecting an agent no longer deletes its files.
+- `sync` is non-destructive for every agent: omitting `antigravity` from `--agents` no longer removes `.agents/plugins/<name>/mcp_config.json` or deletes `state.agents.antigravity` (ADR-0013).
+- `sync --agents <list>` now appends newly requested targets to `state.targets` (deduplicated, preserving order) instead of overwriting it, so a later plain `sync` still targets previously configured agents (ADR-0013).
+- Global flags placed before the subcommand (`-g`/`--global`, `-y`/`--yes`, `--dry-run`, `--agents`) are no longer silently dropped; short aliases are canonicalized for every subcommand.
+- `sync` rejects unexpected positional arguments with exit code `2` and an actionable message instead of silently falling back to stale targets.
+- Plugin cleanup failures on `sync` are reported with exit code `1`, and the plugin remains registered for retry on the next `sync`.
+
+## [0.1.1] - 2026-11-19
+
+### Added
+
+- Initial `agents-mcp` CLI implementation: single-source `.agents/mcp.json` compiler for AI coding agents (Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, Antigravity)
+- Canonical `.agents/mcp.json` format aligned with the Agent Plugins MCP 1.0.0 JSON Schema (`https://agent-plugins.org/schemas/1.0.0/mcp.schema.json`): `mcpServers` root key, `type` discriminator, and `stdio`, `streamable-http`, and `sse` transports
+- `init` command: scaffold canonical config and select target agents
+- `import` command: consolidate existing agent MCP configs into canonical
+- `sync` command: compile canonical config into all targeted agent config files (byte-idempotent)
+- `remove` command: remove a server and clean from managed agent configs
+- `list` command: inspect configured servers, targets, and sync status
+- `add` command: install an MCP server via interactive wizard (`agents-mcp add <name>`) or direct flags (`--command`, `--arg`, `--http`, `--sse`, `--env`, `--header`, `--cwd`, `--name`)
+- Automatic Agent Plugins directory generation (`.agents/plugins/<name>/plugin.json` and `mcp.json`) on `add` and `sync`, plus `mcp_config.json` when `antigravity` is targeted
+- `doctor` command: audit schema validity, env vars, runtime binaries, semantic drift, state, hygiene
+- Non-destructive JSONC AST edits (jsonc-parser) preserving comments, unrelated keys, and manual MCP entries
+- Secret hygiene: symbolic `${VAR}` placeholders in versioned files, real values only in `.env` (mode 0600)
+- Atomic writes with temp+rename and Windows rename fallback
+- Per-agent targeting persisted in the local sync state
+
+### Changed
+
+- Public CLI terminology uses `command` for local MCP servers instead of the transport-level term `stdio`; `list` reports `command`, `http`, and `sse`
+- Canonical configuration, adapters, and generated native configs use `mcpServers` and `type` per Agent Plugins MCP 1.0.0
+
+### Removed
+
+- Project-specific JSON Schema publication and Draft-07 schema generation; the Agent Plugins MCP 1.0.0 schema is the single normative reference
+- `disabled` and `targets` fields from the canonical server definition (per-agent targeting remains in the local sync state)
+
+### Fixed
+
+- `agents-mcp add` now always creates/updates the standard Agent Plugins files (`.agents/plugins/<name>/plugin.json` and `mcp.json`) even with `--no-sync` or when no target agent is configured/detected; `sync` remains responsible for agent files and, when `antigravity` is targeted, `mcp_config.json`.
+
+### Security
+
+- `.env` and `.mcp-sync-state.json` added to `.gitignore` (lazy, managed block)
+- `.env` written with mode `0600`; existing keys never overwritten
+- Secret values never reach canonical/native files, logs, errors, or `--dry-run` output
 ````
 
 ## File: README.md
@@ -23422,7 +24745,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across Claude Code, Cursor, VS Code, OpenCode, Windsurf, Zed, and Antigravity.
 
-[![npm version](https://img.shields.io/npm/v/agents-mcp.svg)](https://www.npmjs.com/package/agents-mcp)
+[![npm version](https://img.shields.io/npm/v/@agents-config/mcp.svg)](https://www.npmjs.com/package/@agents-config/mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Spec: v0.1.0](https://img.shields.io/badge/Spec-v0.1.0-emerald.svg)](./spec/SPEC.md)
 
@@ -23458,7 +24781,7 @@ Because the `.agents/` namespace is already the de facto industry standard for a
                     │   .agents/mcp.json   │  ◄── Single Source of Truth (Git)
                     └──────────┬───────────┘
                                │
-		              npx agents-mcp sync
+		              npx @agents-config/mcp sync
                                │
       ┌──────────────┬─────────┴─────────┬──────────────┐
       ▼              ▼                   ▼              ▼
@@ -23477,7 +24800,7 @@ them, and it never adds them to `.gitignore`.
 Migrate and unify everything in one command:
 
 ```bash
-npx agents-mcp import
+npx @agents-config/mcp import
 ```
 
 This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.json`, `.vscode/mcp.json`, `opencode.json`, `.zed/settings.json`), deduplicates servers, extracts hardcoded secrets into `.env` + `.env.example`, generates `.agents/mcp.json`, and keeps your active agents synced. Your existing agent files are updated in place, never deleted.
@@ -23485,9 +24808,9 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
 ### Starting from scratch?
 
 1. Initialize `.agents/mcp.json` and select your agents:
-   `npx agents-mcp init`
+   `npx @agents-config/mcp init`
 2. Add an MCP server from GitHub, npm, MCP Registry, or direct flags
-   `npx agents-mcp add modelcontextprotocol/server-github`
+   `npx @agents-config/mcp add modelcontextprotocol/server-github`
 
    - **External sources:** pass a GitHub URL, `owner/repo`, npm package, or MCP Registry entry as the positional `<source>` argument (`agents-mcp add <source>`).
    - **Direct flags:** use `--command`, `--arg` (repeatable), `--http`, `--sse`, `--env` (`KEY=VALUE`, repeatable), `--header` (`Name: Value`, repeatable), `--cwd`, `--name`.
@@ -23495,7 +24818,7 @@ This scans your workspace for existing agent configs (`.mcp.json`, `.cursor/mcp.
    - **`--extract-secrets` (opt-in):** pass `--extract-secrets` to write detected literal secrets (tokens, keys, high-entropy values) to `.env` + `.env.example` and replace them with `${VAR}` placeholders in `.agents/mcp.json`. Without it, secrets are only warned about, not extracted. Real secret values never reach canonical/native files, logs, errors, or `--dry-run` output.
 
 3. Sync changes across all targeted agents
-   `npx agents-mcp sync`
+   `npx @agents-config/mcp sync`
 
 **Requirements:** Node.js 22 or newer.
 
@@ -23571,16 +24894,18 @@ Remote servers use **Streamable HTTP** (`type: "streamable-http"`) or the legacy
 - **`plugin.json` + `mcp.json`**: generated for **any** server added or synced, regardless of target agents. `agents-mcp add` **always** creates/updates these base plugin files, including with `--no-sync` and when no agent is configured or detected in the project.
 - **`mcp_config.json`**: generated only when `antigravity` is among the targets (`--agents antigravity`, `init`, or `sync`). `stdio` servers map to `{ command, args?, env? }`; `streamable-http` and `sse` servers map to `{ serverUrl, headers? }` (Antigravity's native format).
 - When `agents-mcp add` does not resolve any target agent, the CLI completes the index and base plugin and informs that no agent was synced, directing to `agents-mcp sync --agents <list>` (e.g. `--agents cursor,vscode`).
-- `agents-mcp sync` without targets remains an error (`No resolvable target agents`, exit code `1`); pass `--agents <list>` to sync.
+- `agents-mcp sync` without targets succeeds: it materializes plugins, prints guidance (`run agents-mcp sync --agents <list>`), and exits `0`.
 - `--no-sync` on `add` suppresses **only** agent sync: plugin files continue to be generated in `.agents/plugins/` and the target state (`state.targets`) and already-registered agents are preserved.
 
 ### Ownership and collision
 
-The CLI tracks which plugins it manages in the sync state (`.agents/.mcp-sync-state.json`, field `managedPlugins`). If a directory `.agents/plugins/<name>/` already exists on disk **and** the name is **not** registered as managed:
+The CLI tracks which plugins it manages in the lock file (`.agents/mcp-lock.json`, field `managedPlugins`; global scope: `~/.agents/mcp-lock.json`). The lock is **not** auto-added to `.gitignore`; teams choose whether to version it. `.env` remains auto-protected.
 
-- **Interactive mode (`add`)**: warns the user and requests a different name (no auto-rename, no overwrite).
-- **Non-interactive mode (`add`)**: fails with a clear error, directing the user to pass a different `--name` (exit code `1`).
-- **`sync`**: skips overwriting the unmanaged directory, logs a warning per plugin, and includes it in the partial failure report.
+The lock is a record of what the CLI generated — not a gate on what `.agents/mcp.json` declares. `.agents/mcp.json` remains the canonical source of truth.
+
+- **`sync`**: for every server declared in `.agents/mcp.json`, the CLI writes/overwrites `.agents/plugins/<name>/plugin.json` and `mcp.json` (and `mcp_config.json` when `antigravity` is targeted), regardless of whether the directory pre-exists or whether the name is in `managedPlugins`. Extra files in the plugin directory are preserved. Declared names are adopted into `managedPlugins`.
+- **`add`**: if `.agents/plugins/<name>/` already exists **and** `<name>` is **not** declared in `.agents/mcp.json`, `add` blocks (non-interactive, exit `1`) or re-prompts (interactive). Declared names are adopted by `add`/`sync` instead.
+- **Unmanaged directories** whose name is not declared in `.agents/mcp.json` remain untouched by `sync` (not written, not deleted, not reported as a collision).
 
 ### Partial failure
 
@@ -23589,7 +24914,7 @@ If `.agents/mcp.json` (and/or agent native files) is written successfully, but c
 ### Removal and plugin cleanup
 
 - `remove <name>` removes **only** `plugin.json`, `mcp.json`, and `mcp_config.json` from the managed plugin in `.agents/plugins/<name>/`. The directory is deleted only if empty after cleanup; manual files (e.g. `sentinel.txt`) and subdirectories are preserved.
-- Directories in `.agents/plugins/<name>/` whose name is not registered in `managedPlugins` (sync state) are never modified or deleted by `remove` or `sync`.
+- Directories in `.agents/plugins/<name>/` whose name is **not** declared in `.agents/mcp.json` are never modified or deleted by `remove` or `sync`.
 - `sync` without `antigravity` among the targets removes `mcp_config.json` from managed plugins, keeping `plugin.json` and `mcp.json` intact.
 - `remove --no-sync` removes the server from the canonical config and cleans the managed plugin files locally, without syncing agent configs nor changing `state.targets`/`state.agents`.
 - `--dry-run` on `remove` and `sync` writes or deletes nothing: canonical, plugins, state, and agent native configs remain untouched.
@@ -23644,4 +24969,82 @@ Contributions, new agent adapters, and spec feedback are welcome. Open an issue 
 
 - **CLI Source Code:** MIT License
 - **Specification (`spec/`):** CC0 1.0 Universal (Public Domain)
+````
+
+## File: package.json
+````json
+{
+  "name": "@agents-config/mcp",
+  "version": "0.2.0",
+  "description": "One .agents/mcp.json to rule them all. A tool-agnostic specification and CLI compiler for managing Model Context Protocol (MCP) servers across any AI agent.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "mcp-config",
+    "ai-agents",
+    "coding-agents",
+    "agents",
+    "claude-code",
+    "cursor",
+    "vscode",
+    "opencode",
+    "windsurf",
+    "zed",
+    "cli",
+    "config-sync",
+    "jsonc",
+    "dotenv",
+    "devtools"
+  ],
+  "homepage": "https://github.com/agents-config/mcp#readme",
+  "bugs": {
+    "url": "https://github.com/agents-config/mcp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agents-config/mcp.git"
+  },
+  "license": "MIT",
+  "author": "Alex Bruno Cáceres <email@alexbruno.dev>",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify": "run-s typecheck format:check test build",
+    "postversion": "git push --follow-tags",
+    "prepublishOnly": "node -e \"console.error('❌ Error: Do not publish from the root! Use: npm run dist'); process.exit(1)\"",
+    "dist:build": "npm run verify",
+    "dist:package": "tsx scripts/dist-package.ts",
+    "dist:publish": "npm publish ./dist --access public",
+    "dist": "run-s dist:*",
+    "cli": "node dist/index.js"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.9.0",
+    "citty": "^0.2.2",
+    "jsonc-parser": "^3.3.1",
+    "string-argv": "^0.4.0",
+    "zod": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@vitest/coverage-v8": "^5.1.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "npm-run-all2": "^9.0.4",
+    "prettier": "^3.10.1",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
 ````

@@ -52,8 +52,8 @@ function seedCanonicalAndCollision(
   return { sentinelPath, pluginDir }
 }
 
-describe('commands sync (B3/T5: unmanaged plugin collision)', () => {
-  it('reporta PLUGIN_UNMANAGED como erro, sem resumo de sucesso', async () => {
+describe('commands sync (B3/T5: authoritative plugin adoption)', () => {
+  it('fresh clone: pre-existing plugin dir (sentinel) is adopted, sem lock, sem erro de plugin', async () => {
     const { ctx, cleanup } = createSandbox()
     const ui = setupUi(ctx)
     try {
@@ -67,18 +67,134 @@ describe('commands sync (B3/T5: unmanaged plugin collision)', () => {
         yes: true,
       })
 
-      expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('not managed by the CLI')
-      expect(summary.warnings).toEqual([])
+      // Nenhum erro de plugin: o nome e declarado no canônico, entao e adotado.
+      expect(summary.errors).toEqual([])
       expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      // Os arquivos gerenciados sao sobrescritos (adocao autoritativa).
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8')).mcpServers
+          .taken,
+      ).toBeDefined()
+      // O lock e criado no disco e registra o plugin como gerenciado.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
 
-      expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Partial sync completed with failures'),
-      )
       const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((note) => note.includes('Synced'))).toBe(false)
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('com antigravity direcionado, o mesmo diretorio pre-existente tambem recebe mcp_config.json sobrescrito', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      const { sentinelPath, pluginDir } = seedCanonicalAndCollision(ctx)
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor', 'antigravity'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      // mcp_config.json so e gravado quando antigravity esta entre os alvos.
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp_config.json'), 'utf8'))
+          .mcpServers.taken,
+      ).toBeDefined()
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('diretorio de plugin pre-existente cujo nome NAO e declarado no canônico nao e modificado, nao deletado e nao gera erro', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      // Apenas um servidor declarado no canônico.
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          web: { type: 'streamable-http', url: 'https://example.com/mcp' },
+        },
+      })
+      // Diretorio pre-existente com um nome que NAO esta no canônico.
+      const pluginDir = join(ctx.cwd, '.agents/plugins/undeclared')
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinelPath = join(pluginDir, 'sentinel.txt')
+      writeFileSync(sentinelPath, 'UNTOUCHED')
+      writeFileSync(join(pluginDir, 'plugin.json'), '{"name":"undeclared"}')
+      writeFileSync(join(pluginDir, 'mcp.json'), '{}')
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('UNTOUCHED')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('undeclared')
+      expect(existsSync(pluginDir)).toBe(true)
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web'))).toBe(true)
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).not.toContain('undeclared')
+      expect(state.managedPlugins).toContain('web')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('dry-run planeja as gravacoes de plugin mas nao escreve nenhum arquivo, lock ou .gitignore', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',
+        mcpServers: {
+          web: { type: 'streamable-http', url: 'https://example.com/mcp' },
+        },
+      })
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['cursor'],
+        dryRun: true,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+      // Nenhum arquivo de plugin gravado no disco.
+      expect(existsSync(join(ctx.cwd, '.agents/plugins/web'))).toBe(false)
+      // Nenhum lock persistido.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(false)
+      // Nenhum .gitignore criado/tocado.
+      expect(existsSync(join(ctx.cwd, '.gitignore'))).toBe(false)
+
+      const notes = ui.note.mock.calls.map((call) => String(call[0]))
+      expect(notes.some((n) => n.includes('.agents/plugins/'))).toBe(true)
     } finally {
       cleanup()
     }
@@ -115,51 +231,6 @@ describe('commands sync (B3/T5: unmanaged plugin collision)', () => {
       process.chdir(originalCwd)
       process.argv = originalArgv
       localExit.mockRestore()
-      cleanup()
-    }
-  })
-
-  it('faz o comando sync sair com código 1 na colisão não gerenciada', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const localExit = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => {}) as NodeJS.Process['exit'])
-    const originalCwd = process.cwd()
-    const originalArgv = process.argv
-    try {
-      seedCanonicalAndCollision(ctx)
-      process.chdir(ctx.cwd)
-      process.argv = ['node', 'index.js', 'sync', '--agents', 'cursor']
-
-      await main()
-
-      expect(localExit).toHaveBeenCalledWith(1)
-    } finally {
-      process.chdir(originalCwd)
-      process.argv = originalArgv
-      localExit.mockRestore()
-      cleanup()
-    }
-  })
-
-  it('quietErrors suprime o bloco de erro de plugin no runSync', async () => {
-    const { ctx, cleanup } = createSandbox()
-    const ui = setupUi(ctx)
-    try {
-      seedCanonicalAndCollision(ctx)
-
-      const summary = await runSync({
-        scope: 'project',
-        ctx,
-        flag: ['cursor'],
-        dryRun: false,
-        yes: true,
-        quietErrors: true,
-      })
-
-      expect(summary.errors).toHaveLength(1)
-      expect(ui.error).not.toHaveBeenCalled()
-    } finally {
       cleanup()
     }
   })
@@ -333,7 +404,7 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
     }
   })
 
-  it('allowEmptyTargets com colisao nao gerenciada registra erro sem sobrescrever o diretorio', async () => {
+  it('allowEmptyTargets com nome declarado no canônico: diretorio pre-existente e adotado (sem erro de colisao), sentinel preservado', async () => {
     const { ctx, cleanup } = createSandbox()
     const ui = setupUi(ctx)
     try {
@@ -358,17 +429,22 @@ describe('commands sync (B5: skipAgentSync / allowEmptyTargets)', () => {
       })
 
       expect(exitSpy).not.toHaveBeenCalled()
-      expect(summary.errors).toHaveLength(1)
-      expect(summary.errors[0]).toContain('not managed by the CLI')
+      // Nome declarado: adotado autoritativamente, sem erro de colisao.
+      expect(summary.errors).toEqual([])
       expect(readFileSync(sentinelPath, 'utf8')).toBe('KEEP')
-      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(false)
-      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(false)
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('taken')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8')).mcpServers
+          .taken,
+      ).toBeDefined()
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('taken')
 
       const notes = ui.note.mock.calls.map((call) => String(call[0]))
-      expect(notes.some((n) => n.startsWith('Synced'))).toBe(false)
-      expect(ui.error).toHaveBeenCalledWith(
-        expect.stringContaining('Partial sync completed with failures'),
-      )
+      expect(notes.some((n) => n.startsWith('Synced'))).toBe(true)
     } finally {
       cleanup()
     }
@@ -804,6 +880,119 @@ describe('commands sync (B6/T2: poda de plugins obsoletos e mcp_config.json)', (
       process.chdir(originalCwd)
       process.argv = originalArgv
       localExit.mockRestore()
+      cleanup()
+    }
+  })
+})
+
+describe('commands sync (B6/T2: fresh-clone native-config overwrite preservando manual)', () => {
+  const SCHEMA_URL = 'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json'
+
+  it('claude-code: sem lock, sobrescride entradas canonicas e preserva top-level nao gerenciado + entrada manual', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: SCHEMA_URL,
+        mcpServers: {
+          web: { type: 'stdio', command: 'npx', args: ['run', 'web'] },
+        },
+      })
+
+      // Native arquivo ja existe (fresh clone: lock ausente) com uma
+      // configuracao top-level nao relacionada e uma entrada manual nao declarada.
+      const nativePath = join(ctx.cwd, '.mcp.json')
+      writeFileSync(
+        nativePath,
+        JSON.stringify(
+          {
+            unrelated: 'preserve-me',
+            mcpServers: {
+              'manual-server': { type: 'stdio', command: 'manual-cmd' },
+            },
+          },
+          null,
+          2,
+        ),
+      )
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+
+      const content = JSON.parse(readFileSync(nativePath, 'utf8'))
+      // Top-level nao gerenciado e preservado.
+      expect(content.unrelated).toBe('preserve-me')
+      // Entrada manual (nao declarada no canônico, nao gerenciada) e preservada.
+      expect(content.mcpServers['manual-server']).toMatchObject({
+        type: 'stdio',
+        command: 'manual-cmd',
+      })
+      // Entrada canonica sobrescrita.
+      expect(content.mcpServers.web).toMatchObject({
+        type: 'stdio',
+        command: 'npx',
+        args: ['run', 'web'],
+      })
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('web')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('vscode: sem lock, sobrescride entradas canonicas e preserva comentarios fora da raiz gerenciada + inputs + entrada manual', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      persistCanonicalConfig('project', ctx, {
+        $schema: SCHEMA_URL,
+        mcpServers: {
+          web: { type: 'stdio', command: 'npx', args: ['run', 'web'] },
+        },
+      })
+
+      // Native JSONC ja existe (fresh clone: lock ausente) com comentario
+      // FORA da chave gerenciada, inputs e entrada manual nao declarada.
+      const nativeDir = join(ctx.cwd, '.vscode')
+      mkdirSync(nativeDir, { recursive: true })
+      const nativePath = join(nativeDir, 'mcp.json')
+      writeFileSync(
+        nativePath,
+        `// Configuracao do VS Code (fora de servers - comentario preservado)\n{\n  "inputs": [\n    { "id": "token", "type": "promptString", "label": "Token" }\n  ],\n  // Comentario dentro de servers pode ser normalizado\n  "servers": {\n    "manual-server": { "type": "stdio", "command": "manual-cmd" }\n  }\n}\n`,
+      )
+
+      const summary = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['vscode'],
+        dryRun: false,
+        yes: true,
+      })
+
+      expect(summary.errors).toEqual([])
+
+      const content = readFileSync(nativePath, 'utf8')
+      // Comentario e inputs FORA da raiz gerenciada sobrevivem.
+      expect(content).toContain('Configuracao do VS Code')
+      expect(content).toContain('"inputs"')
+      expect(content).toContain('"token"')
+      // Entrada manual preservada (nao declarada no canônico).
+      expect(content).toContain('"manual-server"')
+      // Entrada canonica sobrescrita.
+      expect(content).toContain('"web"')
+      expect(content).toContain('"command": "npx"')
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('web')
+    } finally {
       cleanup()
     }
   })

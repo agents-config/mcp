@@ -184,10 +184,10 @@ AI coding agent maintainers wishing to adopt native support for `.agents/mcp.jso
 
 The specification defines a canonical, shareable file; tooling state MUST NOT leak into it.
 
-1. **Sync state:** Implementations MAY keep a local state file at `.agents/.mcp-sync-state.json` (project scope) and `~/.agents/.mcp-sync-state.json` (global scope). Its format is implementation-defined. It MUST be listed in `.gitignore` and MUST NOT be required by conformant readers of `.agents/mcp.json`.
+1. **Sync state:** Implementations MAY keep a local lock file at `.agents/mcp-lock.json` (project scope) and `~/.agents/mcp-lock.json` (global scope). A legacy file at `.agents/.mcp-sync-state.json` is read as a fallback. Its format is implementation-defined. Implementations MUST NOT add the lock file (or its legacy name) to `.gitignore` automatically; implementers MAY version it. The lock MUST NOT be required by conformant readers of `.agents/mcp.json`.
 2. **Secrets:** Real values live only in `.env` (project scope) or `~/.agents/.env` (global scope), never in `.agents/mcp.json`. `.env.example` contains key names only.
 3. **Agent files:** Native agent configuration files belong to the user. Compilers MUST NOT add them to `.gitignore`, and MUST NOT delete or move them.
-4. **Gitignore changes:** The only entries a compiler may add to `.gitignore` are `.env` and the sync-state file, and only when it is about to write those files.
+4. **Gitignore changes:** The only entry a compiler may add to `.gitignore` is `.env`, and only when it is about to write that file.
 
 ## 10. Compiler Safety Guarantees
 

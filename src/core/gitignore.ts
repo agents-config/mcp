@@ -1,9 +1,9 @@
 /**
- * Minimal, lazy `.gitignore` management for tool-owned secrets and state.
+ * Minimal, lazy `.gitignore` management for tool-owned secrets.
  *
- * Implements BLUEPRINT §8.6: adds a managed block only for `.env` and the sync
- * state file, lazily (only when something is about to be written), never
- * touching agent configuration files, never duplicating entries.
+ * Implements BLUEPRINT §8.6: adds a managed block only for `.env`, lazily
+ * (only when something is about to be written), never touching agent
+ * configuration files, never duplicating entries.
  */
 
 import { execFileSync } from 'node:child_process'

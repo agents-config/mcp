@@ -268,8 +268,10 @@ export const addCommand = defineCommand({
           if (candidate in canonical && !force) {
             return 'canonical'
           }
-          // Unmanaged plugin collision: re-prompt for a different name.
+          // Unmanaged plugin collision: re-prompt only for names NOT declared
+          // in .agents/mcp.json — declared names can be adopted by sync.
           if (
+            !(candidate in canonical) &&
             isUnmanagedPluginCollision(
               scope,
               ctx,
@@ -346,9 +348,11 @@ export const addCommand = defineCommand({
     }
 
     // Non-interactive: fail on unmanaged plugin collision (no auto-rename,
-    // no overwrite).
+    // no overwrite), but only when the name is NOT declared in
+    // .agents/mcp.json — declared names can be adopted by sync.
     if (
       !interactiveAdd &&
+      !(name in canonical) &&
       isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)
     ) {
       ui.error(

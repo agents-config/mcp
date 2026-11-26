@@ -16,6 +16,7 @@ import {
   getStatePath,
   loadState,
   writeState,
+  type LoadStateResult,
   type SyncState,
 } from '$/src/core/state'
 import { resolveTargetsAsync } from '$/src/adapters/index'
@@ -24,7 +25,7 @@ import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import type { AgentId, AgentAdapter } from '$/src/adapters/types'
 import { getAdapter } from '$/src/adapters/index'
 import type { CanonicalServer, CanonicalMcpConfig } from '$/src/core/schema'
-import { AGENTS_DIR, CONFIG_FILE, STATE_FILE } from '$/src/config'
+import { AGENTS_DIR, CONFIG_FILE } from '$/src/config'
 
 export { writeFileAtomic } from '$/src/core/fs-atomic'
 
@@ -97,7 +98,7 @@ export function loadCanonicalOrExit(
 export function loadSyncState(
   scope: ConfigScope,
   ctx: RuntimeContext,
-): { state: SyncState; warnings: string[] } {
+): LoadStateResult {
   return loadState(scope, ctx)
 }
 
@@ -259,4 +260,4 @@ export function parseAgentsFlag(
   return undefined
 }
 
-export { AGENTS_DIR, CONFIG_FILE, STATE_FILE, type CanonicalServer }
+export { AGENTS_DIR, CONFIG_FILE, type CanonicalServer }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Sync state renamed to `.agents/mcp-lock.json` (project) and `~/.agents/mcp-lock.json` (global); `STATE_VERSION` stays `1` with a legacy read fallback for `.mcp-sync-state.json`.
+- Lock file is no longer auto-added to `.gitignore`; teams choose whether to version it. `.env` remains the only auto-protected entry.
+- `sync` is authoritative from `.agents/mcp.json`: it adopts declared plugin dirs (overwriting `plugin.json`/`mcp.json`/`mcp_config.json` while preserving extra files), overwrites canonical native entries, and preserves manual content.
+- Zero-target `sync` succeeds: it materializes plugins, prints guidance, and exits `0`.
+
+### Fixed
+
+- Fresh-clone `sync` no longer fails with "pre-exists and is not managed by the CLI"; `add` still blocks undeclared unmanaged plugin names.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added

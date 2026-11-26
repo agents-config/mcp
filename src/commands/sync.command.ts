@@ -43,6 +43,7 @@ export const syncCommand = defineCommand({
       flag,
       dryRun,
       yes: isYesFlag(args),
+      allowEmptyTargets: true,
     })
 
     if (summary.errors.length > 0 && !dryRun) {

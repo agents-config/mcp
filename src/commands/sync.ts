@@ -23,11 +23,7 @@ import type { CanonicalServer } from '$/src/core/schema'
 import type { ConfigScope, RuntimeContext } from '$/src/core/context'
 import { loadValidatedConfig, ConfigValidationError } from '$/src/core/store'
 import { readTextFile } from '$/src/core/fs-atomic'
-import {
-  syncPluginFiles,
-  isUnmanagedPluginCollision,
-  removeManagedPlugin,
-} from '$/src/core/plugins'
+import { syncPluginFiles, removeManagedPlugin } from '$/src/core/plugins'
 
 export interface SyncOptions {
   scope: ConfigScope
@@ -110,7 +106,8 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     : await resolveTargetsAsync({ flag, state, ctx })
 
   if (!skipAgentSync && targets.length === 0 && !allowEmptyTargets) {
-    // Comportamento atual inalterado para `sync`/`remove`/`import`.
+    // Strict default: direct `runSync` callers, `remove`, and `import` keep
+    // exiting 1. The `sync` command opts in via `allowEmptyTargets`.
     ui.error(
       'No resolvable target agents. Pass --agents <list> (e.g. --agents cursor,vscode).',
     )
@@ -125,6 +122,11 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
         message: w,
       })),
     ]
+  // Surface sync-state notices (e.g. a legacy file was imported) as non-fatal
+  // STATE warnings, once per sync.
+  for (const notice of stateResult.notices) {
+    allWarnings.push({ code: 'STATE', agent: undefined, message: notice })
+  }
 
   // 3. Compile + write per target adapter.
   const written: string[] = []
@@ -193,9 +195,14 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     }
   }
 
-  // 3b. Plugin sync: generate .agents/plugins/<name>/ for every canonical
-  // server (plugin.json + mcp.json always; mcp_config.json when antigravity
-  // is targeted). Skip unmanaged pre-existing plugin dirs.
+  // 3b. Plugin sync: .agents/mcp.json is authoritative — for every canonical
+  // server generate/overwrite .agents/plugins/<name>/ (plugin.json +
+  // mcp.json always; mcp_config.json when antigravity is targeted) and adopt
+  // the name into managedPlugins, regardless of pre-existing directories or
+  // lock membership. Files in the plugin directory other than the three
+  // managed filenames are never touched. Names not declared in .agents/mcp.json
+  // are never visited (unmanaged dirs outside the canonical config stay
+  // untouched and unreported).
   const includeAntigravity = skipAgentSync
     ? Boolean(
         flag?.includes('antigravity') || state.targets.includes('antigravity'),
@@ -212,14 +219,6 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
     // B8: when `onlyPluginNames` is set, generate only the requested plugins
     // requested (e.g. `add` writes only the plugin for the newly added server).
     if (onlyPluginNames && !onlyPluginNames.includes(name)) {
-      continue
-    }
-    if (isUnmanagedPluginCollision(scope, ctx, name, state.managedPlugins)) {
-      allWarnings.push({
-        code: 'PLUGIN_UNMANAGED',
-        agent: undefined,
-        message: `.agents/plugins/${name}/ pre-exists and is not managed by the CLI; skipped in sync. Use a different name.`,
-      })
       continue
     }
 
@@ -333,9 +332,7 @@ export async function runSync(options: SyncOptions): Promise<SyncSummary> {
 
   // 5. Print summary.
   const isPluginError = (code: string): boolean =>
-    code === 'PLUGIN_WRITE_ERROR' ||
-    code === 'PLUGIN_UNMANAGED' ||
-    code === 'PLUGIN_CLEANUP_ERROR'
+    code === 'PLUGIN_WRITE_ERROR' || code === 'PLUGIN_CLEANUP_ERROR'
   const pluginErrors = allWarnings
     .filter((w) => isPluginError(w.code))
     .map((w) => w.message)

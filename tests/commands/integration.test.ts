@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runSync } from '$/src/commands/sync'
+import { main } from '$/src/index'
 import { removeCommand } from '$/src/commands/remove.command'
 import { persistCanonicalConfig } from '$/src/commands/util'
 import { loadState, emptyState, writeState } from '$/src/core/state'
@@ -40,9 +41,9 @@ describe('commands integration', () => {
       expect(content).toContain('mcpServers')
       expect(content).toContain('github')
 
-      // Verify state was updated
+      // Verify state was updated (lock file)
       const stateContent = readFileSync(
-        `${ctx.cwd}/.agents/.mcp-sync-state.json`,
+        `${ctx.cwd}/.agents/mcp-lock.json`,
         'utf8',
       )
       expect(stateContent).toContain('claude-code')
@@ -88,7 +89,7 @@ describe('commands integration', () => {
     }
   })
 
-  it('sync with no resolvable targets exits 1', async () => {
+  it('runSync strict default: zero resolvable targets exits 1 (programmatic caller)', async () => {
     const { ctx, cleanup } = createSandbox()
     try {
       persistCanonicalConfig('project', ctx, {
@@ -111,6 +112,63 @@ describe('commands integration', () => {
       } finally {
         exitSpy.mockRestore()
       }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('sync COMMAND com zero alvos resolviveis sai com 0, materializa plugins e imprime orientacao de sem-alvo', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const logged: string[] = []
+    try {
+      // Canonical com servidores, mas nenhum arquivo nativo de agente => zero alvos detectados.
+      persistCanonicalConfig('project', ctx, {
+        $schema: 'https://example.com/schema.json',
+        mcpServers: {
+          github: {
+            type: 'stdio',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+          },
+        },
+      })
+
+      const savedArgv = process.argv
+      const savedCwd = process.cwd()
+      const savedExit = process.exit
+      const savedLog = console.log
+      let exitCode: number | undefined
+      process.argv = ['node', 'index.js', 'sync', '--yes']
+      process.chdir(ctx.cwd)
+      process.exit = ((code: number) => {
+        exitCode = code
+      }) as unknown as NodeJS.Process['exit']
+      console.log = ((message: unknown) => {
+        logged.push(String(message))
+      }) as typeof console.log
+
+      try {
+        await main()
+        expect(exitCode).toBeUndefined() // comando nao chama process.exit (sucesso)
+      } finally {
+        process.argv = savedArgv
+        process.chdir(savedCwd)
+        process.exit = savedExit
+        console.log = savedLog
+      }
+
+      // Plugin files materializados pela fase de plugin (mesmo sem alvos).
+      const pluginDir = join(ctx.cwd, '.agents/plugins/github')
+      expect(existsSync(join(pluginDir, 'plugin.json'))).toBe(true)
+      expect(existsSync(join(pluginDir, 'mcp.json'))).toBe(true)
+
+      // Lock persistido.
+      expect(existsSync(join(ctx.cwd, '.agents', 'mcp-lock.json'))).toBe(true)
+
+      // Orientacao de "sem alvos" foi impressa.
+      const output = logged.join('\n')
+      expect(output).toContain('No target agents')
+      expect(output).toContain('agents-mcp sync --agents')
     } finally {
       cleanup()
     }

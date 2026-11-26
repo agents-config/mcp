@@ -1,8 +1,12 @@
 import { z } from 'zod'
 import { AgentIdSchema } from '$/src/core/schema'
-import { AGENTS_DIR, STATE_FILE, STATE_VERSION } from '$/src/config'
+import {
+  AGENTS_DIR,
+  LEGACY_STATE_FILE,
+  STATE_FILE,
+  STATE_VERSION,
+} from '$/src/config'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
-import { ensureIgnored } from '$/src/core/gitignore'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
 
 export type AgentId = z.infer<typeof AgentIdSchema>
@@ -25,6 +29,8 @@ export interface SyncState {
 export interface LoadStateResult {
   state: SyncState
   warnings: string[]
+  /** Non-fatal hints surfaced to the user (e.g. a legacy file was imported). */
+  notices: string[]
 }
 
 const SyncStateAgentSchema = z.object({
@@ -61,45 +67,98 @@ export function getStatePath(scope: ConfigScope, ctx: RuntimeContext): string {
   return `${base}/${AGENTS_DIR}/${STATE_FILE}`
 }
 
+export function getLegacyStatePath(
+  scope: ConfigScope,
+  ctx: RuntimeContext,
+): string {
+  const base = scope === 'project' ? ctx.cwd : ctx.homeDir
+  return `${base}/${AGENTS_DIR}/${LEGACY_STATE_FILE}`
+}
+
 /**
- * Load the sync state. Missing file → empty state, no warning.
- * Corrupt / unknown-version file → warn, treat as empty.
+ * Parse a sync state file with `SyncStateSchema`.
+ *
+ * The caller handles the missing-file case before calling this. Returns the
+ * parsed state on success, or a warning for corrupt JSON / invalid shape.
+ */
+function parseStateFile(
+  raw: string,
+  path: string,
+): { state: SyncState } | { warning: string } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { warning: `Corrupt sync state at ${path}; treating as empty` }
+  }
+
+  const result = SyncStateSchema.safeParse(parsed)
+  if (!result.success) {
+    return { warning: `Invalid sync state at ${path}; treating as empty` }
+  }
+
+  return { state: result.data }
+}
+
+/**
+ * Load the sync state with precedence: new lock (`.agents/mcp-lock.json`)
+ * → legacy file (`.mcp-sync-state.json`) → empty state.
+ *
+ * - Neither file present → empty state, no warning.
+ * - New lock present and valid → it wins; the legacy file is ignored silently.
+ * - New lock corrupt/invalid → warning + empty state; NO fallback to legacy
+ *   (avoid resurrecting stale state over a newer corrupt file).
+ * - New absent + legacy valid → legacy state plus a non-fatal notice.
+ * - New absent + legacy corrupt → warning + empty state.
  */
 export function loadState(
   scope: ConfigScope,
   ctx: RuntimeContext,
 ): LoadStateResult {
-  const path = getStatePath(scope, ctx)
-  const raw = readTextFile(path)
-  if (raw === null) {
-    return { state: emptyState(scope), warnings: [] }
+  const lockPath = getStatePath(scope, ctx)
+  const legacyPath = getLegacyStatePath(scope, ctx)
+
+  // 1. New lock file.
+  const lockRaw = readTextFile(lockPath)
+  if (lockRaw !== null) {
+    const parsed = parseStateFile(lockRaw, lockPath)
+    if ('state' in parsed) {
+      return { state: parsed.state, warnings: [], notices: [] }
+    }
+    // Corrupt/invalid new lock: warn + empty, never read the legacy file.
+    return { state: emptyState(scope), warnings: [parsed.warning], notices: [] }
   }
 
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
+  // 2. Legacy fallback: only when the new lock is absent.
+  const legacyRaw = readTextFile(legacyPath)
+  if (legacyRaw !== null) {
+    const parsed = parseStateFile(legacyRaw, legacyPath)
+    if ('state' in parsed) {
+      return {
+        state: parsed.state,
+        warnings: [],
+        notices: [
+          `Legacy sync state at ${legacyPath} was imported; it will be replaced by ${lockPath} on the next write. You can delete the legacy file.`,
+        ],
+      }
+    }
     return {
       state: emptyState(scope),
-      warnings: [`Corrupt sync state at ${path}; treating as empty`],
+      warnings: [parsed.warning],
+      notices: [],
     }
   }
 
-  const result = SyncStateSchema.safeParse(parsed)
-  if (!result.success) {
-    return {
-      state: emptyState(scope),
-      warnings: [`Invalid sync state at ${path}; treating as empty`],
-    }
-  }
-
-  return { state: result.data, warnings: [] }
+  // 3. Neither file exists → empty state.
+  return { state: emptyState(scope), warnings: [], notices: [] }
 }
 
 /**
- * Write the sync state atomically. No root-level `updatedAt` is emitted — the
- * per-agent `updatedAt` is updated only when that agent's `names`/`path`
- * actually changes, so identical states produce byte-identical files.
+ * Write the sync state (`.agents/mcp-lock.json`) atomically. No root-level
+ * `updatedAt` is emitted — the per-agent `updatedAt` is updated only when
+ * that agent's `names`/`path` actually changes, so identical states produce
+ * byte-identical files. Never touches `.gitignore` and never writes or
+ * deletes the legacy state file.
  */
 export function writeState(
   scope: ConfigScope,
@@ -107,11 +166,6 @@ export function writeState(
   state: SyncState,
 ): void {
   const path = getStatePath(scope, ctx)
-  // Lazily protect the project-scope sync state file inside the managed
-  // .gitignore block before writing it.
-  if (scope === 'project') {
-    ensureIgnored(ctx.cwd, [`${AGENTS_DIR}/${STATE_FILE}`])
-  }
   writeFileAtomic(path, JSON.stringify(state, null, 2) + '\n')
 }
 

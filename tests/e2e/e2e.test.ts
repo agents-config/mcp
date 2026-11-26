@@ -200,9 +200,7 @@ describe('E2E: agents-mcp full flow', () => {
       // Native file should not exist
       const fs = await import('node:fs')
       expect(fs.existsSync(`${ctx.cwd}/.mcp.json`)).toBe(false)
-      expect(fs.existsSync(`${ctx.cwd}/.agents/.mcp-sync-state.json`)).toBe(
-        false,
-      )
+      expect(fs.existsSync(`${ctx.cwd}/.agents/mcp-lock.json`)).toBe(false)
     } finally {
       cleanup()
     }
@@ -237,6 +235,91 @@ describe('E2E: agents-mcp full flow', () => {
         strict: false,
       } as Parameters<typeof runDoctor>[0])
       expect(doctorResult.errors).toBe(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('fresh clone: mcp.json + diretorio de plugin pre-existente (sem lock) -> sync adota o plugin e sai com 0', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+      // Diretorio de plugin pre-existente com um sentinel (sem lock).
+      const pluginDir = `${ctx.cwd}/.agents/plugins/github`
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinel = `${pluginDir}/sentinel.txt`
+      writeFileSync(sentinel, 'FRESH-CLONE-KEEP')
+
+      let exitCode: number | undefined
+      const savedExit = process.exit
+      process.exit = ((code: number) => {
+        exitCode = code
+      }) as unknown as NodeJS.Process['exit']
+      try {
+        const result = await runSync({
+          scope: 'project',
+          ctx,
+          flag: ['claude-code'],
+          dryRun: false,
+          yes: true,
+        } as Parameters<typeof runSync>[0])
+        expect(result.errors).toEqual([])
+      } finally {
+        process.exit = savedExit
+      }
+      expect(exitCode).toBeUndefined() // sincronizacao bem-sucedida => nao chama exit (exit 0)
+
+      // Sentinel preservado, arquivos gerenciados sobrescritos (adocao).
+      expect(readFileSync(sentinel, 'utf8')).toBe('FRESH-CLONE-KEEP')
+      expect(
+        JSON.parse(readFileSync(`${pluginDir}/plugin.json`, 'utf8')).name,
+      ).toBe('github')
+      expect(existsSync(`${pluginDir}/mcp.json`)).toBe(true)
+
+      // Lock criado e registra o plugin como gerenciado.
+      const lock = `${ctx.cwd}/.agents/mcp-lock.json`
+      expect(existsSync(lock)).toBe(true)
+      const stateContent = readFileSync(lock, 'utf8')
+      expect(stateContent).toContain('github')
+
+      // sync nao cria nem toca .gitignore com o nome do lock.
+      const gitignore = `${ctx.cwd}/.gitignore`
+      if (existsSync(gitignore)) {
+        expect(readFileSync(gitignore, 'utf8')).not.toContain('mcp-lock')
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('plain sync nao cria .gitignore contendo o nome do lock', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      createMockBinaries(ctx)
+      persistCanonicalConfig('project', ctx, {
+        $schema: CANONICAL_CONFIG.$schema,
+        mcpServers: {
+          github: CANONICAL_CONFIG.mcpServers.github,
+        },
+      })
+
+      const result = await runSync({
+        scope: 'project',
+        ctx,
+        flag: ['claude-code'],
+        dryRun: false,
+        yes: true,
+      } as Parameters<typeof runSync>[0])
+      expect(result.errors).toEqual([])
+
+      const gitignore = `${ctx.cwd}/.gitignore`
+      expect(existsSync(gitignore)).toBe(false)
     } finally {
       cleanup()
     }

@@ -296,7 +296,7 @@ describe('doctor', () => {
     }
   })
 
-  it('state error: corrupt state', async () => {
+  it('state error: corrupt lock (.agents/mcp-lock.json) nao faz fallback ao legacy', async () => {
     const { ctx, cleanup } = createSandbox()
     try {
       writeFileAtomic(
@@ -306,10 +306,21 @@ describe('doctor', () => {
           mcpServers: {},
         }),
       )
-      // Write corrupt state
+      // Lock novo corrompido: deve virar aviso de estado vazio, sem ler o legacy.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp-lock.json'),
+        '{ not valid json',
+      )
+      // Legacy tambem presente (valido) mas deve ser ignorado porque o lock novo existe.
       writeFileAtomic(
         join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
-        '{ not valid json',
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+          agents: {},
+          managedPlugins: [],
+        }),
       )
 
       const result = await runDoctor({
@@ -322,6 +333,63 @@ describe('doctor', () => {
       const stateErrors = result.results.filter((r) => r.code === 'STATE')
       expect(stateErrors.length).toBeGreaterThan(0)
       expect(result.errors).toBeGreaterThan(0)
+      // Nenhum aviso de importacao de legacy (o lock novo venceu, mesmo corrompido).
+      const notices = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'warning',
+      )
+      expect(notices.some((n) => n.message.includes('.mcp-sync-state'))).toBe(
+        false,
+      )
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('state warning: apenas legacy (.mcp-sync-state.json) e importado com aviso STATE (nao e erro)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    try {
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', 'mcp.json'),
+        JSON.stringify({
+          $schema: DEFAULT_SCHEMA_URL,
+          mcpServers: {},
+        }),
+      )
+      // Apenas o arquivo legacy existe, valido. Nao ha lock novo.
+      writeFileAtomic(
+        join(ctx.cwd, '.agents', '.mcp-sync-state.json'),
+        JSON.stringify({
+          version: 1,
+          scope: 'project',
+          targets: [],
+          agents: {},
+          managedPlugins: [],
+        }),
+      )
+
+      const result = await runDoctor({
+        scope: 'project',
+        ctx,
+        flag: undefined,
+        dryRun: false,
+        strict: false,
+      })
+      const stateWarnings = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'warning',
+      )
+      expect(stateWarnings.length).toBeGreaterThan(0)
+      expect(
+        stateWarnings.some((w) => w.message.includes('.mcp-sync-state')),
+      ).toBe(true)
+      expect(
+        stateWarnings.some((w) => w.message.includes('mcp-lock.json')),
+      ).toBe(true)
+      // Nao deve ser um erro: sem strict nao falha.
+      const stateErrors = result.results.filter(
+        (r) => r.code === 'STATE' && r.severity === 'error',
+      )
+      expect(stateErrors.length).toBe(0)
+      expect(result.errors).toBe(0)
     } finally {
       cleanup()
     }

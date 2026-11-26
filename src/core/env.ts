@@ -10,7 +10,7 @@
 import { basename, dirname, join } from 'node:path'
 import { readTextFile, writeFileAtomic } from '$/src/core/fs-atomic'
 import type { RuntimeContext, ConfigScope } from '$/src/core/context'
-import { AGENTS_DIR, ENV_FILE, STATE_FILE } from '$/src/config'
+import { AGENTS_DIR, ENV_FILE } from '$/src/config'
 import type { CanonicalServer } from '$/src/core/schema'
 import { isStdioServer, isHttpServer } from '$/src/core/schema'
 import { SECRET_KEY_RE, derivedKey } from '$/src/core/placeholder'
@@ -396,7 +396,8 @@ function deepCloneServer(server: CanonicalServer): CanonicalServer {
 /**
  * Append `writes` to the `.env` at `path`, creating it with mode `0600` when
  * missing. Never overwrites an existing key; warns when a key exists with a
- * different value. Ensures `.env` (and the sync state) are git-ignored first.
+ * different value. Ensures `.env` (and only `.env`) is git-ignored first;
+ * the sync state file is never added to `.gitignore`.
  */
 export function appendToDotenv(
   path: string,
@@ -410,7 +411,7 @@ export function appendToDotenv(
   // ~/.agents/.env (parent dir is .agents), project scope writes to <cwd>/.env.
   const isProjectScope = basename(rootDir) !== AGENTS_DIR
   if (isProjectScope) {
-    ensureIgnored(rootDir, [ENV_FILE, `${AGENTS_DIR}/${STATE_FILE}`])
+    ensureIgnored(rootDir, [ENV_FILE])
   }
 
   let existing: Record<string, string> = {}

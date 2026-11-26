@@ -184,7 +184,8 @@ export const SCHEMA_DRAFT = 'draft-07'
 
 export const AGENTS_DIR = '.agents'
 export const CONFIG_FILE = 'mcp.json'
-export const STATE_FILE = '.mcp-sync-state.json'
+export const STATE_FILE = 'mcp-lock.json'
+export const LEGACY_STATE_FILE = '.mcp-sync-state.json'
 export const STATE_VERSION = 1
 export const ENV_FILE = '.env'
 export const ENV_EXAMPLE_FILE = '.env.example'
@@ -407,18 +408,24 @@ interface SyncState {
 }
 ```
 
-Location: `<state dir>/.mcp-sync-state.json`, where the state dir is `<cwd>/.agents`
-or `<homeDir>/.agents`. Rules:
+Location: `<state dir>/mcp-lock.json`, where the state dir is `<cwd>/.agents`
+or `<homeDir>/.agents`. A legacy file at `.agents/.mcp-sync-state.json` (or
+`~/.agents/.mcp-sync-state.json`) is read as a fallback. Rules:
 
 - Missing file → empty state, no warning.
 - Corrupt/unknown-version file → warn, treat as empty, and rewrite on next
   successful `sync`.
+- Lock precedence: new lock file → legacy file → empty state. Using the legacy
+  file emits a non-fatal notice (not an error). A corrupt new lock never falls
+  back to the legacy file.
 - `targets` is the persisted agent selection. It is the second source of truth for
   `sync` (after `--agents`, before auto-detection).
 - `names` per agent is the authoritative `previousManagedNames` set.
 - `import` seeds `names` for every agent it read, even with `--no-sync`.
 - `remove` and `sync` prune names no longer present in the canonical file.
-- State is always written atomically and is git-ignored.
+- State is always written atomically; schema and `STATE_VERSION` stay `1`.
+- The lock is **not** auto-added to `.gitignore`; implementers MAY version it.
+  Only `.env` is auto-protected.
 
 ### 8.4 `core/placeholder.ts`
 
@@ -457,7 +464,7 @@ substitutes values.
 
 ### 8.6 `core/gitignore.ts`
 
-Minimal, lazy, and only for tool-owned secrets/state:
+Minimal, lazy, and only for tool-owned secrets:
 
 - `ensureIgnored(rootDir, entries)` adds a managed block only when something is
   about to be written:
@@ -465,11 +472,10 @@ Minimal, lazy, and only for tool-owned secrets/state:
   ```gitignore
   # agents-mcp local (managed)
   .env
-  .agents/.mcp-sync-state.json
   ```
 
-- Called by `env.appendToDotenv` and `state.writeState`, never by `init`/`sync` on
-  their own.
+- Called by `env.appendToDotenv` only (never by `state.writeState`, `init`, or
+  `sync` on their own). `writeState` never touches `.gitignore`.
 - Never touches agent configuration files. Never ignores shared settings.
 - If an entry is already covered by another pattern, do not duplicate it.
 - If `.env` is already tracked by Git, warn with
@@ -893,3 +899,6 @@ lines/functions and 75% branches over `src/core` and `src/adapters`.
 | [0009](../docs/decisions/0009-typescript-7-removes-baseurl.md) | TypeScript 7 removes `baseUrl`; keep TS 7 with tsconfig-relative `paths`. |
 | [0010](../docs/decisions/0010-adopt-agent-plugins-mcp-schema.md) | Adopt Agent Plugins MCP 1.0.0 as the normative basis. |
 | [0011](../docs/decisions/0011-plugin-lifecycle-and-safe-cleanup.md) | Plugin ownership via `managedPlugins` and safe, non-recursive cleanup. |
+| [0012](../docs/decisions/0012-adapter-storage-layout.md) | Explicit adapter storage layout (`single-file` vs `per-plugin`). |
+| [0013](../docs/decisions/0013-non-destructive-antigravity-and-additive-sync-targets.md) | Non-destructive Antigravity sync and additive `state.targets`. |
+| [0014](../docs/decisions/0014-mcp-lock-and-authoritative-sync.md) | `.agents/mcp-lock.json` and authoritative `sync` from `.agents/mcp.json`. |

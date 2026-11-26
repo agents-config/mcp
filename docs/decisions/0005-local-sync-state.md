@@ -1,6 +1,6 @@
 # ADR-0005: Local sync state and persisted agent targets
 
-- **Status**: Accepted
+- **Status**: Partially superseded by [ADR-0014](./0014-mcp-lock-and-authoritative-sync.md) (state filename and Git-ignored rule)
 - **Date**: 2026-11-13
 - **Related Docs**: [`spec/BLUEPRINT.md`](../../spec/BLUEPRINT.md)
 

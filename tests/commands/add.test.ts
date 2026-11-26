@@ -510,6 +510,48 @@ describe('commands add (B3/T5: --agents, --no-sync and plugin generation)', () =
       cleanup()
     }
   })
+
+  it('plugin dir existente com nome declarado no canônico e adotado por add --force (sem bloqueio; arquivos sobrescritos; registrado em managedPlugins)', async () => {
+    const { ctx, cleanup } = createSandbox()
+    const ui = setupUi(ctx)
+    try {
+      // Declara `my-tool` no canônico e deixa um diretorio de plugin pre-existente.
+      persistCanonicalConfig('project', ctx, {
+        $schema: DEFAULT_SCHEMA_URL,
+        mcpServers: {
+          'my-tool': { type: 'stdio', command: 'npx', args: [] },
+        },
+      })
+      const pluginDir = join(ctx.cwd, '.agents/plugins/my-tool')
+      mkdirSync(pluginDir, { recursive: true })
+      const sentinelPath = join(pluginDir, 'sentinel.txt')
+      writeFileSync(sentinelPath, 'ADOTADO')
+
+      await addCommand.run!({
+        args: baseArgs({ force: true, name: 'my-tool' }),
+        rawArgs: ['--command=npx', '--force'],
+      } as unknown as Parameters<NonNullable<typeof addCommand.run>>[0])
+
+      expect(exitSpy).not.toHaveBeenCalled()
+      expect(ui.error).not.toHaveBeenCalled()
+
+      // O sentinel (arquivo nao gerenciado) e preservado pela sincronizacao.
+      expect(readFileSync(sentinelPath, 'utf8')).toBe('ADOTADO')
+      // Os arquivos gerenciados sao sobrescritos/adotados.
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'plugin.json'), 'utf8')).name,
+      ).toBe('my-tool')
+      expect(
+        JSON.parse(readFileSync(join(pluginDir, 'mcp.json'), 'utf8'))
+          .mcpServers['my-tool'],
+      ).toBeDefined()
+
+      const state = loadState('project', ctx).state
+      expect(state.managedPlugins).toContain('my-tool')
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 describe('commands add (T6: integridade do índice canônico)', () => {
